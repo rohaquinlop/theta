@@ -16,6 +16,7 @@
 mod integration {
     use std::collections::HashMap;
 
+    use theta_ai::LlmProvider;
     use theta_ai::event::EventAccumulator;
     use theta_ai::model::Model;
     use theta_ai::providers::OpenAiCompatProvider;
@@ -23,7 +24,6 @@ mod integration {
         Api, ContentBlock, Context, Message, Modality, ModelCost, Provider, StopReason,
         StreamOptions, ThinkingLevel,
     };
-    use theta_ai::LlmProvider;
 
     /// Helper: create a simple OpenAI model for testing.
     fn test_model_openai() -> Model {
@@ -182,9 +182,7 @@ mod integration {
         ]);
 
         let context = Context {
-            system: Some(vec![ContentBlock::text(
-                "Answer briefly.",
-            )]),
+            system: Some(vec![ContentBlock::text("Answer briefly.")]),
             messages: vec![Message::User {
                 content: vec![ContentBlock::text("What is 2+2?")],
                 timestamp: 0,

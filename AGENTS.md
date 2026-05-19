@@ -22,16 +22,27 @@ Users should extend Theta without forking internals: custom tools via Rust trait
 Three layers, mirroring pi:
 
 ```
-theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes
-theta-agent-core (lib)  — agent runtime: loop, tool calling, events, state
-theta-ai (lib)          — unified LLM API: types, provider trait, streaming
-theta-tui (lib)         — terminal UI (ratatui + crossterm)
-theta-models (lib)      — built-in model catalog (compile-time)
+theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes  [Phase 3+]
+theta-agent-core (lib)  — agent runtime: loop, tool calling, events, state          [Phase 2 done]
+theta-ai (lib)          — unified LLM API: types, provider trait, streaming          [Phase 1 done]
+theta-tui (lib)         — terminal UI (ratatui + crossterm)                          [Phase 4+]
+theta-models (lib)      — built-in model catalog (compile-time)                      [Phase 1 done]
 ```
 
 **Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`)
 
 See `PLAN.md` for the full implementation plan and phase breakdown.
+
+## Phase Completion Status
+
+| Phase | Status | Deliverable |
+|-------|--------|-------------|
+| 1. Foundation | Done | `theta-ai` + `theta-models` |
+| 2. Agent Runtime | Done | `theta-agent-core` |
+| 3. CLI + Tools | Next | `theta` binary with built-in tools |
+| 4. TUI | Pending | `theta-tui` + interactive mode |
+| 5. Extensibility | Pending | Skills, templates, extension traits |
+| 6. Polish | Pending | Compaction, docs, releases |
 
 ## Rust Conventions
 
@@ -44,7 +55,9 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 - **No `unsafe`** unless absolutely necessary and documented with a safety comment.
 - **No panic in library code paths.** Libraries return `Result`, never abort.
 - **Traits over inheritance.** Extension points are `#[async_trait]` traits.
-- **`Arc<RwLock<T>>`** for shared mutable state in the Agent. Avoid `Mutex` for hot paths.
+- **`tokio::sync::RwLock` over `std::sync::RwLock`** for any state held across `.await` points. The std variant makes futures `!Send`.
+- **`std::sync::Mutex` for short-lived locks** that never cross await. `tokio::sync::Mutex` only when the lock must be held across `.await`.
+- **`Arc<Mutex<Vec<T>>>` for shared queues** between agent and loop — steer/follow-up push from external threads while the loop drains.
 - **Single-line helpers with one call site are forbidden.** Inline them.
 - **Read files in full** before wide-ranging changes. Don't rely only on `grep` snippets.
 
@@ -94,10 +107,10 @@ Seven built-in tools (same set as pi):
 - `find` — file search by name
 - `ls` — directory listing
 
-**Trait:**
+**Agent-level trait** (`theta-agent-core::AgentTool`):
 ```rust
 #[async_trait]
-pub trait Tool: Send + Sync {
+pub trait AgentTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn label(&self) -> &str;
@@ -106,9 +119,11 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, tool_call_id: &str, args: serde_json::Value,
                      signal: Option<CancellationToken>,
                      on_update: Option<ToolUpdateSender>)
-        -> Result<ToolResult>;
+        -> Result<ToolResult, AgentError>;
 }
 ```
+
+**LLM-level definition** (`theta_ai::Tool`) — separate struct for the JSON schema sent to the model, built from `AgentTool` at context-construction time.
 
 ## Extension Model (MVP)
 
@@ -136,7 +151,22 @@ Follow the phases in `PLAN.md`. Build bottom-up:
 4. `theta-tui` → terminal UI components
 5. `theta` → CLI + sessions + built-in tools + TUI integration
 
-**Do not skip ahead.** `theta-agent-core` cannot work before `theta-ai` is functional. The TUI cannot work before the agent loop emits events.
+**Do not skip ahead.** `theta-agent-core` cannot work before `theta-ai` is functional. The TUI cannot work before the agent loop emits events. Phases 3 and 4 can be worked in either order since the CLI binary depends on both `theta-agent-core` and `theta-tui`.
+
+## Agent Loop Design
+
+The agent loop uses a nested pattern:
+
+- **Outer loop** (follow-up turns): after each turn, checks hooks and follow-up/steering queues; drains them into state for the next turn.
+- **Inner loop** (tool calling): LLM call → accumulate stream events → if tool calls, execute tools → add results → call LLM again.
+
+**Steering vs Follow-up:**
+- `steer()`: injects message MID-TURN. Uses `AtomicBool` per-stream abort flag (not the permanent `CancellationToken`). After abort, inner loop drains steering queue and continues.
+- `follow_up()`: queues message for AFTER current turn completes. Outer loop picks it up.
+
+**Event flow:** `broadcast::channel(256)` — consumers subscribe via `agent.subscribe()`. `AgentEnd` is always emitted (even on error).
+
+**Hooks** (`beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`) — all `#[async_trait]` with default no-ops.
 
 ## Testing
 
