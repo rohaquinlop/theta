@@ -50,7 +50,7 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 
 ## Provider Strategy
 
-**One provider to rule them all.** OpenAI, DeepSeek, and OpenCode all speak OpenAI's `/v1/chat/completions` API. A single `OpenAiCompatProvider` handles all three with per-model compatibility flags:
+**One provider to rule them all.** OpenAI, DeepSeek, and OpenCode all speak OpenAI's `/v1/chat/completions` API. A single `OpenAiCompatProvider` handles all three with per-model compatibility flags. Codex (ChatGPT Plus) has its own `OpenAiCodexProvider` targeting `chatgpt.com/backend-api` with session-token auth.
 
 | Flag | Purpose |
 |------|---------|
@@ -61,10 +61,15 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 
 **Current models** (from `theta-models`):
 - **OpenAI**: `gpt-5.5`, `gpt-5.5-instant`, `o4`, `o4-mini`
+  — auth via `OPENAI_API_KEY`
+- **OpenAI Codex**: `gpt-5.5`, `gpt-5.5-instant`, `o4`, `o4-mini`
+  — auth via `OPENAI_CODEX_TOKEN` (ChatGPT Plus session token),
+  targets `https://chatgpt.com/backend-api`, no API key needed
 - **DeepSeek**: `deepseek-v4-pro` (1M ctx), `deepseek-v4-flash` (1M ctx)
 - **OpenCode**: OpenAI-compatible, user-configured base URL
 
-**API keys:** Read from env vars (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`) and from config file.
+**API keys:** Read from env vars (`OPENAI_API_KEY`, `OPENAI_CODEX_TOKEN`,
+`DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`) and from config file.
 
 **No Anthropic, no Google, no Mistral in MVP.** Those are deferred.
 
@@ -166,7 +171,7 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
 cargo run -- <args>
 ```
 
-**After code changes (not docs):** Run `cargo fmt --check && cargo clippy -- -D warnings && cargo test` before committing. Fix all warnings and errors.
+**After code changes (not docs):** Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before committing. Fix all warnings and errors.
 
 ## Git Rules
 
@@ -179,12 +184,12 @@ cargo run -- <args>
 
 ## Adding a New LLM Provider (Future)
 
-When a new provider is needed beyond the first three:
+When a new provider is needed beyond the first four:
 1. Add provider name to the `Provider` enum in `theta-ai/src/types.rs`
 2. If it's OpenAI-compatible: add compat flags to the `Model` struct, update `OpenAiCompatProvider`
-3. If it needs a new API: implement the `Provider` trait in `theta-ai/src/providers/`
+3. If it needs a new API or auth flow (like Codex): implement the `Provider` trait in `theta-ai/src/providers/`
 4. Add models to `theta-models/src/<provider>.rs`
-5. Add env var detection in `theta-ai/src/env_keys.rs`
+5. Add env var or auth token detection in the provider implementation
 6. Add default model to `theta/src/models.rs`
 7. Update `PLAN.md` and this file
 

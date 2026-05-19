@@ -1,0 +1,34 @@
+//! Provider trait and type aliases for streaming LLM calls.
+
+use std::pin::Pin;
+
+use async_trait::async_trait;
+use futures::Stream;
+
+use super::error::ThetaError;
+use super::event::AssistantMessageEvent;
+use super::model::Model;
+use super::types::{Context, SimpleStreamOptions, StreamOptions};
+
+/// Type alias for a boxed, pinned stream of assistant message events.
+pub type EventStream<'a> = Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>;
+
+/// An LLM provider that can stream completions.
+#[async_trait]
+pub trait Provider: Send + Sync {
+    /// Stream a full conversation with tool calling support.
+    async fn stream<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        options: &StreamOptions,
+    ) -> Result<EventStream<'a>, ThetaError>;
+
+    /// Stream a simple completion (no tool calling, simpler options).
+    async fn stream_simple<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<EventStream<'a>, ThetaError>;
+}
