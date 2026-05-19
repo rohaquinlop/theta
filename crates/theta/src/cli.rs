@@ -106,7 +106,8 @@ pub struct ForkArgs {
 #[derive(Debug, Args)]
 pub struct LoginArgs {
     /// Provider to login to (e.g. openai-codex).
-    pub provider: String,
+    /// If omitted, shows an interactive provider list.
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Args)]

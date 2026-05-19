@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
-use theta_ai::providers::ProviderRegistry;
+use theta_ai::providers::default_registry;
 use theta_ai::{ContentBlock, ModelCatalog};
 use theta_models::BuiltInCatalog;
 use tokio::sync::broadcast;
@@ -27,20 +27,12 @@ pub async fn run_prompt_print_mode(
     let session_mgr = SessionManager::new(working_dir);
     let mut session = session_mgr.open_by_id(session_id).await?;
 
-    // Resolve the model.
+    // Resolve model + auth with provider fallback.
     let catalog = BuiltInCatalog::new();
-    let model = find_model_by_id(&catalog, model_id)
-        .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
-        .clone();
-
-    // Auth token.
-    let provider_str = provider_to_string(model.provider);
-    let api_key = config.auth.get_token(&provider_str).ok_or_else(|| {
-        anyhow::anyhow!("no auth token for '{provider_str}'. Set env var or run `theta login`",)
-    })?;
+    let (model, api_key) = resolve_auth(config, &catalog, model_id).await?;
 
     // Provider registry.
-    let mut registry = ProviderRegistry::new();
+    let mut registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     // Register tools.
@@ -137,6 +129,49 @@ fn provider_to_string(provider: theta_ai::Provider) -> String {
     }
 }
 
+/// Resolve auth for a model with provider fallback.
+/// If the model's provider has no token, try other providers.
+async fn resolve_auth(
+    config: &ThetaConfig,
+    catalog: &BuiltInCatalog,
+    model_id: &str,
+) -> anyhow::Result<(theta_ai::Model, String)> {
+    let model = find_model_by_id(catalog, model_id)
+        .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
+        .clone();
+
+    let provider_str = provider_to_string(model.provider);
+    let mut auth_config = config.auth.clone();
+    let api_key = auth_config.get_api_key(&provider_str).await;
+
+    // If no auth for this provider, try others.
+    if let Some(ref key) = api_key {
+        return Ok((model, key.clone()));
+    }
+
+    let alt_providers = [
+        ("openai-codex", theta_ai::Provider::OpenAiCodex),
+        ("openai", theta_ai::Provider::OpenAI),
+        ("deepseek", theta_ai::Provider::DeepSeek),
+        ("opencode", theta_ai::Provider::OpenCode),
+    ];
+    for (prov_str, prov) in &alt_providers {
+        if prov_str == &provider_str {
+            continue;
+        }
+        if let Some(key) = auth_config.get_api_key(prov_str).await
+            && let Some(m) = catalog.list().into_iter().find(|m| {
+                m.provider == *prov
+                    && (m.id == model_id || m.id.starts_with(model_id))
+            })
+        {
+            return Ok((m.clone(), key));
+        }
+    }
+
+    anyhow::bail!("{}", crate::config::auth_error_message(&provider_str));
+}
+
 /// Continue the latest session in print mode.
 pub async fn run_continue_print_mode(
     config: &ThetaConfig,
@@ -164,18 +199,10 @@ pub async fn run_continue_print_mode(
         .unwrap_or_else(|| model_id.to_string());
 
     let catalog = BuiltInCatalog::new();
-    let model = find_model_by_id(&catalog, &effective_model)
-        .ok_or_else(|| anyhow::anyhow!("model not found: {effective_model}"))?
-        .clone();
-
-    // Auth token.
-    let provider_str = provider_to_string(model.provider);
-    let api_key = config.auth.get_token(&provider_str).ok_or_else(|| {
-        anyhow::anyhow!("no auth token for '{provider_str}'. Set env var or run `theta login`")
-    })?;
+    let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
     // Provider registry.
-    let mut registry = ProviderRegistry::new();
+    let mut registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     // Register tools.
@@ -297,17 +324,9 @@ pub async fn run_resume_print_mode(
         });
 
     let catalog = BuiltInCatalog::new();
-    let model = find_model_by_id(&catalog, &effective_model)
-        .ok_or_else(|| anyhow::anyhow!("model not found: {effective_model}"))?
-        .clone();
+    let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
-    let provider_str = provider_to_string(model.provider);
-    let api_key = config
-        .auth
-        .get_token(&provider_str)
-        .ok_or_else(|| anyhow::anyhow!("no auth token for '{provider_str}'"))?;
-
-    let mut registry = ProviderRegistry::new();
+    let mut registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());

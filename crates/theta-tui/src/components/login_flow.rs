@@ -162,10 +162,17 @@ impl LoginFlow {
             LoginStep::Provider => {
                 let filtered = self.current_filtered();
                 if let Some(provider) = filtered.get(self.selected_provider) {
-                    // Open browser for provider URL.
-                    let url = provider_token_url(&provider.id);
-                    let _ = open::that(url);
-                    self.step = LoginStep::TokenInput;
+                    if provider.auth_type == AuthType::Subscription {
+                        // Subscription providers use OAuth — no manual token input.
+                        // Use sentinel value "oauth" to signal the App to start OAuth.
+                        self.result = Some((provider.id.clone(), "oauth".into()));
+                        self.done = true;
+                    } else {
+                        // API key providers: open browser, then prompt for token.
+                        let url = provider_token_url(&provider.id);
+                        let _ = open::that(url);
+                        self.step = LoginStep::TokenInput;
+                    }
                 }
             }
             LoginStep::TokenInput => {
