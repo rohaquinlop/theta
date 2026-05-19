@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/theta-ai",
+    "crates/theta-agent-core",
+    "crates/theta-tui",
+    "crates/theta-models",
+    "crates/theta",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/user/theta"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
+eventsource-stream = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Traits
+async-trait = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Misc
+regex = "1"
+glob = "0.3"
+serde_yaml = "0.9"
+similar = "2"
+tempfile = "3"
+dirs = "6"
+
+# Internal crates
+theta-ai = { path = "crates/theta-ai" }
+theta-agent-core = { path = "crates/theta-agent-core" }
+theta-tui = { path = "crates/theta-tui" }
+theta-models = { path = "crates/theta-models" }
