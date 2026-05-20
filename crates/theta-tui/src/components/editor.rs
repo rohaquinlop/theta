@@ -390,23 +390,20 @@ impl Editor {
 
 impl Component for Editor {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let title = " Input ";
-
         let cursor_style = if self.focused {
             Style::default().fg(self.theme.accent).bg(Color::DarkGray)
         } else {
             Style::default().fg(self.theme.dim)
         };
 
+        let input_border = if self.focused {
+            self.theme.accent
+        } else {
+            self.theme.warning
+        };
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .title(title)
-            .title_style(if self.focused {
-                Style::default().fg(self.theme.accent)
-            } else {
-                Style::default().fg(self.theme.dim)
-            });
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(input_border));
 
         let inner = block.inner(area);
         let width = inner.width as usize;

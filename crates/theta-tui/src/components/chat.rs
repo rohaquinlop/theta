@@ -103,18 +103,8 @@ impl Chat {
     /// Format a message into styled lines with markdown parsing.
     fn format_message(&self, msg: &ChatMessage) -> Vec<Line<'static>> {
         let (prefix, role_style): (&str, Style) = match msg.role {
-            ChatRole::User => (
-                " ",
-                Style::default()
-                    .fg(self.theme.fg)
-                    .bg(self.theme.user_bubble),
-            ),
-            ChatRole::Assistant => (
-                "",
-                Style::default()
-                    .fg(self.theme.fg)
-                    .bg(self.theme.assistant_bubble),
-            ),
+            ChatRole::User => (" ", Style::default().fg(self.theme.fg)),
+            ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Tool => ("  ", Style::default().fg(self.theme.warning)),
             ChatRole::System => ("  ", Style::default().fg(self.theme.dim)),
         };
@@ -136,12 +126,6 @@ impl Chat {
 
         let mut lines = format_markdown(&text, role_style, &self.theme, prefix);
 
-        if msg.role == ChatRole::User {
-            for line in &mut lines {
-                line.spans.push(Span::styled(" ", role_style));
-            }
-        }
-
         if let Some(ref c) = cursor {
             if lines.is_empty() {
                 lines.push(Line::from(vec![
@@ -159,23 +143,9 @@ impl Chat {
 
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let title = " Chat ";
-
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.focused {
-                self.theme.accent
-            } else {
-                self.theme.border
-            }))
-            .padding(Padding::horizontal(1))
-            .title(title)
-            .title_style(Style::default().fg(if self.focused {
-                self.theme.accent
-            } else {
-                self.theme.dim
-            }));
-
+            .borders(Borders::NONE)
+            .padding(Padding::horizontal(1));
         let mut lines: Vec<Line> = Vec::new();
         for (idx, msg) in self.messages.iter().enumerate() {
             if idx > 0 {
@@ -259,6 +229,7 @@ fn format_markdown(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
+    let mut code_lang: Option<String> = None;
 
     for raw in text.lines() {
         let trimmed = raw.trim();
@@ -267,8 +238,15 @@ fn format_markdown(
         if let Some(lang) = trimmed.strip_prefix("```") {
             if in_code_block {
                 in_code_block = false;
+                code_lang = None;
             } else {
                 in_code_block = true;
+                let normalized = lang.trim().to_lowercase();
+                code_lang = if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized)
+                };
                 if !lang.is_empty() {
                     lines.push(Line::from(vec![Span::styled(
                         format!("{prefix}\u{2503} {lang}"),
@@ -287,17 +265,12 @@ fn format_markdown(
         }
 
         if in_code_block {
-            // Code block line: vertical bar prefix, code color.
-            let code_style = Style::default()
-                .fg(theme.code_fg.unwrap_or(Color::Cyan))
-                .bg(theme.code_bg);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{prefix}\u{2503} "),
-                    Style::default().fg(theme.border),
-                ),
-                Span::styled(raw.to_string(), code_style),
-            ]));
+            let mut spans = vec![Span::styled(
+                format!("{prefix}\u{2503} "),
+                Style::default().fg(theme.border),
+            )];
+            spans.extend(highlight_code_line(raw, code_lang.as_deref(), theme));
+            lines.push(Line::from(spans));
             continue;
         }
 
@@ -390,6 +363,38 @@ fn format_markdown(
     }
 
     lines
+}
+
+fn highlight_code_line(line: &str, lang: Option<&str>, theme: &Theme) -> Vec<Span<'static>> {
+    let base = Style::default().fg(theme.code_fg.unwrap_or(Color::Cyan));
+    if line.trim_start().starts_with("//") {
+        return vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.dim),
+        )];
+    }
+
+    if !matches!(lang, Some("rust") | Some("rs")) {
+        return vec![Span::styled(line.to_string(), base)];
+    }
+
+    let keywords = [
+        "fn", "pub", "struct", "impl", "trait", "enum", "let", "mut", "use", "mod", "match", "if",
+        "else", "for", "while", "loop", "return", "async", "await",
+    ];
+
+    line.split_inclusive(char::is_whitespace)
+        .map(|chunk| {
+            let token = chunk.trim();
+            if token.starts_with("\"") && token.ends_with("\"") && token.len() >= 2 {
+                Span::styled(chunk.to_string(), Style::default().fg(theme.success))
+            } else if keywords.contains(&token) {
+                Span::styled(chunk.to_string(), Style::default().fg(theme.warning))
+            } else {
+                Span::styled(chunk.to_string(), base)
+            }
+        })
+        .collect()
 }
 
 /// Apply inline formatting: `code` (dim/italic), **bold**, *italic*, ~~strike~~.
