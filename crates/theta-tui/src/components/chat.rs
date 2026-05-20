@@ -103,7 +103,9 @@ impl Chat {
 
     /// Format a message into styled lines with markdown parsing.
     fn format_message(&self, msg: &ChatMessage) -> Vec<Line<'static>> {
+        let is_skill_invocation = msg.role == ChatRole::User && msg.text.starts_with("/skill:");
         let (prefix, role_style): (&str, Style) = match msg.role {
+            ChatRole::User if is_skill_invocation => ("◈ ", Style::default().fg(self.theme.accent)),
             ChatRole::User => (" ", Style::default().fg(self.theme.fg)),
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Tool => ("  ", Style::default().fg(self.theme.warning)),
@@ -480,5 +482,26 @@ mod tests {
         let lines = format_markdown("before\n```rust\nlet x = 1;\n```\nafter", style, &theme, "");
         // before, code header, code line, after
         assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn test_skill_invocation_prefix_rendered() {
+        let chat = Chat::new(Theme::default());
+        let lines = chat.format_message(&ChatMessage {
+            role: ChatRole::User,
+            text: "/skill:git-commit".into(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        let first = lines
+            .first()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        assert!(first.starts_with("◈ "));
     }
 }
