@@ -114,9 +114,7 @@ fn build_tools_prompt(working_dir: &Path) -> String {
 ",
     );
     p.push_str(
-        "You have access to these tools. Use the XML invocation format.
-
-",
+        "You have access to these tools via native function-calling. Invoke tools directly, not by writing XML or pseudo-calls in text.\n\n",
     );
 
     for tool in &tools {
@@ -215,15 +213,39 @@ fn build_guidelines() -> String {
         "",
         "- Keep answers short and concise.",
         "- Use tools when you need to read files, edit code, or run commands.",
-        "- All tool invocations use the XML format shown above.",
-        r#"- String parameters need string=\"true\". Numbers/booleans use JSON."#,
+        "- Invoke tools using function-calling, not prose, plans, or XML-like text.",
         "- Read files before editing them.",
         "- Use edit (exact text replacement) not write for partial changes.",
-        "- Report what you did after completing tool calls.",
+        "- If the user asks you to implement/change code, do the work in this turn: run tools, apply edits, and validate.",
+        "- Do not stop at a plan/status update unless the user explicitly asked for a plan only.",
+        "- If blocked by missing info/permission, ask one precise question and stop.",
+        "- Report what you changed and validation results after completing tool calls.",
         "",
         "The following skills provide specialized instructions for specific tasks.",
         "Use the read tool to load a skill's SKILL.md file when the task matches its description.",
         "When a skill file references a relative path, resolve it against the skill directory.",
     ]
     .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_guidelines, build_tools_prompt};
+    use std::path::Path;
+
+    #[test]
+    fn tools_prompt_uses_function_calling_not_xml() {
+        let s = build_tools_prompt(Path::new("."));
+        assert!(s.contains("native function-calling"));
+        assert!(!s.contains("XML invocation format"));
+    }
+
+    #[test]
+    fn guidelines_enforce_execute_not_plan_only() {
+        let s = build_guidelines();
+        assert!(s.contains("Invoke tools using function-calling"));
+        assert!(s.contains("do the work in this turn"));
+        assert!(s.contains("Do not stop at a plan/status update"));
+        assert!(!s.contains("All tool invocations use the XML format"));
+    }
 }
