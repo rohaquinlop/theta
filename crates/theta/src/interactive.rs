@@ -202,7 +202,7 @@ pub async fn run_tui(
             if let Err(e) = agent.prompt(blocks).await {
                 tracing::error!("agent prompt failed: {e}");
                 let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));
-                break;
+                continue;
             }
 
             // Lazy session creation on first real message — no session

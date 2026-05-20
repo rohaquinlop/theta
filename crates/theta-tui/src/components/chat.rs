@@ -8,6 +8,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::components::{Action, Component};
 use crate::theme::Theme;
@@ -159,8 +160,10 @@ impl Component for Chat {
             lines.extend(self.format_message(msg));
         }
 
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(inner_height);
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let viewport_height = area.height as usize;
+        let total_visual_rows = visual_row_count(&lines, inner_width);
+        let max_scroll = total_visual_rows.saturating_sub(viewport_height);
         self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
         let scroll_top = max_scroll.saturating_sub(self.scroll_from_bottom);
 
@@ -219,6 +222,25 @@ fn truncate_output(text: &str, max_len: usize) -> String {
         let truncated: String = text.chars().take(max_len).collect();
         format!("{}... ({} chars total)", truncated, text.chars().count())
     }
+}
+
+fn visual_row_count(lines: &[Line<'_>], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+
+    lines
+        .iter()
+        .map(|line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            let w = UnicodeWidthStr::width(text.as_str());
+            w.max(1).div_ceil(width)
+        })
+        .sum()
 }
 
 // ---------------------------------------------------------------------------

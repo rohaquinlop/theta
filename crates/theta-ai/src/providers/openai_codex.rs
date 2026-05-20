@@ -616,13 +616,16 @@ fn parse_codex_event(data: &Value) -> Option<AssistantMessageEvent> {
         }
 
         "response.output_item.done" => {
-            let item_type = data["item"]["type"].as_str();
+            let item = &data["item"];
+            let item_type = item["type"].as_str();
             match item_type {
                 Some("reasoning") => Some(AssistantMessageEvent::ThinkingEnd),
                 Some("message") => Some(AssistantMessageEvent::TextEnd),
                 _ => None,
             }
         }
+
+        "response.output_text.done" => Some(AssistantMessageEvent::TextEnd),
 
         "response.completed" | "response.done" => {
             None // Done emitted by stream end handler
@@ -719,5 +722,35 @@ mod tests {
     fn test_parse_sse_done() {
         let event = parse_codex_sse("data: [DONE]");
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_output_text_done_event_emits_text_end() {
+        let event = parse_codex_event(&serde_json::json!({
+            "type": "response.output_text.done",
+            "text": "hello"
+        }));
+        match event {
+            Some(AssistantMessageEvent::TextEnd) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_output_item_done_message_emits_text_end() {
+        let event = parse_codex_event(&serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "content": [
+                    {"type": "output_text", "text": "hello"},
+                    {"type": "output_text", "text": " world"}
+                ]
+            }
+        }));
+        match event {
+            Some(AssistantMessageEvent::TextEnd) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }
