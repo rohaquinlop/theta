@@ -1742,6 +1742,7 @@ dependencies = [
  "base64",
  "clap",
  "dirs",
+ "futures",
  "glob",
  "open",
  "rand 0.8.6",
