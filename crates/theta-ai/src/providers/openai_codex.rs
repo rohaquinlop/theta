@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures_util::SinkExt;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::ThetaError;
 use crate::event::AssistantMessageEvent;
@@ -257,31 +258,40 @@ async fn ws_stream(
         })?;
 
     // Read frames — each text frame is a complete JSON event.
-    let events = read
-        .filter_map(|msg| async move {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    let text = text.to_string();
-                    parse_codex_json(&text)
+    let events = futures::stream::unfold(
+        (read, CodexEventParser::default(), VecDeque::new(), false),
+        |(mut read, mut parser, mut pending, mut done_emitted)| async move {
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    return Some((event, (read, parser, pending, done_emitted)));
                 }
-                Ok(Message::Close(_)) => Some(AssistantMessageEvent::Done {
-                    stop_reason: StopReason::Stop,
-                    usage: None,
-                }),
-                Err(e) => Some(AssistantMessageEvent::Error {
-                    code: "ws".into(),
-                    message: e.to_string(),
-                }),
-                _ => None,
+
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        pending.extend(parser.parse_json_str(&text));
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        if !done_emitted {
+                            done_emitted = true;
+                            return Some((done_event(), (read, parser, pending, done_emitted)));
+                        }
+                        return None;
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            AssistantMessageEvent::Error {
+                                code: "ws".into(),
+                                message: e.to_string(),
+                            },
+                            (read, parser, pending, done_emitted),
+                        ));
+                    }
+                    _ => {}
+                }
             }
-        })
-        .chain(futures::stream::once(async {
-            AssistantMessageEvent::Done {
-                stop_reason: StopReason::Stop,
-                usage: None,
-            }
-        }))
-        .boxed();
+        },
+    )
+    .boxed();
 
     Ok(events)
 }
@@ -298,23 +308,34 @@ fn byte_stream_to_events(
     + 'static,
 ) -> EventStream<'static> {
     futures::stream::unfold(
-        (byte_stream, String::new(), false),
-        |(mut stream, mut buf, mut exhausted)| async move {
+        (
+            byte_stream,
+            String::new(),
+            false,
+            CodexEventParser::default(),
+            VecDeque::new(),
+        ),
+        |(mut stream, mut buf, mut exhausted, mut parser, mut pending)| async move {
             if exhausted {
                 return None;
             }
             loop {
+                if let Some(event) = pending.pop_front() {
+                    return Some((event, (stream, buf, exhausted, parser, pending)));
+                }
+
                 while let Some(pos) = buf.find('\n') {
                     let line = buf[..pos].to_string();
                     buf = buf[pos + 1..].to_string();
-                    if let Some(event) = parse_codex_sse(&line) {
-                        return Some((event, (stream, buf, exhausted)));
+                    pending.extend(parser.parse_sse_line(&line));
+                    if let Some(event) = pending.pop_front() {
+                        return Some((event, (stream, buf, exhausted, parser, pending)));
                     }
                 }
+
                 match stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.push_str(&String::from_utf8_lossy(&bytes));
-                        continue;
                     }
                     Some(Err(e)) => {
                         exhausted = true;
@@ -323,18 +344,12 @@ fn byte_stream_to_events(
                                 code: "stream".into(),
                                 message: e.to_string(),
                             },
-                            (stream, buf, exhausted),
+                            (stream, buf, exhausted, parser, pending),
                         ));
                     }
                     None => {
                         exhausted = true;
-                        return Some((
-                            AssistantMessageEvent::Done {
-                                stop_reason: StopReason::Stop,
-                                usage: None,
-                            },
-                            (stream, buf, exhausted),
-                        ));
+                        return Some((done_event(), (stream, buf, exhausted, parser, pending)));
                     }
                 }
             }
@@ -540,108 +555,162 @@ fn convert_tools(tools: &[Tool]) -> Vec<Value> {
 // SSE / JSON parsing
 // ---------------------------------------------------------------------------
 
-fn parse_codex_sse(line: &str) -> Option<AssistantMessageEvent> {
-    let line = line.trim();
-    if let Some(data) = line.strip_prefix("data: ") {
-        if data == "[DONE]" {
-            return None;
-        }
-        parse_codex_json(data)
-    } else {
-        None
+fn done_event() -> AssistantMessageEvent {
+    AssistantMessageEvent::Done {
+        stop_reason: StopReason::Stop,
+        usage: None,
     }
 }
 
-fn parse_codex_json(json_str: &str) -> Option<AssistantMessageEvent> {
-    let data: Value = serde_json::from_str(json_str).ok()?;
-    parse_codex_event(&data)
+#[derive(Default)]
+struct CodexEventParser {
+    text_started: bool,
+    text_delta_seen_by_item: HashMap<String, bool>,
+    text_end_emitted_by_item: HashSet<String>,
 }
 
-fn parse_codex_event(data: &Value) -> Option<AssistantMessageEvent> {
-    let event_type = data["type"].as_str()?;
+impl CodexEventParser {
+    fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                return Vec::new();
+            }
+            return self.parse_json_str(data);
+        }
+        Vec::new()
+    }
 
-    match event_type {
-        "response.created" => None,
+    fn parse_json_str(&mut self, json_str: &str) -> Vec<AssistantMessageEvent> {
+        let Ok(data) = serde_json::from_str::<Value>(json_str) else {
+            return Vec::new();
+        };
+        self.parse_event(&data)
+    }
 
-        "response.output_item.added" => {
-            let item_type = data["item"]["type"].as_str()?;
-            match item_type {
-                "reasoning" => Some(AssistantMessageEvent::ThinkingStart),
-                "message" => Some(AssistantMessageEvent::TextStart),
-                "function_call" => {
-                    let item = &data["item"];
-                    let name = item["name"].as_str().unwrap_or("unknown");
-                    let call_id = item["call_id"].as_str().unwrap_or("");
-                    let item_id = item["id"].as_str().unwrap_or("");
-                    Some(AssistantMessageEvent::ToolCallStart {
-                        id: format!("{call_id}|{item_id}"),
-                        name: name.to_string(),
-                    })
+    fn parse_event(&mut self, data: &Value) -> Vec<AssistantMessageEvent> {
+        let mut out = Vec::new();
+        let Some(event_type) = data["type"].as_str() else {
+            return out;
+        };
+
+        match event_type {
+            "response.created" => {}
+            "response.output_item.added" => {
+                let item = &data["item"];
+                let item_type = item["type"].as_str().unwrap_or("");
+                match item_type {
+                    "reasoning" => out.push(AssistantMessageEvent::ThinkingStart),
+                    "message" => {
+                        if !self.text_started {
+                            self.text_started = true;
+                            out.push(AssistantMessageEvent::TextStart);
+                        }
+                        let key = output_item_key(item, data);
+                        self.text_delta_seen_by_item.entry(key).or_insert(false);
+                    }
+                    "function_call" => {
+                        let name = item["name"].as_str().unwrap_or("unknown");
+                        let call_id = item["call_id"].as_str().unwrap_or("");
+                        let item_id = item["id"].as_str().unwrap_or("");
+                        out.push(AssistantMessageEvent::ToolCallStart {
+                            id: format!("{call_id}|{item_id}"),
+                            name: name.to_string(),
+                        });
+                    }
+                    _ => {}
                 }
-                _ => None,
             }
-        }
-
-        "response.output_text.delta" => {
-            let delta = data["delta"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::TextDelta {
-                text: delta.to_string(),
-            })
-        }
-
-        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-            let delta = data["delta"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::ThinkingDelta {
-                thinking: delta.to_string(),
-            })
-        }
-
-        "response.function_call_arguments.delta" => {
-            let item = &data;
-            let delta = item["delta"].as_str().unwrap_or("");
-            let call_id = item["call_id"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::ToolCallDelta {
-                id: call_id.to_string(),
-                arguments: delta.to_string(),
-            })
-        }
-
-        "response.function_call_arguments.done" => {
-            let item = data;
-            let call_id = item["call_id"].as_str().unwrap_or("");
-            let item_id = item["id"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::ToolCallEnd {
-                id: format!("{call_id}|{item_id}"),
-            })
-        }
-
-        "response.output_item.done" => {
-            let item = &data["item"];
-            let item_type = item["type"].as_str();
-            match item_type {
-                Some("reasoning") => Some(AssistantMessageEvent::ThinkingEnd),
-                Some("message") => Some(AssistantMessageEvent::TextEnd),
-                _ => None,
+            "response.output_text.delta" => {
+                let key = output_item_key(data, data);
+                self.text_delta_seen_by_item.insert(key, true);
+                let delta = data["delta"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::TextDelta {
+                    text: delta.to_string(),
+                });
             }
+            "response.output_text.done" => {
+                let key = output_item_key(data, data);
+                let saw_delta = *self.text_delta_seen_by_item.get(&key).unwrap_or(&false);
+                if !saw_delta {
+                    let text = data["text"].as_str().unwrap_or("");
+                    if !text.is_empty() {
+                        out.push(AssistantMessageEvent::TextDelta {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                if self.text_end_emitted_by_item.insert(key) {
+                    out.push(AssistantMessageEvent::TextEnd);
+                }
+            }
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                let delta = data["delta"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::ThinkingDelta {
+                    thinking: delta.to_string(),
+                });
+            }
+            "response.function_call_arguments.delta" => {
+                let delta = data["delta"].as_str().unwrap_or("");
+                let call_id = data["call_id"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::ToolCallDelta {
+                    id: call_id.to_string(),
+                    arguments: delta.to_string(),
+                });
+            }
+            "response.function_call_arguments.done" => {
+                let call_id = data["call_id"].as_str().unwrap_or("");
+                let item_id = data["id"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::ToolCallEnd {
+                    id: format!("{call_id}|{item_id}"),
+                });
+            }
+            "response.output_item.done" => {
+                let item = &data["item"];
+                match item["type"].as_str() {
+                    Some("reasoning") => out.push(AssistantMessageEvent::ThinkingEnd),
+                    Some("message") => {
+                        let key = output_item_key(item, data);
+                        if self.text_end_emitted_by_item.insert(key) {
+                            out.push(AssistantMessageEvent::TextEnd);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "response.completed" | "response.done" => {}
+            "error" => {
+                let code = data["code"].as_str().unwrap_or("unknown");
+                let message = data["message"].as_str().unwrap_or("unknown error");
+                out.push(AssistantMessageEvent::Error {
+                    code: code.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            _ => {}
         }
 
-        "response.output_text.done" => Some(AssistantMessageEvent::TextEnd),
-
-        "response.completed" | "response.done" => {
-            None // Done emitted by stream end handler
-        }
-
-        "error" => {
-            let code = data["code"].as_str().unwrap_or("unknown");
-            let message = data["message"].as_str().unwrap_or("unknown error");
-            Some(AssistantMessageEvent::Error {
-                code: code.to_string(),
-                message: message.to_string(),
-            })
-        }
-
-        _ => None,
+        out
     }
+}
+
+fn output_item_key(primary: &Value, fallback: &Value) -> String {
+    if let Some(item_id) = primary["item_id"]
+        .as_str()
+        .or_else(|| primary["id"].as_str())
+    {
+        return item_id.to_string();
+    }
+    if let Some(index) = primary["output_index"].as_u64() {
+        return format!("output_index:{index}");
+    }
+    if let Some(item_id) = fallback["item"]["id"].as_str() {
+        return item_id.to_string();
+    }
+    if let Some(index) = fallback["output_index"].as_u64() {
+        return format!("output_index:{index}");
+    }
+    "default".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -719,38 +788,106 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sse_done() {
-        let event = parse_codex_sse("data: [DONE]");
-        assert!(event.is_none());
+    fn test_delta_plus_done_text_no_duplication() {
+        let mut parser = CodexEventParser::default();
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "m1"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_text.delta",
+                "item_id": "m1",
+                "delta": "hello"
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_text.done",
+                "item_id": "m1",
+                "text": "hello"
+            })),
+        ]
+        .concat();
+
+        assert!(matches!(events[0], AssistantMessageEvent::TextStart));
+        assert!(matches!(events[1], AssistantMessageEvent::TextDelta { .. }));
+        assert!(matches!(events[2], AssistantMessageEvent::TextEnd));
+        assert_eq!(events.len(), 3);
     }
 
     #[test]
-    fn test_output_text_done_event_emits_text_end() {
-        let event = parse_codex_event(&serde_json::json!({
-            "type": "response.output_text.done",
-            "text": "hello"
-        }));
-        match event {
-            Some(AssistantMessageEvent::TextEnd) => {}
-            other => panic!("unexpected event: {other:?}"),
-        }
+    fn test_done_text_without_delta_emits_final_text_once() {
+        let mut parser = CodexEventParser::default();
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "m1"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_text.done",
+                "item_id": "m1",
+                "text": "hello"
+            })),
+        ]
+        .concat();
+
+        assert!(matches!(events[0], AssistantMessageEvent::TextStart));
+        assert!(matches!(events[1], AssistantMessageEvent::TextDelta { .. }));
+        assert!(matches!(events[2], AssistantMessageEvent::TextEnd));
+        assert_eq!(events.len(), 3);
     }
 
     #[test]
-    fn test_output_item_done_message_emits_text_end() {
-        let event = parse_codex_event(&serde_json::json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "message",
-                "content": [
-                    {"type": "output_text", "text": "hello"},
-                    {"type": "output_text", "text": " world"}
-                ]
+    fn test_output_item_done_message_no_duplicate_text_replay() {
+        let mut parser = CodexEventParser::default();
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "m1"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {"type": "message", "id": "m1", "content": [
+                    {"type": "output_text", "text": "hello"}
+                ]}
+            })),
+        ]
+        .concat();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[1], AssistantMessageEvent::TextEnd));
+    }
+
+    #[test]
+    fn test_mixed_multi_item_response_ordering() {
+        let mut parser = CodexEventParser::default();
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "m1"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_text.delta", "item_id": "m1", "delta": "A"
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {"type": "message", "id": "m1"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "m2"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_text.done", "item_id": "m2", "text": "B"
+            })),
+        ]
+        .concat();
+
+        let mut deltas = Vec::new();
+        for event in &events {
+            if let AssistantMessageEvent::TextDelta { text } = event {
+                deltas.push(text.clone());
             }
-        }));
-        match event {
-            Some(AssistantMessageEvent::TextEnd) => {}
-            other => panic!("unexpected event: {other:?}"),
         }
+        assert_eq!(deltas, vec!["A".to_string(), "B".to_string()]);
     }
 }
