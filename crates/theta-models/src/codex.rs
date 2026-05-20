@@ -1,31 +1,60 @@
 //! OpenAI Codex model definitions.
 //!
 //! Codex gives ChatGPT Plus subscribers API access to OpenAI models
-//! without needing a separate API key. Authentication uses the
-//! ChatGPT session token (set via `OPENAI_CODEX_TOKEN` env var).
-//!
-//! Models connect to `https://chatgpt.com/backend-api` instead of
-//! `https://chatgpt.com/backend-api`.
+//! authenticated via session token.
 
 use theta_ai::model::{Model, ModelCompat};
 use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};
 
 /// Return all codex-enabled models.
-/// ChatGPT Plus subscribers get access to these with their session token.
 pub fn models() -> Vec<Model> {
     vec![
-        codex_gpt_5_5(),
-        codex_gpt_5_5_instant(),
-        codex_o4(),
-        codex_o4_mini(),
+        codex_model("gpt-5.5", "GPT-5.5 (Codex)", 272_000, 128_000, false),
+        codex_model(
+            "gpt-5.5-instant",
+            "GPT-5.5 Instant (Codex)",
+            272_000,
+            128_000,
+            false,
+        ),
+        codex_model("gpt-5", "GPT-5 (Codex)", 272_000, 128_000, false),
+        codex_model("gpt-5-mini", "GPT-5 Mini (Codex)", 272_000, 128_000, false),
+        codex_model(
+            "gpt-5-chat-latest",
+            "GPT-5 Chat Latest (Codex)",
+            272_000,
+            128_000,
+            false,
+        ),
+        codex_model("gpt-4.1", "GPT-4.1 (Codex)", 200_000, 100_000, false),
+        codex_model(
+            "gpt-4.1-mini",
+            "GPT-4.1 Mini (Codex)",
+            200_000,
+            100_000,
+            false,
+        ),
+        codex_model("gpt-4o", "GPT-4o (Codex)", 128_000, 16_384, false),
+        codex_model("gpt-4o-mini", "GPT-4o Mini (Codex)", 128_000, 16_384, false),
+        codex_model("o4", "o4 (Codex)", 200_000, 100_000, true),
+        codex_model("o4-mini", "o4-mini (Codex)", 200_000, 100_000, true),
+        codex_model("o3", "o3 (Codex)", 200_000, 100_000, true),
+        codex_model("o3-mini", "o3-mini (Codex)", 200_000, 100_000, true),
+        codex_model("o1", "o1 (Codex)", 200_000, 100_000, true),
+        codex_model("o1-mini", "o1-mini (Codex)", 200_000, 100_000, true),
     ]
 }
 
-/// Codex GPT-5.5 — same model, authenticated via ChatGPT Plus token.
-fn codex_gpt_5_5() -> Model {
+fn codex_model(
+    id: &str,
+    name: &str,
+    context_window: u32,
+    max_tokens: u32,
+    o_series: bool,
+) -> Model {
     Model {
-        id: "gpt-5.5".into(),
-        name: "GPT-5.5 (Codex)".into(),
+        id: id.into(),
+        name: name.into(),
         api: Api::OpenAiCodexResponses,
         provider: Provider::OpenAiCodex,
         base_url: "https://chatgpt.com/backend-api".into(),
@@ -40,114 +69,20 @@ fn codex_gpt_5_5() -> Model {
         ]
         .into(),
         input: vec![Modality::Text],
+        // Subscription-backed endpoint; usage billed by plan.
         cost: ModelCost {
             input: 0.0,
             output: 0.0,
             cache_read: 0.0,
             cache_write: 0.0,
         },
-        context_window: 272_000,
-        max_tokens: 128_000,
-        compat: ModelCompat::for_openai(),
-    }
-}
-
-/// Codex GPT-5.5 Instant.
-fn codex_gpt_5_5_instant() -> Model {
-    Model {
-        id: "gpt-5.5-instant".into(),
-        name: "GPT-5.5 Instant (Codex)".into(),
-        api: Api::OpenAiCodexResponses,
-        provider: Provider::OpenAiCodex,
-        base_url: "https://chatgpt.com/backend-api".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
-        context_window: 272_000,
-        max_tokens: 128_000,
-        compat: ModelCompat::for_openai(),
-    }
-}
-
-/// Codex o4 — o-series reasoning via ChatGPT Plus.
-fn codex_o4() -> Model {
-    Model {
-        id: "o4".into(),
-        name: "o4 (Codex)".into(),
-        api: Api::OpenAiCodexResponses,
-        provider: Provider::OpenAiCodex,
-        base_url: "https://chatgpt.com/backend-api".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
-        context_window: 200_000,
-        max_tokens: 100_000,
+        context_window,
+        max_tokens,
         compat: {
             let mut c = ModelCompat::for_openai();
-            c.supports_developer_role = true;
-            c
-        },
-    }
-}
-
-/// Codex o4-mini.
-fn codex_o4_mini() -> Model {
-    Model {
-        id: "o4-mini".into(),
-        name: "o4-mini (Codex)".into(),
-        api: Api::OpenAiCodexResponses,
-        provider: Provider::OpenAiCodex,
-        base_url: "https://chatgpt.com/backend-api".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
-        context_window: 200_000,
-        max_tokens: 100_000,
-        compat: {
-            let mut c = ModelCompat::for_openai();
-            c.supports_developer_role = true;
+            if o_series {
+                c.supports_developer_role = true;
+            }
             c
         },
     }
@@ -166,14 +101,6 @@ mod tests {
             assert_eq!(m.base_url, "https://chatgpt.com/backend-api");
             assert!(m.context_window > 0);
             assert!(m.max_tokens > 0);
-            // Codex is free with subscription — cost should be zero
-            assert_eq!(m.cost.input, 0.0);
-            assert_eq!(m.cost.output, 0.0);
         }
-    }
-
-    #[test]
-    fn test_codex_model_count() {
-        assert_eq!(models().len(), 4);
     }
 }

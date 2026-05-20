@@ -36,18 +36,6 @@ pub async fn run_tui(
     // Resolve model.
     let catalog = BuiltInCatalog::new();
 
-    // Build model entries for the model selector.
-    let model_entries: Vec<ModelEntry> = catalog
-        .list()
-        .into_iter()
-        .map(|m| ModelEntry {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            provider: format!("{:?}", m.provider).to_lowercase(),
-            context_window: m.context_window,
-        })
-        .collect();
-
     let model = find_model_by_id(&catalog, model_id)
         .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
         .clone();
@@ -57,6 +45,7 @@ pub async fn run_tui(
     // via Codex but default model is from OpenAI provider).
     let provider_str = provider_to_string(model.provider);
     let mut auth_config = config.auth.clone();
+    let model_entries = available_model_entries(&catalog, &mut auth_config).await;
     let api_key = auth_config.get_api_key(&provider_str).await;
 
     // Fallback: if no auth for the default model's provider, check
@@ -264,7 +253,7 @@ pub async fn run_tui(
         },
         CommandEntry {
             name: "model".into(),
-            description: "Switch model (e.g., /model gpt-5.5)".into(),
+            description: "Pick model from available authenticated models".into(),
         },
         CommandEntry {
             name: "thinking".into(),
@@ -530,6 +519,10 @@ async fn handle_tui_action(
                                     }
                                 }
                             }
+
+                            let refreshed_models =
+                                available_model_entries(catalog, &mut auth).await;
+                            let _ = event_tx.send(TuiEvent::UpdateModels(refreshed_models));
                         }
                         Err(e) => {
                             let _ =
@@ -577,6 +570,9 @@ async fn handle_tui_action(
                             }
                         }
                     }
+
+                    let refreshed_models = available_model_entries(catalog, &mut auth).await;
+                    let _ = event_tx.send(TuiEvent::UpdateModels(refreshed_models));
                 }
                 Err(e) => {
                     let _ = event_tx.send(TuiEvent::Error(format!("Failed to load auth: {e}")));
@@ -589,6 +585,22 @@ async fn handle_tui_action(
                 return;
             };
             if let Some(m) = find_model_by_id(catalog, &new_model) {
+                let provider = provider_to_string(m.provider);
+                match crate::config::load_auth(None).await {
+                    Ok(mut auth) => {
+                        if auth.get_api_key(&provider).await.is_none() {
+                            let _ = event_tx.send(TuiEvent::Error(format!(
+                                "Model {new_model} is unavailable: missing auth for {provider}"
+                            )));
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(TuiEvent::Error(format!("Failed to load auth: {e}")));
+                        return;
+                    }
+                }
+
                 agent.set_model(m).await;
                 let blocks = build_system_prompt(working_dir, &new_model, None).await;
                 agent.set_system_prompt(blocks).await;
@@ -732,6 +744,36 @@ async fn handle_tui_action(
             }
         }
     }
+}
+
+async fn available_model_entries(
+    catalog: &BuiltInCatalog,
+    auth: &mut crate::config::AuthConfig,
+) -> Vec<ModelEntry> {
+    let mut provider_has_auth: HashMap<String, bool> = HashMap::new();
+    for provider in ["openai", "openai-codex", "deepseek", "opencode"] {
+        provider_has_auth.insert(
+            provider.to_string(),
+            auth.get_api_key(provider).await.is_some(),
+        );
+    }
+
+    catalog
+        .list()
+        .into_iter()
+        .filter(|m| {
+            provider_has_auth
+                .get(&provider_to_string(m.provider))
+                .copied()
+                .unwrap_or(false)
+        })
+        .map(|m| ModelEntry {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            provider: format!("{:?}", m.provider).to_lowercase(),
+            context_window: m.context_window,
+        })
+        .collect()
 }
 
 fn find_model_by_id(catalog: &BuiltInCatalog, id: &str) -> Option<theta_ai::Model> {

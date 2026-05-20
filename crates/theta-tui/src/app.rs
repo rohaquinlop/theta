@@ -87,6 +87,8 @@ pub enum TuiEvent {
     Error(String),
     /// Load session history into the chat display.
     LoadHistory(Vec<HistoryEntry>),
+    /// Refresh available models (e.g. after login).
+    UpdateModels(Vec<ModelEntry>),
 }
 
 /// A historical message entry for session resume.
@@ -512,13 +514,14 @@ impl App {
             "help" | "h" => {
                 let help_text = [
                     "Slash commands:",
-                    "  /model <id>     Switch to a different model",
+                    "  /model          Open model picker (available models)",
                     "  /thinking <lvl> Set thinking level (off, low, medium, high)",
                     "  /clear          Clear the chat display",
                     "  /session        Show current session info",
                     "  /fork           Fork the current session",
                     "  /sessions       List recent sessions to resume",
                     "  /skills         List available skills",
+                    "  /model <id>     Switch model directly by id",
                     "  /skill:<name>   Invoke a skill",
                     "  /exit           Exit Theta",
                     "  /help           Show this help",
@@ -533,12 +536,7 @@ impl App {
             }
             "model" => {
                 if arg.is_empty() {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Usage: /model <model-id>".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
+                    self.model_selector.show();
                 } else {
                     let _ = self.action_tx.send(TuiAction::SwitchModel(arg.to_string()));
                     self.chat.add_message(ChatMessage {
@@ -816,6 +814,9 @@ impl App {
                         is_streaming: false,
                     });
                 }
+            }
+            TuiEvent::UpdateModels(models) => {
+                self.model_selector.set_models(models);
             }
         }
     }

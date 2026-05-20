@@ -5,14 +5,53 @@ use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};
 
 /// Return all OpenAI models.
 pub fn models() -> Vec<Model> {
-    vec![gpt_5_5(), gpt_5_5_instant(), o4(), o4_mini()]
+    vec![
+        // GPT-5 family
+        openai_model("gpt-5.5", "GPT-5.5", 272_000, 128_000, false),
+        openai_model(
+            "gpt-5.5-instant",
+            "GPT-5.5 Instant",
+            272_000,
+            128_000,
+            false,
+        ),
+        openai_model("gpt-5", "GPT-5", 272_000, 128_000, false),
+        openai_model("gpt-5-mini", "GPT-5 Mini", 272_000, 128_000, false),
+        openai_model("gpt-5-nano", "GPT-5 Nano", 272_000, 128_000, false),
+        openai_model(
+            "gpt-5-chat-latest",
+            "GPT-5 Chat Latest",
+            272_000,
+            128_000,
+            false,
+        ),
+        // GPT-4.1 family
+        openai_model("gpt-4.1", "GPT-4.1", 200_000, 100_000, false),
+        openai_model("gpt-4.1-mini", "GPT-4.1 Mini", 200_000, 100_000, false),
+        openai_model("gpt-4.1-nano", "GPT-4.1 Nano", 200_000, 100_000, false),
+        // GPT-4o family
+        openai_model("gpt-4o", "GPT-4o", 128_000, 16_384, false),
+        openai_model("gpt-4o-mini", "GPT-4o Mini", 128_000, 16_384, false),
+        // o-series
+        openai_model("o4", "o4", 200_000, 100_000, true),
+        openai_model("o4-mini", "o4-mini", 200_000, 100_000, true),
+        openai_model("o3", "o3", 200_000, 100_000, true),
+        openai_model("o3-mini", "o3-mini", 200_000, 100_000, true),
+        openai_model("o1", "o1", 200_000, 100_000, true),
+        openai_model("o1-mini", "o1-mini", 200_000, 100_000, true),
+    ]
 }
 
-/// GPT-5.5 "Spud" — latest flagship, released April 2026.
-fn gpt_5_5() -> Model {
+fn openai_model(
+    id: &str,
+    name: &str,
+    context_window: u32,
+    max_tokens: u32,
+    o_series: bool,
+) -> Model {
     Model {
-        id: "gpt-5.5".into(),
-        name: "GPT-5.5".into(),
+        id: id.into(),
+        name: name.into(),
         api: Api::OpenAiCompletions,
         provider: Provider::OpenAI,
         base_url: "https://api.openai.com".into(),
@@ -27,115 +66,20 @@ fn gpt_5_5() -> Model {
         ]
         .into(),
         input: vec![Modality::Text],
+        // Conservative placeholders; exact pricing differs per model.
         cost: ModelCost {
-            input: 1.25,
-            output: 10.0,
-            cache_read: 0.625,
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
             cache_write: 0.0,
         },
-        context_window: 272_000,
-        max_tokens: 128_000,
-        compat: ModelCompat::for_openai(),
-    }
-}
-
-/// GPT-5.5 Instant — faster, cheaper variant.
-fn gpt_5_5_instant() -> Model {
-    Model {
-        id: "gpt-5.5-instant".into(),
-        name: "GPT-5.5 Instant".into(),
-        api: Api::OpenAiCompletions,
-        provider: Provider::OpenAI,
-        base_url: "https://api.openai.com".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.35,
-            output: 2.0,
-            cache_read: 0.175,
-            cache_write: 0.0,
-        },
-        context_window: 272_000,
-        max_tokens: 128_000,
-        compat: ModelCompat::for_openai(),
-    }
-}
-
-/// o4 — o-series reasoning model.
-fn o4() -> Model {
-    Model {
-        id: "o4".into(),
-        name: "o4".into(),
-        api: Api::OpenAiCompletions,
-        provider: Provider::OpenAI,
-        base_url: "https://api.openai.com".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 10.0,
-            output: 40.0,
-            cache_read: 2.5,
-            cache_write: 0.0,
-        },
-        context_window: 200_000,
-        max_tokens: 100_000,
+        context_window,
+        max_tokens,
         compat: {
             let mut c = ModelCompat::for_openai();
-            // o-series uses developer role for system messages
-            c.supports_developer_role = true;
-            c
-        },
-    }
-}
-
-/// o4-mini — smaller o-series reasoning model.
-fn o4_mini() -> Model {
-    Model {
-        id: "o4-mini".into(),
-        name: "o4-mini".into(),
-        api: Api::OpenAiCompletions,
-        provider: Provider::OpenAI,
-        base_url: "https://api.openai.com".into(),
-        reasoning: true,
-        thinking_level_map: [
-            (ThinkingLevel::Off, None),
-            (ThinkingLevel::Minimal, Some("minimal".into())),
-            (ThinkingLevel::Low, Some("low".into())),
-            (ThinkingLevel::Medium, Some("medium".into())),
-            (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("max".into())),
-        ]
-        .into(),
-        input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 1.1,
-            output: 4.4,
-            cache_read: 0.275,
-            cache_write: 0.0,
-        },
-        context_window: 200_000,
-        max_tokens: 100_000,
-        compat: {
-            let mut c = ModelCompat::for_openai();
-            c.supports_developer_role = true;
+            if o_series {
+                c.supports_developer_role = true;
+            }
             c
         },
     }

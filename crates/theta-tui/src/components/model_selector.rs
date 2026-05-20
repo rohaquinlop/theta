@@ -75,6 +75,11 @@ impl ModelSelector {
         self.theme = theme;
     }
 
+    pub fn set_models(&mut self, models: Vec<ModelEntry>) {
+        self.all_models = models;
+        self.filter_models();
+    }
+
     /// Get the selected model entry, if any.
     pub fn selected_model(&self) -> Option<&ModelEntry> {
         self.filtered
