@@ -47,13 +47,16 @@ pub async fn execute_tool_calls(
                 let event_tx = event_tx.clone();
                 let abort = abort_token.clone();
                 let tc = (*tc).clone();
-                tokio::spawn(
+                let tool_name = tc.name.clone();
+                let tool_call_id = tc.id.clone();
+                let handle = tokio::spawn(
                     async move { execute_one(&state_snapshot, &tc, abort, &event_tx).await },
-                )
+                );
+                (handle, tool_call_id, tool_name)
             })
             .collect();
 
-        for handle in handles {
+        for (handle, tool_call_id, tool_name) in handles {
             match handle.await {
                 Ok(Ok(result)) => {
                     let msg = result_to_message(&result);
@@ -67,6 +70,15 @@ pub async fn execute_tool_calls(
                 }
                 Err(e) => {
                     let msg = format!("tool task panicked: {e}");
+                    let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+                        result: crate::types::ToolResult {
+                            tool_call_id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            content: vec![theta_ai::ContentBlock::text(msg.clone())],
+                            details: None,
+                            is_error: true,
+                        },
+                    });
                     let _ = event_tx.send(AgentEvent::Error {
                         message: msg.clone(),
                     });

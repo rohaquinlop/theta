@@ -401,6 +401,7 @@ fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
         && let Some(sp) = extract_system_text(&context.system)
     {
         items.push(serde_json::json!({
+            "type": "message",
             "role": "developer",
             "content": sp,
         }));
