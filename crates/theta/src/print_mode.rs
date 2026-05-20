@@ -88,6 +88,10 @@ pub async fn run_prompt_print_mode(
                         tool_errors += 1;
                     }
                     eprintln!("[tool:{}] {status}", result.tool_name);
+                    let summary = format_tool_log_summary(&result);
+                    if !summary.is_empty() {
+                        eprintln!("{summary}");
+                    }
                 }
                 AgentEvent::Error { message } => {
                     eprintln!("[error] {message}");
@@ -267,6 +271,10 @@ pub async fn run_continue_print_mode(
                         tool_errors += 1;
                     }
                     eprintln!("[tool:{}] {status}", result.tool_name);
+                    let summary = format_tool_log_summary(&result);
+                    if !summary.is_empty() {
+                        eprintln!("{summary}");
+                    }
                 }
                 AgentEvent::Error { message } => {
                     eprintln!("[error] {message}");
@@ -395,6 +403,10 @@ pub async fn run_resume_print_mode(
                         tool_errors += 1;
                     }
                     eprintln!("[tool:{}] {status}", result.tool_name);
+                    let summary = format_tool_log_summary(&result);
+                    if !summary.is_empty() {
+                        eprintln!("{summary}");
+                    }
                 }
                 AgentEvent::Error { message } => {
                     eprintln!("[error] {message}");
@@ -431,6 +443,90 @@ pub async fn run_resume_print_mode(
     }
 
     Ok(())
+}
+
+fn format_tool_log_summary(result: &theta_agent_core::types::ToolResult) -> String {
+    let Some(details) = result.details.as_ref() else {
+        return String::new();
+    };
+
+    match result.tool_name.as_str() {
+        "read" => {
+            let path = details
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            let total_lines = details
+                .get("total_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let offset = details.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+            let lines_read = details
+                .get("lines_read")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!(
+                "  read {path} lines {offset}-{end}/{total_lines}",
+                end = offset.saturating_add(lines_read.saturating_sub(1))
+            )
+        }
+        "edit" => {
+            let changes = details.get("changes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let diff = details.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+            if diff.is_empty() {
+                format!("  {changes} change(s)")
+            } else {
+                format!("  {changes} change(s)\n{diff}")
+            }
+        }
+        "bash" => {
+            let timed_out = details
+                .get("timed_out")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if timed_out {
+                "  timeout".to_string()
+            } else {
+                let exit = details
+                    .get("exit_code")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                format!("  exit={exit}")
+            }
+        }
+        "grep" => {
+            let count = details
+                .get("match_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!("  {count} match(es)")
+        }
+        "ls" => {
+            let count = details
+                .get("entry_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!(
+                "  {count} entr{suffix}",
+                suffix = if count == 1 { "y" } else { "ies" }
+            )
+        }
+        "find" => {
+            let count = details
+                .get("match_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!("  {count} match(es)")
+        }
+        "write" => {
+            let bytes = details
+                .get("bytes_written")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!("  {bytes} bytes")
+        }
+        _ => String::new(),
+    }
 }
 
 /// Find a model by ID across all providers in the catalog.

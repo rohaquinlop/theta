@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::path::PathBuf;
 
@@ -459,6 +459,7 @@ impl Component for Editor {
             })
             .collect();
 
+        frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(Text::from(visible_lines)).block(block), area);
     }
 

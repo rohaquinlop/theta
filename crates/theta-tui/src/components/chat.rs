@@ -110,7 +110,12 @@ impl Chat {
         };
 
         let text = if msg.role == ChatRole::Tool {
-            truncate_output(&msg.text, 500)
+            let body = truncate_output(&msg.text, 500);
+            if let Some(name) = msg.tool_name.as_deref() {
+                format!("[tool:{name}] {body}")
+            } else {
+                body
+            }
         } else {
             msg.text.clone()
         };

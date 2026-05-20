@@ -1,12 +1,49 @@
 //! edit tool: performs exact text replacements in a file.
 
 use async_trait::async_trait;
+use similar::TextDiff;
 use theta_agent_core::error::AgentError;
 use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpdateSender};
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
 use super::{ToolContext, resolve_path};
+
+const MAX_DIFF_HUNKS: usize = 6;
+const MAX_DIFF_CHARS: usize = 6000;
+
+fn make_diff_preview(path: &str, original: &str, modified: &str) -> String {
+    let full = TextDiff::from_lines(original, modified)
+        .unified_diff()
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .context_radius(3)
+        .to_string();
+
+    // Keep header + first N hunks for readable, contextual preview.
+    let mut kept = String::new();
+    let mut hunk_count = 0usize;
+    for line in full.lines() {
+        if line.starts_with("@@") {
+            hunk_count += 1;
+            if hunk_count > MAX_DIFF_HUNKS {
+                break;
+            }
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+
+    if hunk_count > MAX_DIFF_HUNKS {
+        kept.push_str("... (diff hunks truncated)\n");
+    }
+
+    if kept.chars().count() > MAX_DIFF_CHARS {
+        let truncated: String = kept.chars().take(MAX_DIFF_CHARS).collect();
+        return format!("{truncated}\n... (diff truncated)");
+    }
+
+    kept
+}
 
 pub struct EditTool {
     ctx: ToolContext,
@@ -146,6 +183,8 @@ impl AgentTool for EditTool {
                 message: format!("failed to write file: {e}"),
             })?;
 
+        let diff_preview = make_diff_preview(path, &original, &modified);
+
         Ok(ToolResult {
             tool_call_id: tool_call_id.into(),
             tool_name: "edit".into(),
@@ -155,9 +194,25 @@ impl AgentTool for EditTool {
             details: Some(serde_json::json!({
                 "changes": changes,
                 "path": file_path.to_string_lossy().to_string(),
-                "file_size": modified.len()
+                "file_size": modified.len(),
+                "diff": diff_preview,
             })),
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::make_diff_preview;
+
+    #[test]
+    fn diff_preview_uses_git_like_headers() {
+        let before = "a\nb\nc\n";
+        let after = "a\nB\nc\n";
+        let diff = make_diff_preview("src/lib.rs", before, after);
+        assert!(diff.contains("--- a/src/lib.rs"));
+        assert!(diff.contains("+++ b/src/lib.rs"));
+        assert!(diff.contains("@@"));
     }
 }

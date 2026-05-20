@@ -81,6 +81,10 @@ async fn handle_prompt(
     args: &theta::cli::PromptArgs,
 ) -> anyhow::Result<()> {
     let text = args.text.join(" ");
+    if text.trim().is_empty() {
+        anyhow::bail!("prompt text is empty; nothing to send (no session created)");
+    }
+
     let model = cli.model.as_deref().or(config.model.default.as_deref());
 
     let session_mgr = SessionManager::new(working_dir);
