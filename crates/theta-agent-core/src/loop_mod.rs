@@ -13,7 +13,10 @@ use tracing;
 
 use futures::StreamExt;
 use theta_ai::event::EventAccumulator;
-use theta_ai::{AssistantMessageEvent, Context, LlmProvider, Message, StopReason, StreamOptions};
+use theta_ai::{
+    AssistantMessageEvent, ContentBlock, Context, LlmProvider, Message, StopReason, StreamOptions,
+    ThinkingLevel,
+};
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
@@ -176,19 +179,14 @@ async fn run_single_turn(
         }
 
         // Build the LLM context from current state, with compaction.
-        let context = build_context(state, config);
+        let (context, compaction_stats) = build_context(state, provider, config, event_tx).await;
 
         // Emit compaction event if messages were trimmed.
-        // We need to re-run the calculation to get the trimmed count — compact_messages
-        // was already called inside build_context. We track it by comparing context.messages
-        // length to state.llm_messages() length.
-        let llm_count = state.llm_messages().len() as u32;
-        let ctx_count = context.messages.len() as u32;
-        if ctx_count < llm_count {
+        if let Some(stats) = compaction_stats {
             let _ = event_tx.send(AgentEvent::ContextCompacted {
-                trimmed_count: llm_count - ctx_count,
-                tokens_before: state.token_count(),
-                tokens_after: context.messages.iter().map(|m| m.token_count()).sum(),
+                trimmed_count: stats.trimmed_count,
+                tokens_before: stats.tokens_before,
+                tokens_after: stats.tokens_after,
             });
         }
 
@@ -210,6 +208,7 @@ async fn run_single_turn(
             temperature: config.temperature,
             thinking_level: Some(state.thinking_level),
             include_usage: config.include_usage,
+            timeout_ms: config.provider_timeout_ms,
             ..Default::default()
         };
 
@@ -385,7 +384,18 @@ async fn run_llm_stream(
 
 /// Build the LLM Context from the current agent state, with optional
 /// context compaction to stay within the model's context window.
-fn build_context(state: &AgentState, config: &AgentLoopConfig) -> Context {
+struct CompactionStats {
+    trimmed_count: u32,
+    tokens_before: u32,
+    tokens_after: u32,
+}
+
+async fn build_context(
+    state: &AgentState,
+    provider: &dyn LlmProvider,
+    config: &AgentLoopConfig,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) -> (Context, Option<CompactionStats>) {
     let system = if state.system_prompt.is_empty() {
         None
     } else {
@@ -408,12 +418,41 @@ fn build_context(state: &AgentState, config: &AgentLoopConfig) -> Context {
     let all_messages = state.llm_messages();
     let all_slice: Vec<theta_ai::Message> = all_messages.into_iter().cloned().collect();
 
-    let compact_result = crate::compact::compact_messages(
+    let mut compact_result = crate::compact::compact_messages(
         &all_slice,
         sys_tokens,
         state.model.context_window,
         &config.compaction,
     );
+
+    if compact_result.trimmed_count > 0 && config.compaction.summarize_with_llm {
+        let trimmed_len = (compact_result.trimmed_count as usize).min(all_slice.len());
+        match summarize_compacted_messages(
+            state,
+            provider,
+            &all_slice[..trimmed_len],
+            config,
+            event_tx,
+        )
+        .await
+        {
+            Ok(summary) => {
+                if let Some(first) = compact_result.messages.first_mut() {
+                    *first = summary;
+                } else {
+                    compact_result.messages.insert(0, summary);
+                }
+                compact_result.tokens_after = compact_result
+                    .messages
+                    .iter()
+                    .map(|message| message.token_count())
+                    .sum();
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "LLM compaction summary failed; using deterministic summary");
+            }
+        }
+    }
 
     let tools: Vec<theta_ai::Tool> = state
         .tools
@@ -425,12 +464,173 @@ fn build_context(state: &AgentState, config: &AgentLoopConfig) -> Context {
         })
         .collect();
 
-    Context {
-        system,
-        messages: compact_result.messages,
-        tools,
-        thinking_level: Some(state.thinking_level),
+    let stats = (compact_result.trimmed_count > 0).then_some(CompactionStats {
+        trimmed_count: compact_result.trimmed_count,
+        tokens_before: compact_result.tokens_before,
+        tokens_after: compact_result.tokens_after,
+    });
+
+    (
+        Context {
+            system,
+            messages: compact_result.messages,
+            tools,
+            thinking_level: Some(state.thinking_level),
+        },
+        stats,
+    )
+}
+
+async fn summarize_compacted_messages(
+    state: &AgentState,
+    provider: &dyn LlmProvider,
+    trimmed: &[Message],
+    config: &AgentLoopConfig,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) -> Result<Message, AgentError> {
+    let transcript = trimmed
+        .iter()
+        .map(message_to_summary_text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let context = Context {
+        system: Some(vec![ContentBlock::text(
+            "Summarize compacted coding-agent conversation context. Preserve concrete user goals, files, commands, tool results, decisions, unresolved tasks, constraints, and current project state. Be concise but specific. Do not invent facts.",
+        )]),
+        messages: vec![Message::User {
+            content: vec![ContentBlock::text(format!(
+                "Summarize this older transcript for future context:\n\n{transcript}"
+            ))],
+            timestamp: now_ms(),
+        }],
+        tools: Vec::new(),
+        thinking_level: Some(ThinkingLevel::Off),
+    };
+    let options = StreamOptions {
+        max_tokens: Some(config.compaction.summary_max_tokens),
+        temperature: Some(0.2),
+        thinking_level: Some(ThinkingLevel::Off),
+        include_usage: false,
+        timeout_ms: config.provider_timeout_ms,
+        ..Default::default()
+    };
+
+    let (message, _) =
+        run_silent_llm_stream(state, provider, &context, &options, config, event_tx).await?;
+
+    Ok(Message::Assistant {
+        content: vec![ContentBlock::text(format!(
+            "Context compacted by LLM summary:\n{}",
+            assistant_text(&message)
+        ))],
+        api: Some(state.model.api),
+        provider: Some(state.model.provider),
+        model: Some(state.model.id.clone()),
+        usage: None,
+        stop_reason: None,
+        error_message: None,
+        timestamp: now_ms(),
+    })
+}
+
+async fn run_silent_llm_stream(
+    state: &AgentState,
+    provider: &dyn LlmProvider,
+    context: &Context,
+    options: &StreamOptions,
+    config: &AgentLoopConfig,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) -> Result<(Message, Option<StopReason>), AgentError> {
+    let retry = &config.retry;
+    let mut stream;
+    let mut attempt: u32 = 0;
+
+    loop {
+        match provider.stream(&state.model, context, options).await {
+            Ok(s) => {
+                stream = s;
+                break;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if !retry.is_retryable(&msg) || attempt >= retry.max_retries {
+                    return Err(AgentError::Llm(e));
+                }
+                attempt += 1;
+                let delay_ms = retry
+                    .base_delay_ms
+                    .saturating_mul(2u64.pow(attempt.saturating_sub(1)));
+                let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
     }
+
+    let mut accumulator = EventAccumulator::new();
+    while let Some(event) = stream.next().await {
+        accumulator.feed(&event);
+    }
+
+    let assistant_msg = Message::Assistant {
+        content: accumulator.content_blocks(),
+        api: Some(state.model.api),
+        provider: Some(state.model.provider),
+        model: Some(state.model.id.clone()),
+        usage: accumulator.usage().cloned(),
+        stop_reason: accumulator.stop_reason(),
+        error_message: accumulator.error_message().map(|s| s.to_string()),
+        timestamp: now_ms(),
+    };
+
+    Ok((assistant_msg, accumulator.stop_reason()))
+}
+
+fn message_to_summary_text(message: &Message) -> String {
+    match message {
+        Message::User { content, .. } => format!("User: {}", content_to_text(content)),
+        Message::Assistant { content, .. } => format!("Assistant: {}", content_to_text(content)),
+        Message::ToolResult {
+            tool_name,
+            content,
+            is_error,
+            ..
+        } => format!(
+            "ToolResult({tool_name}, error={is_error}): {}",
+            content_to_text(content)
+        ),
+        Message::ModelChange { model_id, .. } => {
+            format!("Model changed to {}", model_id.as_deref().unwrap_or("?"))
+        }
+        Message::ThinkingLevelChange { level, .. } => {
+            format!("Thinking level changed to {level:?}")
+        }
+    }
+}
+
+fn assistant_text(message: &Message) -> String {
+    match message {
+        Message::Assistant { content, .. } => content_to_text(content),
+        _ => String::new(),
+    }
+}
+
+fn content_to_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+            ContentBlock::ToolCall {
+                name, arguments, ..
+            } => format!("tool_call {name} {arguments}"),
+            ContentBlock::ToolResult {
+                tool_name, content, ..
+            } => format!("tool_result {tool_name}: {}", content_to_text(content)),
+            ContentBlock::Image { .. } => "[image]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Get current time in milliseconds since epoch.

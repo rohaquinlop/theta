@@ -36,6 +36,7 @@ pub enum Action {
     ForkSession,
     ShowHelp,
     ShowModelSelector,
+    CycleTheme,
     None,
 }
 

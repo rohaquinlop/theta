@@ -16,6 +16,8 @@ pub struct SessionInfo {
     pub id: String,
     pub title: String,
     pub model: Option<String>,
+    pub branch: Option<String>,
+    pub token_count: u32,
     pub created_at: u64,
     pub message_count: usize,
 }
@@ -69,6 +71,10 @@ impl SessionPicker {
         self.sessions.get(self.selected)
     }
 
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     /// Render the session picker.
     pub fn render(&mut self, area: Rect, frame: &mut Frame) {
         let chunks = Layout::default()
@@ -101,9 +107,13 @@ impl SessionPicker {
             .map(|s| {
                 let title = &s.title;
                 let model = s.model.as_deref().unwrap_or("unknown");
+                let branch = s.branch.as_deref().unwrap_or("-");
                 let when = format_relative_time(s.created_at);
                 let count = s.message_count;
-                let line = format!("{model}  |  {when}  |  {count} msgs  |  {title}");
+                let line = format!(
+                    "{model}  |  {branch}  |  {when}  |  {count} msgs  |  ~{} tok  |  {title}",
+                    s.token_count
+                );
                 ListItem::new(Span::raw(line))
             })
             .collect();

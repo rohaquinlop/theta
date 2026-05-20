@@ -1,5 +1,6 @@
 //! Interactive TUI mode — connects the agent to the terminal UI.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -218,27 +219,6 @@ pub async fn run_tui(
     });
 
     // ------------------------------------------------------------------
-    // Show session picker only if prior sessions exist (no initial prompt).
-    // ------------------------------------------------------------------
-    let session_mgr = SessionManager::new(working_dir);
-    if initial_prompt.is_none()
-        && let Ok(sessions) = session_mgr.list().await
-        && !sessions.is_empty()
-    {
-        let infos: Vec<SessionInfo> = sessions
-            .into_iter()
-            .map(|m| SessionInfo {
-                id: m.id,
-                title: m.title.unwrap_or_else(|| "(untitled)".into()),
-                model: m.model,
-                created_at: m.created_at,
-                message_count: m.message_count,
-            })
-            .collect();
-        let _ = event_tx.send(TuiEvent::SessionPicker(infos));
-    }
-
-    // ------------------------------------------------------------------
     // Build available commands + skills for the / picker.
     let skills = crate::skills::discover_skills(working_dir).await;
     let mut commands = vec![
@@ -356,6 +336,7 @@ async fn create_agent(
 fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>) {
     tokio::spawn(async move {
         let mut events = agent.subscribe();
+        let mut tool_names: HashMap<String, String> = HashMap::new();
         loop {
             match events.recv().await {
                 Ok(AgentEvent::TextDelta { text }) => {
@@ -369,17 +350,26 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     tool_call_id: id,
                     tool_name: name,
                 }) => {
+                    tool_names.insert(id.clone(), name.clone());
                     let _ = event_tx.send(TuiEvent::ToolStart { name, id });
                 }
                 Ok(AgentEvent::ToolExecutionProgress {
-                    tool_call_id: _,
-                    output: _,
-                }) => {}
+                    tool_call_id: id,
+                    output,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::ToolProgress {
+                        name: tool_names.get(&id).cloned().unwrap_or(id),
+                        message: output,
+                    });
+                }
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
+                    let summary = content_blocks_to_text(&result.content, 500);
+                    tool_names.remove(&result.tool_call_id);
                     let _ = event_tx.send(TuiEvent::ToolEnd {
                         id: result.tool_call_id,
                         name: result.tool_name,
                         is_error: result.is_error,
+                        summary,
                     });
                 }
                 Ok(AgentEvent::TurnStart { .. }) => {
@@ -636,6 +626,8 @@ async fn handle_tui_action(
                         id: m.id,
                         title: m.title.unwrap_or_else(|| "(untitled)".into()),
                         model: m.model,
+                        branch: m.branch,
+                        token_count: m.token_count,
                         created_at: m.created_at,
                         message_count: m.message_count,
                     })
@@ -652,6 +644,7 @@ async fn handle_tui_action(
             match session_mgr.open_by_id(&id).await {
                 Ok(session) => {
                     let messages = session.messages.clone();
+                    let recap = session_recap(&session);
                     agent.load_messages(messages.clone()).await;
                     let mid = agent
                         .state()
@@ -672,6 +665,7 @@ async fn handle_tui_action(
                         .into_iter()
                         .filter_map(|msg| message_to_history(&msg))
                         .collect();
+                    let _ = event_tx.send(TuiEvent::Info(recap));
                     if !history.is_empty() {
                         let _ = event_tx.send(TuiEvent::LoadHistory(history));
                     }
@@ -712,6 +706,60 @@ fn provider_to_string(provider: Provider) -> String {
         Provider::OpenCode => "opencode".into(),
         Provider::OpenCodeGo => "opencode-go".into(),
     }
+}
+
+fn content_blocks_to_text(content: &[theta_ai::ContentBlock], max_chars: usize) -> String {
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+            theta_ai::ContentBlock::Image { .. } => Some("[image]"),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    truncate_chars(&text, max_chars)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn session_recap(session: &crate::session::Session) -> String {
+    let meta = session.meta.as_ref();
+    let title = meta
+        .and_then(|m| m.title.as_deref())
+        .unwrap_or("(untitled)");
+    let model = meta.and_then(|m| m.model.as_deref()).unwrap_or("unknown");
+    let branch = meta.and_then(|m| m.branch.as_deref()).unwrap_or("-");
+    let messages = session.messages.len();
+    let tokens = meta.map(|m| m.token_count).unwrap_or_else(|| {
+        session
+            .messages
+            .iter()
+            .map(theta_ai::Message::token_count)
+            .sum()
+    });
+    let last_user = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|msg| match msg {
+            theta_ai::Message::User { content, .. } => Some(content_blocks_to_text(content, 160)),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(none)".into());
+
+    format!(
+        "Resumed: {title}\nModel: {model}\nBranch: {branch}\nMessages: {messages}, approx tokens: {tokens}\nLast user message: {last_user}"
+    )
 }
 
 /// Convert a session message to a history entry for display.

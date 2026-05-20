@@ -231,6 +231,8 @@ pub struct StreamOptions {
     /// Service tier for Codex: "flex" (half cost), "default", or
     /// "priority" (higher throughput). Only applies to Codex provider.
     pub service_tier: Option<String>,
+    /// Transport request timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 /// Simplified stream options for non-tool-calling requests.

@@ -69,14 +69,18 @@ impl Provider for OpenAiCompatProvider {
                 provider: model.provider,
             })?;
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+            .json(&request_body);
+
+        if let Some(timeout_ms) = options.timeout_ms {
+            request = request.timeout(std::time::Duration::from_millis(timeout_ms));
+        }
+
+        let response = request.send().await?;
 
         let status = response.status();
         if !status.is_success() {

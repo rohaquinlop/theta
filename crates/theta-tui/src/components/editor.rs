@@ -8,6 +8,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
+use regex::Regex;
 use std::path::PathBuf;
 
 use crate::components::fuzzy::fuzzy_filter;
@@ -77,6 +78,16 @@ impl Editor {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn desired_height(&self, width: usize, max_height: u16) -> u16 {
+        let inner_width = width.saturating_sub(2).max(1);
+        let lines = wrap_text(&self.text, inner_width).len() as u16;
+        lines.saturating_add(2).clamp(3, max_height.max(3))
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     /// Insert text at the current cursor position (used by path picker).
@@ -696,53 +707,72 @@ impl Component for Editor {
 // Fuzzy file matching
 // ---------------------------------------------------------------------------
 
-/// Return fuzzy-matched file/directory names from `base_dir`.
-/// If query contains `/`, traverse into the specified subdirectory.
+/// Return matching file paths from `base_dir`.
+/// The query is treated as a regex over relative paths; invalid regex falls
+/// back to fuzzy matching so partial typing still produces useful results.
 fn fuzzy_file_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
-    // If query has a path separator, resolve the subdirectory.
-    let (search_dir, name_filter) = if let Some(pos) = query.rfind('/') {
-        let dir_part = &query[..pos];
-        let name_part = &query[pos + 1..];
-        let resolved = if dir_part.is_empty() {
-            base_dir.to_path_buf()
-        } else {
-            base_dir.join(dir_part)
-        };
-        (resolved, name_part.to_string())
-    } else {
-        (base_dir.to_path_buf(), query.to_string())
-    };
-
     let mut entries: Vec<String> = Vec::new();
-    if let Ok(read) = std::fs::read_dir(&search_dir) {
-        for entry in read.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') && !name_filter.starts_with('.') {
-                continue;
-            }
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let full_name = if query.contains('/') {
-                let dir_part = &query[..query.rfind('/').unwrap() + 1];
-                if is_dir {
-                    format!("{dir_part}{name}/")
-                } else {
-                    format!("{dir_part}{name}")
-                }
-            } else if is_dir {
-                format!("{name}/")
-            } else {
-                name.clone()
-            };
-            entries.push(full_name);
-        }
+    let include_hidden = query.starts_with('.');
+    collect_file_paths(base_dir, base_dir, include_hidden, &mut entries);
+    entries.sort();
+
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return entries;
     }
 
-    // Fuzzy filter by name part.
-    let filtered: Vec<&String> = fuzzy_filter(&entries, &name_filter, |s| {
-        // Extract the filename portion for matching.
-        s.rsplit('/').next().unwrap_or(s)
-    });
-    filtered.into_iter().take(10).cloned().collect()
+    if let Ok(regex) = Regex::new(trimmed) {
+        return entries
+            .into_iter()
+            .filter(|path| regex.is_match(path))
+            .collect();
+    }
+
+    let fuzzy_query: String = trimmed
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '^' | '$' | '|' | '\\'
+            )
+        })
+        .collect();
+
+    fuzzy_filter(&entries, fuzzy_query.trim(), |s| s)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+fn collect_file_paths(
+    base_dir: &std::path::Path,
+    current_dir: &std::path::Path,
+    include_hidden: bool,
+    out: &mut Vec<String>,
+) {
+    let Ok(read_dir) = std::fs::read_dir(current_dir) else {
+        return;
+    };
+
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+
+        if file_type.is_dir() {
+            collect_file_paths(base_dir, &path, include_hidden, out);
+        } else if file_type.is_file()
+            && let Ok(relative) = path.strip_prefix(base_dir)
+        {
+            out.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
 }
 
 fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
@@ -801,4 +831,79 @@ fn cursor_visual_line(text: &str, cursor: usize, width: usize) -> usize {
         col += 1;
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("theta-tui-editor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn file_matches_recurse_and_apply_regex_to_relative_paths() {
+        let root = temp_root("regex");
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("src/components/chat.rs"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+
+        let matches = fuzzy_file_matches(&root, r"src/.+\.rs$");
+
+        assert_eq!(
+            matches,
+            vec![
+                "src/components/chat.rs".to_string(),
+                "src/main.rs".to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_matches_empty_query_returns_all_visible_files() {
+        let root = temp_root("empty");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+
+        let matches = fuzzy_file_matches(&root, "");
+
+        assert_eq!(
+            matches,
+            vec!["Cargo.toml".to_string(), "src/lib.rs".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_matches_invalid_regex_falls_back_to_fuzzy() {
+        let root = temp_root("fuzzy");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/session_picker.rs"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+
+        let matches = fuzzy_file_matches(&root, "s[");
+
+        assert_eq!(matches, vec!["src/session_picker.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_matches_skips_hidden_paths_by_default() {
+        let root = temp_root("hidden");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "").unwrap();
+        std::fs::write(root.join("visible.rs"), "").unwrap();
+
+        let matches = fuzzy_file_matches(&root, "");
+
+        assert_eq!(matches, vec!["visible.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

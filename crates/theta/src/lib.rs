@@ -8,6 +8,7 @@ pub mod login;
 pub mod oauth;
 pub mod print_mode;
 pub mod prompts;
+pub mod rpc;
 pub mod session;
 pub mod settings;
 pub mod skills;

@@ -65,6 +65,7 @@ pub async fn run_prompt_print_mode(
 
     // Consume events.
     let mut aborted = false;
+    let mut tool_errors = 0u32;
     loop {
         match events.recv().await {
             Ok(event) => match event {
@@ -82,6 +83,9 @@ pub async fn run_prompt_print_mode(
                 }
                 AgentEvent::ToolExecutionEnd { result } => {
                     let status = if result.is_error { "error" } else { "done" };
+                    if result.is_error {
+                        tool_errors += 1;
+                    }
                     eprintln!("[tool:{}] {status}", result.tool_name);
                 }
                 AgentEvent::Error { message } => {
@@ -115,6 +119,10 @@ pub async fn run_prompt_print_mode(
     let state = agent.state().await;
     for msg in &state.messages {
         session_mgr.append_entry(&mut session, msg).await?;
+    }
+
+    if tool_errors > 0 {
+        anyhow::bail!("{tool_errors} tool error(s)");
     }
 
     Ok(())
@@ -238,6 +246,7 @@ pub async fn run_continue_print_mode(
 
     // Consume events.
     let mut aborted = false;
+    let mut tool_errors = 0u32;
     loop {
         match events.recv().await {
             Ok(event) => match event {
@@ -252,6 +261,9 @@ pub async fn run_continue_print_mode(
                 }
                 AgentEvent::ToolExecutionEnd { result } => {
                     let status = if result.is_error { "error" } else { "done" };
+                    if result.is_error {
+                        tool_errors += 1;
+                    }
                     eprintln!("[tool:{}] {status}", result.tool_name);
                 }
                 AgentEvent::Error { message } => {
@@ -283,6 +295,10 @@ pub async fn run_continue_print_mode(
     let saved_count = session.messages.len();
     for msg in &state.messages[saved_count..] {
         session_mgr.append_entry(&mut session, msg).await?;
+    }
+
+    if tool_errors > 0 {
+        anyhow::bail!("{tool_errors} tool error(s)");
     }
 
     Ok(())
@@ -357,6 +373,7 @@ pub async fn run_resume_print_mode(
     };
 
     let mut aborted = false;
+    let mut tool_errors = 0u32;
     loop {
         match events.recv().await {
             Ok(event) => match event {
@@ -371,6 +388,9 @@ pub async fn run_resume_print_mode(
                 }
                 AgentEvent::ToolExecutionEnd { result } => {
                     let status = if result.is_error { "error" } else { "done" };
+                    if result.is_error {
+                        tool_errors += 1;
+                    }
                     eprintln!("[tool:{}] {status}", result.tool_name);
                 }
                 AgentEvent::Error { message } => {
@@ -401,6 +421,10 @@ pub async fn run_resume_print_mode(
     let saved_count = session.messages.len();
     for msg in &state.messages[saved_count..] {
         session_mgr.append_entry(&mut session, msg).await?;
+    }
+
+    if tool_errors > 0 {
+        anyhow::bail!("{tool_errors} tool error(s)");
     }
 
     Ok(())

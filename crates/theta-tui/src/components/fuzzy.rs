@@ -161,9 +161,6 @@ mod tests {
 
     #[test]
     fn test_consecutive_bonus() {
-        let m1 = fuzzy_match("mai", "main"); // consecutive 'mai'
-        let m2 = fuzzy_match("mxi", "maxi"); // spread out 'm', 'x', 'i' — wait, 'mxi' can't match 'main'
-        // Let's use a better test
         let m_cons = fuzzy_match("abc", "abc");
         let m_gap = fuzzy_match("ac", "abc");
         assert!(m_cons.matches && m_gap.matches);

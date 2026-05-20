@@ -94,6 +94,8 @@ pub struct AgentLoopConfig {
     pub compaction: CompactionConfig,
     /// Provider retry settings.
     pub retry: RetryConfig,
+    /// Provider request timeout in milliseconds.
+    pub provider_timeout_ms: Option<u64>,
 }
 
 impl Default for AgentLoopConfig {
@@ -105,6 +107,7 @@ impl Default for AgentLoopConfig {
             include_usage: false,
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
+            provider_timeout_ms: Some(120_000),
         }
     }
 }
@@ -116,6 +119,10 @@ pub struct CompactionConfig {
     pub enabled: bool,
     /// Tokens to reserve for the model's response.
     pub reserve_tokens: u32,
+    /// Whether to ask the model to summarize trimmed context.
+    pub summarize_with_llm: bool,
+    /// Maximum output tokens for compaction summaries.
+    pub summary_max_tokens: u32,
 }
 
 impl Default for CompactionConfig {
@@ -123,6 +130,8 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             reserve_tokens: 4096,
+            summarize_with_llm: true,
+            summary_max_tokens: 512,
         }
     }
 }

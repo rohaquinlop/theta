@@ -80,15 +80,105 @@ pub fn compact_messages(
 
     // Reverse back to oldest-first order and clone to owned.
     kept.reverse();
-    let kept_owned: Vec<Message> = kept.into_iter().cloned().collect();
+    let mut kept_owned: Vec<Message> = kept.into_iter().cloned().collect();
+    let trimmed_count = messages.len().saturating_sub(kept_owned.len()) as u32;
+    if trimmed_count > 0 {
+        let trimmed_len = messages.len().saturating_sub(kept_owned.len());
+        if let Some(summary) = compacted_summary(&messages[..trimmed_len], trimmed_count) {
+            kept_owned.insert(0, summary);
+        }
+    }
     let tokens_after = total_tokens(&kept_owned);
-    let trimmed_count = (messages.len() - kept_owned.len()) as u32;
 
     CompactionResult {
         messages: kept_owned,
         trimmed_count,
         tokens_before,
         tokens_after,
+    }
+}
+
+fn compacted_summary(trimmed: &[Message], trimmed_count: u32) -> Option<Message> {
+    let mut user_lines = Vec::new();
+    let mut assistant_lines = Vec::new();
+
+    for msg in trimmed.iter().rev() {
+        match msg {
+            Message::User { content, .. } if user_lines.len() < 3 => {
+                if let Some(text) = content_text(content) {
+                    user_lines.push(text);
+                }
+            }
+            Message::Assistant { content, .. } if assistant_lines.len() < 3 => {
+                if let Some(text) = content_text(content) {
+                    assistant_lines.push(text);
+                }
+            }
+            _ => {}
+        }
+        if user_lines.len() >= 3 && assistant_lines.len() >= 3 {
+            break;
+        }
+    }
+
+    if user_lines.is_empty() && assistant_lines.is_empty() {
+        return None;
+    }
+
+    user_lines.reverse();
+    assistant_lines.reverse();
+    let mut text = format!("Context compacted: {trimmed_count} older messages were summarized.");
+    if !user_lines.is_empty() {
+        text.push_str("\nRecent trimmed user messages:");
+        for line in user_lines {
+            text.push_str("\n- ");
+            text.push_str(&truncate_chars(&line, 180));
+        }
+    }
+    if !assistant_lines.is_empty() {
+        text.push_str("\nRecent trimmed assistant messages:");
+        for line in assistant_lines {
+            text.push_str("\n- ");
+            text.push_str(&truncate_chars(&line, 180));
+        }
+    }
+
+    Some(Message::Assistant {
+        content: vec![theta_ai::ContentBlock::text(truncate_chars(&text, 1200))],
+        api: None,
+        provider: None,
+        model: None,
+        usage: None,
+        stop_reason: None,
+        error_message: None,
+        timestamp: 0,
+    })
+}
+
+fn content_text(content: &[theta_ai::ContentBlock]) -> Option<String> {
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+            theta_ai::ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 
@@ -142,6 +232,8 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
             },
         );
         assert_eq!(result.trimmed_count, 0);
@@ -166,6 +258,8 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
             },
         );
         assert!(result.trimmed_count > 0);
@@ -193,6 +287,8 @@ mod tests {
             &CompactionConfig {
                 enabled: false,
                 reserve_tokens: 0,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
             },
         );
         assert_eq!(result.trimmed_count, 0);
@@ -210,6 +306,8 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 95,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
             },
         );
         // Short messages should still fit under 5 tokens.
@@ -231,9 +329,39 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
             },
         );
         // Should trim at least the first pair.
         assert!(result.trimmed_count > 0);
+    }
+
+    #[test]
+    fn test_compaction_inserts_summary() {
+        let msgs = vec![
+            user("old requirement about files"),
+            assistant("old answer about files"),
+            user("latest question"),
+        ];
+        let result = compact_messages(
+            &msgs,
+            0,
+            8,
+            &CompactionConfig {
+                enabled: true,
+                reserve_tokens: 0,
+                summarize_with_llm: false,
+                summary_max_tokens: 512,
+            },
+        );
+        assert!(result.trimmed_count > 0);
+        let Message::Assistant { content, .. } = &result.messages[0] else {
+            panic!("expected summary assistant message");
+        };
+        assert!(matches!(
+            &content[0],
+            theta_ai::ContentBlock::Text { text } if text.contains("Context compacted")
+        ));
     }
 }

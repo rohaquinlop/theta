@@ -40,13 +40,19 @@ impl StatusBar {
     pub fn set_tool_progress(&mut self, progress: &str) {
         self.tool_progress = progress.to_string();
     }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
 }
 
 impl Component for StatusBar {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let model_str = self.model.clone();
+        let total_width = area.width as usize;
+        let session_id = short_middle(&self.session_id, 14);
+        let model_str = short_middle(&self.model, 24);
         let thinking_str = format!(" | thinking: {}", self.thinking);
-        let session_str = format!(" | session: {}", self.session_id);
+        let session_str = format!(" | session: {session_id}");
 
         let left = vec![
             Span::styled(model_str, Style::default().fg(self.theme.accent)),
@@ -60,18 +66,18 @@ impl Component for StatusBar {
             _ => self.theme.success,
         };
 
-        let right_text = if self.tool_progress.is_empty() {
+        let mut right_text = if self.tool_progress.is_empty() {
             format!("[{}]", self.agent_state)
         } else {
             format!("[{}] {}", self.agent_state, self.tool_progress)
         };
+        right_text = truncate_chars(&right_text, total_width.saturating_div(2).max(12));
 
         let right = vec![Span::styled(right_text, Style::default().fg(state_color))];
 
         // Pad to fill width.
         let left_str: String = left.iter().map(|s| s.content.as_ref()).collect();
         let right_str: String = right.iter().map(|s| s.content.as_ref()).collect();
-        let total_width = area.width as usize;
 
         let pad = if left_str.len() + right_str.len() < total_width {
             " ".repeat(total_width - left_str.len() - right_str.len())
@@ -97,4 +103,33 @@ impl Component for StatusBar {
     }
 
     fn focus(&mut self, _focused: bool) {}
+}
+
+fn short_middle(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars < 5 {
+        return text.to_string();
+    }
+    let head_len = (max_chars - 3) / 2;
+    let tail_len = max_chars - 3 - head_len;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}...{tail}")
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }

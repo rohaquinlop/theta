@@ -55,5 +55,10 @@ pub fn default_bindings() -> Vec<Keybinding> {
             action: Action::ShowModelSelector,
             description: "Switch model",
         },
+        Keybinding {
+            key: KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            action: Action::CycleTheme,
+            description: "Cycle theme",
+        },
     ]
 }

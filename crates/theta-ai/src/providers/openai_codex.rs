@@ -78,14 +78,22 @@ impl Provider for OpenAiCodexProvider {
         );
 
         // Try WebSocket first (lower latency), fall back to SSE.
-        match ws_stream(&ws_url, &body, &account_id, &token).await {
+        match ws_stream(&ws_url, &body, &account_id, &token, options.timeout_ms).await {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 tracing::warn!("Codex WebSocket failed, falling back to SSE: {e}");
             }
         }
 
-        sse_stream(&self.client, &http_url, &body, &account_id, &token).await
+        sse_stream(
+            &self.client,
+            &http_url,
+            &body,
+            &account_id,
+            &token,
+            options.timeout_ms,
+        )
+        .await
     }
 
     async fn stream_simple<'a>(
@@ -104,6 +112,7 @@ impl Provider for OpenAiCodexProvider {
             json_mode: false,
             seed: None,
             service_tier: None,
+            timeout_ms: None,
         };
         self.stream(model, context, &opts).await
     }
@@ -145,6 +154,7 @@ async fn sse_stream(
     body: &Value,
     account_id: &str,
     token: &str,
+    timeout_ms: Option<u64>,
 ) -> Result<EventStream<'static>, ThetaError> {
     let mut req = client
         .post(url)
@@ -156,6 +166,10 @@ async fn sse_stream(
 
     if !account_id.is_empty() {
         req = req.header("chatgpt-account-id", account_id);
+    }
+
+    if let Some(timeout_ms) = timeout_ms {
+        req = req.timeout(std::time::Duration::from_millis(timeout_ms));
     }
 
     let response = req.json(body).send().await?;
@@ -196,6 +210,7 @@ async fn ws_stream(
     body: &Value,
     account_id: &str,
     token: &str,
+    timeout_ms: Option<u64>,
 ) -> Result<EventStream<'static>, ThetaError> {
     use tokio_tungstenite::tungstenite::protocol::Message;
 
@@ -211,14 +226,23 @@ async fn ws_stream(
 
     let req = req_builder.body(()).unwrap();
 
-    let (ws_stream, _) =
-        tokio_tungstenite::connect_async(req)
+    let connect = tokio_tungstenite::connect_async(req);
+    let (ws_stream, _) = if let Some(timeout_ms) = timeout_ms {
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), connect)
             .await
-            .map_err(|e| ThetaError::ApiError {
-                status: 500,
-                message: format!("WebSocket connect failed: {e}"),
+            .map_err(|_| ThetaError::ApiError {
+                status: 408,
+                message: "WebSocket connect timed out".into(),
                 retry_after_ms: None,
-            })?;
+            })?
+    } else {
+        connect.await
+    }
+    .map_err(|e| ThetaError::ApiError {
+        status: 500,
+        message: format!("WebSocket connect failed: {e}"),
+        retry_after_ms: None,
+    })?;
     let (mut write, read) = ws_stream.split();
 
     // Send the JSON body as a text frame.

@@ -47,9 +47,15 @@ pub struct SessionMeta {
     pub path: String,
     pub title: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub created_at: u64,
     pub last_active_at: u64,
     pub message_count: usize,
+    #[serde(default)]
+    pub token_count: u32,
 }
 
 /// Index of all sessions in a project.
@@ -78,6 +84,7 @@ pub struct Session {
 pub struct SessionManager {
     sessions_dir: PathBuf,
     index_path: PathBuf,
+    working_dir: PathBuf,
 }
 
 impl SessionManager {
@@ -86,7 +93,7 @@ impl SessionManager {
     /// If `sessions_dir` is provided, uses that path. Otherwise defaults to
     /// `~/.theta/sessions/`. The `working_dir` parameter is kept for API
     /// compatibility but is only used when `sessions_dir` is set.
-    pub fn new(_working_dir: &Path) -> Self {
+    pub fn new(working_dir: &Path) -> Self {
         let sessions_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".theta")
@@ -95,6 +102,7 @@ impl SessionManager {
         Self {
             sessions_dir,
             index_path,
+            working_dir: working_dir.to_path_buf(),
         }
     }
 
@@ -104,6 +112,7 @@ impl SessionManager {
         Self {
             sessions_dir,
             index_path,
+            working_dir: PathBuf::new(),
         }
     }
 
@@ -165,9 +174,16 @@ impl SessionManager {
             path: file_path.to_string_lossy().to_string(),
             title: None,
             model: model.map(|m| m.to_string()),
+            project: if self.working_dir.as_os_str().is_empty() {
+                None
+            } else {
+                Some(self.working_dir.to_string_lossy().to_string())
+            },
+            branch: current_git_branch(&self.working_dir),
             created_at: now,
             last_active_at: now,
             message_count: 0,
+            token_count: 0,
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -261,9 +277,13 @@ impl SessionManager {
             model: model
                 .map(|m| m.to_string())
                 .or_else(|| session.meta.as_ref().and_then(|m| m.model.clone())),
+            project: session.meta.as_ref().and_then(|m| m.project.clone()),
+            branch: current_git_branch(&self.working_dir)
+                .or_else(|| session.meta.as_ref().and_then(|m| m.branch.clone())),
             created_at: now,
             last_active_at: now,
             message_count: session.messages.len(),
+            token_count: session.messages.iter().map(Message::token_count).sum(),
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -305,6 +325,15 @@ impl SessionManager {
         {
             meta.last_active_at = now;
             meta.message_count = session.messages.len();
+            meta.token_count = session.messages.iter().map(Message::token_count).sum();
+            if meta.title.is_none()
+                && let Some(title) = message_title(message)
+            {
+                meta.title = Some(title);
+            }
+            if meta.branch.is_none() {
+                meta.branch = current_git_branch(&self.working_dir);
+            }
             session.meta = Some(meta.clone());
         }
         self.save_index(&index).await?;
@@ -345,6 +374,48 @@ fn generate_session_id() -> String {
     let ts = now_ms();
     let random: u32 = (ts as u32).wrapping_mul(2654435761); // Knuth's multiplicative hash
     format!("{ts:x}-{random:x}")
+}
+
+fn current_git_branch(working_dir: &Path) -> Option<String> {
+    if working_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(working_dir)
+        .arg("branch")
+        .arg("--show-current")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn message_title(message: &Message) -> Option<String> {
+    let Message::User { content, .. } = message else {
+        return None;
+    };
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.chars().take(80).collect())
+    }
 }
 
 /// Current time in milliseconds since epoch.

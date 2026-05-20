@@ -58,6 +58,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Login(args)) => {
             handle_login(&config, &working_dir, args).await?;
         }
+        Some(Command::Rpc) => {
+            theta::rpc::run_rpc(&config, &working_dir).await?;
+        }
         Some(Command::Tui(args)) => {
             handle_tui(&config, &working_dir, &cli, args).await?;
         }
@@ -81,14 +84,13 @@ async fn handle_prompt(
     let model = cli.model.as_deref().or(config.model.default.as_deref());
 
     let session_mgr = SessionManager::new(working_dir);
-    let session = if args.new {
-        session_mgr.create(model).await?
-    } else {
-        // Try to resume the latest session, or create a new one.
+    let session = if args.continue_latest && !args.new {
         match session_mgr.resume().await {
             Ok(s) => s,
             Err(_) => session_mgr.create(model).await?,
         }
+    } else {
+        session_mgr.create(model).await?
     };
 
     let sid = session
@@ -163,11 +165,14 @@ async fn handle_list_sessions(working_dir: &Path) -> anyhow::Result<()> {
     } else {
         for meta in &sessions {
             println!(
-                "  {id}  {model}  {count} msgs  {time}",
+                "  {id}  {model}  {branch}  {count} msgs  ~{tokens} tok  {time}  {title}",
                 id = meta.id,
                 model = meta.model.as_deref().unwrap_or("?"),
+                branch = meta.branch.as_deref().unwrap_or("-"),
                 count = meta.message_count,
-                time = humantime_ms(meta.last_active_at)
+                tokens = meta.token_count,
+                time = humantime_ms(meta.last_active_at),
+                title = meta.title.as_deref().unwrap_or("")
             );
         }
     }

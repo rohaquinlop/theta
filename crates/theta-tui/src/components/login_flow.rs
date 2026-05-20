@@ -99,6 +99,10 @@ impl LoginFlow {
         self.result.take()
     }
 
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     fn selected_auth_type(&self) -> AuthType {
         self.auth_types[self.selected_auth_type].0
     }

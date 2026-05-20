@@ -61,6 +61,7 @@ pub enum TuiEvent {
         id: String,
         name: String,
         is_error: bool,
+        summary: String,
     },
     TurnStart,
     TurnEnd {
@@ -121,6 +122,7 @@ pub struct App {
     pub event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     #[allow(dead_code)]
     theme: Theme,
+    theme_idx: usize,
     streaming: bool,
     current_tool: Option<String>,
     /// Active login flow (replaces chat+editor when set).
@@ -173,6 +175,7 @@ impl App {
             editor,
             status,
             theme: theme.clone(),
+            theme_idx: 0,
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
             keybindings: default_bindings(),
@@ -254,12 +257,13 @@ impl App {
             return;
         }
 
+        let editor_height = self.editor.desired_height(area.width as usize, 8);
         let main = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(3),
-                Constraint::Length(3),
+                Constraint::Length(editor_height),
             ])
             .split(area);
 
@@ -476,8 +480,35 @@ impl App {
             Action::ShowModelSelector => {
                 self.model_selector.show();
             }
+            Action::CycleTheme => {
+                self.cycle_theme();
+            }
             _ => {}
         }
+    }
+
+    fn cycle_theme(&mut self) {
+        let names = Theme::names();
+        self.theme_idx = (self.theme_idx + 1) % names.len();
+        let name = names[self.theme_idx];
+        let theme = Theme::named(name);
+        self.theme = theme.clone();
+        self.chat.set_theme(theme.clone());
+        self.editor.set_theme(theme.clone());
+        self.status.set_theme(theme.clone());
+        self.model_selector.set_theme(theme.clone());
+        if let Some(ref mut picker) = self.session_picker {
+            picker.set_theme(theme.clone());
+        }
+        if let Some(ref mut login) = self.login_flow {
+            login.set_theme(theme);
+        }
+        self.chat.add_message(ChatMessage {
+            role: ChatRole::System,
+            text: format!("Theme: {name}"),
+            tool_name: None,
+            is_streaming: false,
+        });
     }
 
     /// Handle a slash command (text after the initial `/`).
@@ -610,15 +641,27 @@ impl App {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("tool executing");
                 self.status.set_tool_progress(&format!("running {name}..."));
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::Tool,
+                    text: "running".into(),
+                    tool_name: Some(name),
+                    is_streaming: true,
+                });
             }
-            TuiEvent::ToolProgress { message, .. } => {
+            TuiEvent::ToolProgress { name, message } => {
                 self.status
                     .set_tool_progress(&truncate_status_text(&message, 80));
+                self.chat.update_tool(
+                    &name,
+                    &format!("\n{}", truncate_status_text(&message, 120)),
+                    true,
+                );
             }
             TuiEvent::ToolEnd {
                 id: _,
                 name,
                 is_error,
+                summary,
             } => {
                 if self.current_tool.as_deref() == Some(name.as_str()) {
                     self.current_tool = None;
@@ -626,9 +669,17 @@ impl App {
                 if is_error {
                     self.status.set_agent_state("tool error");
                     self.status.set_tool_progress(&format!("{name} failed"));
+                    self.chat
+                        .update_tool(&name, &format!("\nfailed\n{summary}"), false);
                 } else {
                     self.status.set_agent_state("streaming");
                     self.status.set_tool_progress(&format!("{name} done"));
+                    let suffix = if summary.is_empty() {
+                        "\ndone".to_string()
+                    } else {
+                        format!("\ndone\n{summary}")
+                    };
+                    self.chat.update_tool(&name, &suffix, false);
                 }
             }
             TuiEvent::TurnStart => {

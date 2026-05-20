@@ -64,6 +64,9 @@ pub enum Command {
     /// Login to a provider (opens browser for OAuth).
     Login(LoginArgs),
 
+    /// JSON-RPC over stdin/stdout.
+    Rpc,
+
     /// Start interactive TUI mode with an optional initial prompt.
     #[command(name = "tui")]
     Tui(TuiArgs),
@@ -77,6 +80,10 @@ pub struct PromptArgs {
     /// Create a new session even if one exists.
     #[arg(long)]
     pub new: bool,
+
+    /// Continue the latest session instead of starting a new one.
+    #[arg(long = "continue")]
+    pub continue_latest: bool,
 }
 
 #[derive(Debug, Args)]

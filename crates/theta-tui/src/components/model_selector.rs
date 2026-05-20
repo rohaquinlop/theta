@@ -71,6 +71,10 @@ impl ModelSelector {
         self.visible = false;
     }
 
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     /// Get the selected model entry, if any.
     pub fn selected_model(&self) -> Option<&ModelEntry> {
         self.filtered

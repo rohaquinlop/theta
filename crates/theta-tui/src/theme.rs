@@ -55,6 +55,17 @@ impl Default for Theme {
 
 /// Monokai-inspired theme.
 impl Theme {
+    pub fn named(name: &str) -> Self {
+        match name {
+            "monokai" => Self::monokai(),
+            _ => Self::default(),
+        }
+    }
+
+    pub fn names() -> &'static [&'static str] {
+        &["default", "monokai"]
+    }
+
     pub fn monokai() -> Self {
         Self {
             accent: Color::Rgb(166, 226, 46),   // green

@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
 use crate::components::{Action, Component};
@@ -32,7 +32,7 @@ pub enum ChatRole {
 /// Scrollable chat message list.
 pub struct Chat {
     pub messages: Vec<ChatMessage>,
-    scroll: usize,
+    scroll_from_bottom: usize,
     focused: bool,
     theme: Theme,
 }
@@ -41,7 +41,7 @@ impl Chat {
     pub fn new(theme: Theme) -> Self {
         Self {
             messages: Vec::new(),
-            scroll: 0,
+            scroll_from_bottom: 0,
             focused: false,
             theme,
         }
@@ -49,6 +49,11 @@ impl Chat {
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
+        self.scroll_from_bottom = 0;
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     pub fn update_last(&mut self, text: &str, role: ChatRole, is_streaming: bool) {
@@ -66,6 +71,25 @@ impl Chat {
             tool_name: None,
             is_streaming,
         });
+        self.scroll_from_bottom = 0;
+    }
+
+    pub fn update_tool(&mut self, name: &str, text: &str, is_streaming: bool) {
+        if let Some(msg) = self.messages.iter_mut().rev().find(|msg| {
+            msg.role == ChatRole::Tool && msg.tool_name.as_deref() == Some(name) && msg.is_streaming
+        }) {
+            msg.text.push_str(text);
+            msg.is_streaming = is_streaming;
+            return;
+        }
+
+        self.messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            text: text.trim_start_matches('\n').to_string(),
+            tool_name: Some(name.to_string()),
+            is_streaming,
+        });
+        self.scroll_from_bottom = 0;
     }
 
     pub fn finish_last(&mut self, role: ChatRole) {
@@ -78,11 +102,30 @@ impl Chat {
 
     /// Format a message into styled lines with markdown parsing.
     fn format_message(&self, msg: &ChatMessage) -> Vec<Line<'static>> {
-        let (prefix, role_style): (&'static str, Style) = match msg.role {
-            ChatRole::User => ("> ", Style::default().fg(self.theme.accent)),
-            ChatRole::Assistant => ("", Style::default().fg(self.theme.success)),
-            ChatRole::Tool => ("", Style::default().fg(self.theme.warning)),
-            ChatRole::System => ("# ", Style::default().fg(self.theme.dim)),
+        let (label, prefix, role_style): (String, &'static str, Style) = match msg.role {
+            ChatRole::User => (
+                "You".into(),
+                "  ",
+                Style::default()
+                    .fg(self.theme.fg)
+                    .bg(self.theme.user_bubble),
+            ),
+            ChatRole::Assistant => (
+                "Theta".into(),
+                "  ",
+                Style::default()
+                    .fg(self.theme.fg)
+                    .bg(self.theme.assistant_bubble),
+            ),
+            ChatRole::Tool => (
+                msg.tool_name
+                    .as_ref()
+                    .map(|name| format!("Tool: {name}"))
+                    .unwrap_or_else(|| "Tool".into()),
+                "  ",
+                Style::default().fg(self.theme.warning),
+            ),
+            ChatRole::System => ("System".into(), "  ", Style::default().fg(self.theme.dim)),
         };
 
         let text = if msg.role == ChatRole::Tool {
@@ -100,10 +143,20 @@ impl Chat {
             None
         };
 
-        let lines = format_markdown(&text, role_style, &self.theme, prefix);
+        let mut lines = vec![Line::from(vec![Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(match msg.role {
+                    ChatRole::User => self.theme.accent,
+                    ChatRole::Assistant => self.theme.success,
+                    ChatRole::Tool => self.theme.warning,
+                    ChatRole::System => self.theme.dim,
+                })
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )])];
+        lines.extend(format_markdown(&text, role_style, &self.theme, prefix));
 
         if let Some(ref c) = cursor {
-            let mut lines = lines;
             if lines.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(prefix.to_string(), role_style),
@@ -122,7 +175,7 @@ impl Chat {
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let title = if self.focused {
-            " Chat (j/k scroll) "
+            " Chat (j/k, PgUp/PgDn) "
         } else {
             " Chat "
         };
@@ -130,24 +183,27 @@ impl Component for Chat {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border))
+            .padding(Padding::horizontal(1))
             .title(title)
             .title_style(Style::default().fg(self.theme.accent));
 
-        let lines: Vec<Line> = self
-            .messages
-            .iter()
-            .rev()
-            .skip(self.scroll)
-            .flat_map(|msg| {
-                let mut out = vec![Line::raw("")];
-                out.extend(self.format_message(msg));
-                out
-            })
-            .collect();
+        let mut lines: Vec<Line> = Vec::new();
+        for (idx, msg) in self.messages.iter().enumerate() {
+            if idx > 0 {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(self.format_message(msg));
+        }
+
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height);
+        self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
+        let scroll_top = max_scroll.saturating_sub(self.scroll_from_bottom);
 
         let para = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .block(block);
+            .block(block)
+            .scroll((scroll_top.min(u16::MAX as usize) as u16, 0));
 
         frame.render_widget(para, area);
     }
@@ -162,18 +218,18 @@ impl Component for Chat {
 
         match key.code {
             crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down
-                if self.scroll > 0 =>
+                if self.scroll_from_bottom > 0 =>
             {
-                self.scroll -= 1;
+                self.scroll_from_bottom -= 1;
             }
             crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
-                self.scroll = self.scroll.saturating_add(1);
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(1);
             }
             crossterm::event::KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(10);
             }
             crossterm::event::KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(10);
             }
             _ => {}
         }
@@ -190,10 +246,11 @@ impl Component for Chat {
 }
 
 fn truncate_output(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         text.to_string()
     } else {
-        format!("{}... ({} chars total)", &text[..max_len], text.len())
+        let truncated: String = text.chars().take(max_len).collect();
+        format!("{}... ({} chars total)", truncated, text.chars().count())
     }
 }
 

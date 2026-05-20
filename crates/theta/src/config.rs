@@ -40,6 +40,10 @@ pub struct ThetaConfig {
     /// Provider retry settings.
     #[serde(default)]
     pub retry: RetrySettings,
+
+    /// Provider transport settings.
+    #[serde(default)]
+    pub provider: ProviderSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -67,6 +71,12 @@ pub struct CompactionSettings {
     /// Tokens to reserve for the model's response.
     #[serde(default = "default_reserve_tokens")]
     pub reserve_tokens: u32,
+    /// Use an LLM call to summarize compacted context.
+    #[serde(default = "default_true")]
+    pub summarize_with_llm: bool,
+    /// Maximum output tokens for compaction summaries.
+    #[serde(default = "default_summary_max_tokens")]
+    pub summary_max_tokens: u32,
 }
 
 impl Default for CompactionSettings {
@@ -74,6 +84,8 @@ impl Default for CompactionSettings {
         Self {
             enabled: true,
             reserve_tokens: 4096,
+            summarize_with_llm: true,
+            summary_max_tokens: 512,
         }
     }
 }
@@ -87,6 +99,21 @@ pub struct RetrySettings {
     /// Base delay in milliseconds before first retry.
     #[serde(default = "default_base_delay")]
     pub base_delay_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    /// Request timeout in milliseconds.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_timeout_ms(),
+        }
+    }
 }
 
 impl Default for RetrySettings {
@@ -104,11 +131,17 @@ fn default_true() -> bool {
 fn default_reserve_tokens() -> u32 {
     4096
 }
+fn default_summary_max_tokens() -> u32 {
+    512
+}
 fn default_max_retries() -> u32 {
     2
 }
 fn default_base_delay() -> u64 {
     1000
+}
+fn default_timeout_ms() -> u64 {
+    120_000
 }
 
 /// Provider auth tokens loaded from ~/.theta/auth.json or env vars.
@@ -353,11 +386,14 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
         compaction: theta_agent_core::CompactionConfig {
             enabled: tc.compaction.enabled,
             reserve_tokens: tc.compaction.reserve_tokens,
+            summarize_with_llm: tc.compaction.summarize_with_llm,
+            summary_max_tokens: tc.compaction.summary_max_tokens,
         },
         retry: theta_agent_core::RetryConfig {
             max_retries: tc.retry.max_retries,
             base_delay_ms: tc.retry.base_delay_ms,
         },
+        provider_timeout_ms: Some(tc.provider.timeout_ms),
         ..Default::default()
     }
 }
