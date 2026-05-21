@@ -51,6 +51,10 @@ pub struct ModelCompat {
     /// (content block deltas arriving before the full block).
     #[serde(default, rename = "supportsEagerToolInputStreaming")]
     pub supports_eager_tool_input_streaming: bool,
+    /// Whether provider requires an assistant bridge message between
+    /// tool results and subsequent user messages.
+    #[serde(default, rename = "requiresAssistantAfterToolResult")]
+    pub requires_assistant_after_tool_result: bool,
 }
 
 impl ModelCompat {
@@ -69,6 +73,7 @@ impl ModelCompat {
             thinking_format: Some(ThinkingFormat::DeepSeek),
             requires_reasoning_content_on_assistant: true,
             supports_usage_in_streaming: true,
+            requires_assistant_after_tool_result: true,
             ..Default::default()
         }
     }

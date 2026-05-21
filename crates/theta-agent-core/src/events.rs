@@ -76,4 +76,10 @@ pub enum AgentEvent {
         /// Delay in milliseconds before retry.
         delay_ms: u64,
     },
+    /// Replay transcript was sanitized before provider call.
+    ReplaySanitized {
+        dropped_assistant_messages: u32,
+        synthesized_tool_results: u32,
+        normalized_tool_call_ids: u32,
+    },
 }

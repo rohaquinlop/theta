@@ -842,22 +842,24 @@ impl App {
                 if self.streaming {
                     self.chat.update_last(&text, ChatRole::Assistant, true);
                 }
+                if self.current_tool.is_none() {
+                    self.status.set_agent_state("streaming (responding)");
+                }
             }
             TuiEvent::ThinkingDelta(text) => {
                 let summary = text.lines().next().unwrap_or("").trim();
+                self.status.set_agent_state("thinking");
                 if summary.is_empty() {
-                    self.status.set_agent_state("thinking");
                     self.status.set_tool_progress("");
                 } else {
-                    self.status.set_agent_state("thinking");
                     self.status
                         .set_tool_progress(&truncate_status_text(summary, 80));
                 }
             }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
-                self.status.set_agent_state("tool executing");
-                self.status.set_tool_progress(&format!("running {name}..."));
+                self.status.set_agent_state(&format!("tool: {name}"));
+                self.status.set_tool_progress("running...");
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::Tool,
                     text: "running".into(),
@@ -884,12 +886,12 @@ impl App {
                     self.current_tool = None;
                 }
                 if is_error {
-                    self.status.set_agent_state("tool error");
-                    self.status.set_tool_progress(&format!("{name} failed"));
+                    self.status.set_agent_state(&format!("tool error: {name}"));
+                    self.status.set_tool_progress("failed");
                     self.chat
                         .update_tool(&name, &format!("\nfailed\n{summary}"), false);
                 } else {
-                    self.status.set_agent_state("streaming");
+                    self.status.set_agent_state("streaming (post-tool)");
                     self.status.set_tool_progress(&format!("{name} done"));
                     let suffix = if summary.is_empty() {
                         "\ndone".to_string()
@@ -901,7 +903,7 @@ impl App {
             }
             TuiEvent::TurnStart => {
                 self.streaming = true;
-                self.status.set_agent_state("streaming");
+                self.status.set_agent_state("streaming (starting)");
                 self.status.set_tool_progress("");
             }
             TuiEvent::TurnEnd { stop_reason } => {

@@ -147,7 +147,15 @@ impl Agent {
     /// Load past messages from a session (for continue/resume).
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
-        state.load_messages(messages);
+        let (sanitized, stats) = theta_ai::sanitize_messages_for_replay(&messages, &state.model);
+        state.load_messages(sanitized);
+        if stats.changed() {
+            let _ = self.event_tx.send(AgentEvent::ReplaySanitized {
+                dropped_assistant_messages: stats.dropped_assistant_messages,
+                synthesized_tool_results: stats.synthesized_tool_results,
+                normalized_tool_call_ids: stats.normalized_tool_call_ids,
+            });
+        }
     }
 
     /// Get the number of messages currently in the transcript.

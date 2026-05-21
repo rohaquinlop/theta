@@ -6,7 +6,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, resolve_path};
+use super::{ToolContext, format_path_io_error, resolve_path};
 
 pub struct WriteTool {
     ctx: ToolContext,
@@ -85,7 +85,7 @@ impl AgentTool for WriteTool {
                 .await
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "write".into(),
-                    message: format!("failed to create parent directories: {e}"),
+                    message: format_path_io_error("create parent directories", parent, &e),
                 })?;
         }
 
@@ -93,7 +93,7 @@ impl AgentTool for WriteTool {
             .await
             .map_err(|e| AgentError::ToolExecution {
                 tool_name: "write".into(),
-                message: format!("failed to write file: {e}"),
+                message: format_path_io_error("write file", &file_path, &e),
             })?;
 
         Ok(ToolResult {

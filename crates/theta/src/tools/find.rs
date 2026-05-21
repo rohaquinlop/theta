@@ -6,7 +6,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
 
 pub struct FindTool {
     ctx: ToolContext,
@@ -70,6 +70,23 @@ impl AgentTool for FindTool {
             .as_str()
             .map(|p| resolve_path(&self.ctx, p))
             .unwrap_or_else(|| self.ctx.working_dir.clone());
+
+        let meta =
+            tokio::fs::metadata(&search_path)
+                .await
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "find".into(),
+                    message: format_path_io_error("inspect search path", &search_path, &e),
+                })?;
+        if !meta.is_dir() {
+            return Err(AgentError::ToolExecution {
+                tool_name: "find".into(),
+                message: format!(
+                    "inspect search path failed (invalid path) at '{}': not a directory",
+                    search_path.to_string_lossy()
+                ),
+            });
+        }
 
         let glob_pattern = format!("{}/**/{pattern}", search_path.display());
 

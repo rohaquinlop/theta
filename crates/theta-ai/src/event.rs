@@ -102,6 +102,16 @@ struct ToolCallAccumulator {
     done: bool,
 }
 
+fn tool_call_id_matches(existing_id: &str, event_id: &str) -> bool {
+    if existing_id == event_id {
+        return true;
+    }
+
+    let existing_call_id = existing_id.split('|').next().unwrap_or(existing_id);
+    let event_call_id = event_id.split('|').next().unwrap_or(event_id);
+    existing_call_id == event_call_id
+}
+
 impl EventAccumulator {
     pub fn new() -> Self {
         Self::default()
@@ -141,12 +151,20 @@ impl EventAccumulator {
                 });
             }
             AssistantMessageEvent::ToolCallDelta { id, arguments } => {
-                if let Some(tc) = self.tool_calls.iter_mut().find(|tc| &tc.id == id) {
+                if let Some(tc) = self
+                    .tool_calls
+                    .iter_mut()
+                    .find(|tc| tool_call_id_matches(&tc.id, id))
+                {
                     tc.arguments.push_str(arguments);
                 }
             }
             AssistantMessageEvent::ToolCallEnd { id } => {
-                if let Some(tc) = self.tool_calls.iter_mut().find(|tc| &tc.id == id) {
+                if let Some(tc) = self
+                    .tool_calls
+                    .iter_mut()
+                    .find(|tc| tool_call_id_matches(&tc.id, id))
+                {
                     tc.done = true;
                 }
             }
@@ -154,7 +172,10 @@ impl EventAccumulator {
                 self.usage = Some(usage.clone());
             }
             AssistantMessageEvent::Done { stop_reason, usage } => {
-                self.stop_reason = Some(*stop_reason);
+                self.stop_reason = Some(match (self.stop_reason, *stop_reason) {
+                    (Some(StopReason::ToolUse), StopReason::Stop) => StopReason::ToolUse,
+                    (_, next) => next,
+                });
                 if let Some(u) = usage {
                     self.usage = Some(u.clone());
                 }
@@ -211,6 +232,10 @@ impl EventAccumulator {
 
     pub fn error_message(&self) -> Option<&str> {
         self.error_message.as_deref()
+    }
+
+    pub fn unresolved_tool_call_count(&self) -> usize {
+        self.tool_calls.iter().filter(|tc| !tc.done).count()
     }
 
     /// Reset for the next stream.
@@ -274,5 +299,39 @@ mod tests {
         acc.reset();
         assert!(acc.content_blocks().is_empty());
         assert!(acc.stop_reason().is_none());
+    }
+
+    #[test]
+    fn test_tool_call_delta_matches_call_id_prefix() {
+        let mut acc = EventAccumulator::new();
+        acc.feed(&AssistantMessageEvent::ToolCallStart {
+            id: "call_1|item_1".into(),
+            name: "read".into(),
+        });
+        acc.feed(&AssistantMessageEvent::ToolCallDelta {
+            id: "call_1".into(),
+            arguments: "{\"path\":\"Cargo.toml\"}".into(),
+        });
+        acc.feed(&AssistantMessageEvent::ToolCallEnd {
+            id: "call_1".into(),
+        });
+
+        let blocks = acc.content_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], ContentBlock::ToolCall { .. }));
+    }
+
+    #[test]
+    fn test_done_tool_use_not_downgraded_by_later_stop() {
+        let mut acc = EventAccumulator::new();
+        acc.feed(&AssistantMessageEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        });
+        acc.feed(&AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        });
+        assert_eq!(acc.stop_reason(), Some(StopReason::ToolUse));
     }
 }

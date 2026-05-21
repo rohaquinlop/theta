@@ -316,6 +316,56 @@ async fn test_agent_tool_loop() {
 }
 
 #[tokio::test]
+async fn test_agent_retries_empty_assistant_turn() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        }],
+        vec![
+            AssistantMessageEvent::text_delta("Recovered response"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .prompt(vec![ContentBlock::text("Explain changes")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let last_assistant = state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|msg| match msg {
+            Message::Assistant { content, .. } => Some(content),
+            _ => None,
+        })
+        .expect("assistant message should exist");
+
+    let text = last_assistant
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Recovered response"));
+}
+
+#[tokio::test]
 async fn test_agent_abort() {
     let model = test_model();
 

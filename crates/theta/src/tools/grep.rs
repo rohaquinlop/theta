@@ -7,7 +7,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
 
 pub struct GrepTool {
     ctx: ToolContext,
@@ -76,6 +76,13 @@ impl AgentTool for GrepTool {
             .as_str()
             .map(|p| resolve_path(&self.ctx, p))
             .unwrap_or_else(|| self.ctx.working_dir.clone());
+
+        tokio::fs::metadata(&search_path)
+            .await
+            .map_err(|e| AgentError::ToolExecution {
+                tool_name: "grep".into(),
+                message: format_path_io_error("inspect search path", &search_path, &e),
+            })?;
 
         let re = Regex::new(pattern).map_err(|e| AgentError::ToolExecution {
             tool_name: "grep".into(),

@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
+use tempfile::TempDir;
+use theta::session::SessionManager;
 use theta::system_prompt::build_system_prompt;
 use theta_agent_core::{
     Agent, AgentError, AgentTool, ToolExecutionMode, ToolResult, ToolUpdateSender,
@@ -19,6 +21,67 @@ use theta_ai::{LlmProvider, ThetaError};
 
 struct PromptSensitiveMockProvider {
     call_count: std::sync::atomic::AtomicU32,
+}
+
+struct ReplayValidationProvider;
+
+#[async_trait]
+impl LlmProvider for ReplayValidationProvider {
+    async fn stream<'a>(
+        &'a self,
+        _model: &Model,
+        context: &Context,
+        _options: &StreamOptions,
+    ) -> Result<EventStream<'a>, ThetaError> {
+        let mut pending = std::collections::HashSet::new();
+        for msg in &context.messages {
+            match msg {
+                Message::Assistant { content, .. } => {
+                    for b in content {
+                        if let ContentBlock::ToolCall { id, .. } = b {
+                            pending.insert(id.clone());
+                        }
+                    }
+                }
+                Message::ToolResult { tool_call_id, .. } => {
+                    pending.remove(tool_call_id);
+                }
+                Message::User { .. } => {
+                    if !pending.is_empty() {
+                        return Ok(Box::pin(futures::stream::iter(vec![
+                            AssistantMessageEvent::Error {
+                                code: "invalid_replay".into(),
+                                message: "orphan tool call replayed".into(),
+                            },
+                        ])));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Box::pin(futures::stream::iter(vec![
+            AssistantMessageEvent::text_delta("follow-up ok"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ])))
+    }
+
+    async fn stream_simple<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<EventStream<'a>, ThetaError> {
+        let stream_opts = StreamOptions {
+            max_tokens: options.max_tokens,
+            temperature: options.temperature,
+            ..Default::default()
+        };
+        self.stream(model, context, &stream_opts).await
+    }
 }
 
 type EventStream<'a> = Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>;
@@ -246,4 +309,61 @@ async fn system_prompt_guardrails_drive_tool_execution_with_mock_provider() {
         assistant_text.contains("Implemented via tool."),
         "expected assistant to continue after tool call"
     );
+}
+
+#[tokio::test]
+async fn persisted_session_with_orphan_toolcall_is_sanitized_on_resume() {
+    let tmp = TempDir::new().expect("tmp");
+    let mgr = SessionManager::with_dir(tmp.path().join("sessions"));
+    let mut session = mgr.create(Some("test-model")).await.expect("create");
+
+    // Persist broken history: assistant tool call without matching tool result.
+    let broken = Message::Assistant {
+        content: vec![ContentBlock::ToolCall {
+            id: "call_orphan".into(),
+            name: "mock".into(),
+            arguments: serde_json::json!({"input":"x"}),
+        }],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(ProviderKind::OpenAI),
+        model: Some("test-model".into()),
+        usage: None,
+        stop_reason: Some(StopReason::ToolUse),
+        error_message: None,
+        timestamp: 1,
+    };
+    mgr.append_entry(&mut session, &broken)
+        .await
+        .expect("append");
+    mgr.append_entry(
+        &mut session,
+        &Message::User {
+            content: vec![ContentBlock::text("second ask")],
+            timestamp: 2,
+        },
+    )
+    .await
+    .expect("append2");
+
+    let reopened = mgr
+        .open(std::path::Path::new(
+            session.file_path.file_name().expect("file"),
+        ))
+        .await
+        .expect("open");
+
+    let model = test_model();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Api::OpenAiCompletions, Box::new(ReplayValidationProvider));
+    let agent = Agent::new(
+        model.clone(),
+        Arc::new(registry),
+        Arc::new(TestModelCatalog { model }),
+    );
+    agent.load_messages(reopened.messages).await;
+
+    agent
+        .prompt(vec![ContentBlock::text("third ask")])
+        .await
+        .expect("resume prompt should succeed");
 }

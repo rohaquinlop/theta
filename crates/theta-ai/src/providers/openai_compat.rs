@@ -15,6 +15,7 @@ use crate::error::ThetaError;
 use crate::event::AssistantMessageEvent;
 use crate::model::Model;
 use crate::provider::{EventStream, Provider};
+use crate::replay::sanitize_messages_for_replay;
 use crate::types::{
     ContentBlock, Context, Message, SimpleStreamOptions, StopReason, StreamOptions, Usage,
 };
@@ -152,13 +153,21 @@ fn build_request_body(
     options: &StreamOptions,
     include_tools: bool,
 ) -> Result<Value, ThetaError> {
+    let (sanitized_messages, _) = sanitize_messages_for_replay(&context.messages, model);
+    let sanitized_context = Context {
+        system: context.system.clone(),
+        messages: sanitized_messages,
+        tools: context.tools.clone(),
+        thinking_level: context.thinking_level,
+    };
+
     let mut body = json!({
         "model": model.id,
         "stream": true,
     });
 
     // Messages
-    let messages = convert_messages(model, context);
+    let messages = convert_messages(model, &sanitized_context);
     body["messages"] = messages;
 
     // System prompt
@@ -186,8 +195,8 @@ fn build_request_body(
     }
 
     // Tools
-    if include_tools && !context.tools.is_empty() {
-        let tools: Vec<Value> = context
+    if include_tools && !sanitized_context.tools.is_empty() {
+        let tools: Vec<Value> = sanitized_context
             .tools
             .iter()
             .map(|tool| {
@@ -202,6 +211,8 @@ fn build_request_body(
             })
             .collect();
         body["tools"] = Value::Array(tools);
+    } else if include_tools && has_tool_history(&sanitized_context.messages) {
+        body["tools"] = Value::Array(vec![]);
     }
 
     // Max tokens
@@ -275,13 +286,38 @@ pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::type
 
 /// Convert our Message types to OpenAI-compatible message JSON.
 pub fn convert_messages(model: &Model, context: &Context) -> Value {
-    let messages: Vec<Value> = context
-        .messages
-        .iter()
-        .filter_map(|msg| convert_message(model, msg))
-        .collect();
+    let mut messages: Vec<Value> = Vec::new();
+    let mut last_role_was_tool = false;
+
+    for msg in &context.messages {
+        if model.compat.requires_assistant_after_tool_result
+            && last_role_was_tool
+            && matches!(msg, Message::User { .. })
+        {
+            messages.push(json!({
+                "role": "assistant",
+                "content": "I have processed the tool results.",
+            }));
+            last_role_was_tool = false;
+        }
+
+        if let Some(converted) = convert_message(model, msg) {
+            last_role_was_tool = converted.get("role").and_then(|r| r.as_str()) == Some("tool");
+            messages.push(converted);
+        }
+    }
 
     Value::Array(messages)
+}
+
+fn has_tool_history(messages: &[Message]) -> bool {
+    messages.iter().any(|msg| match msg {
+        Message::ToolResult { .. } => true,
+        Message::Assistant { content, .. } => content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. })),
+        _ => false,
+    })
 }
 
 fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
@@ -322,7 +358,7 @@ fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 .collect();
 
             if !text_parts.is_empty() {
-                msg_json["content"] = json!(text_parts.join("\n"));
+                msg_json["content"] = json!(text_parts.join(""));
                 has_content = true;
             }
 
@@ -361,16 +397,20 @@ fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 .collect();
 
             if !thinking_blocks.is_empty() {
-                msg_json["reasoning_content"] = json!(thinking_blocks.join("\n"));
+                msg_json["reasoning_content"] = json!(thinking_blocks.join("\n\n"));
                 has_content = true;
             } else if model.requires_reasoning_on_replay() {
                 // DeepSeek requires empty reasoning_content on replayed assistant messages.
                 msg_json["reasoning_content"] = json!("");
             }
 
-            // If nothing added, return null content
-            if !has_content && !model.requires_reasoning_on_replay() {
-                msg_json["content"] = json!("");
+            // Skip empty assistant replay messages unless provider explicitly
+            // requires reasoning_content to be present.
+            if !has_content
+                && msg_json.get("tool_calls").is_none()
+                && !model.requires_reasoning_on_replay()
+            {
+                return None;
             }
 
             Some(msg_json)
@@ -443,6 +483,7 @@ struct OpenAiToolCallState {
     index: usize,
     id: String,
     name: String,
+    arguments: String,
     emitted_start: bool,
     emitted_end: bool,
 }
@@ -543,6 +584,9 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
             {
                 state.id = id.to_string();
             }
+            if state.id.is_empty() {
+                state.id = format!("tool_call_{index}");
+            }
             if let Some(name) = name
                 && !name.is_empty()
             {
@@ -555,18 +599,26 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                     id: state.id.clone(),
                     name: state.name.clone(),
                 });
+                if !state.arguments.is_empty() {
+                    events.push(AssistantMessageEvent::ToolCallDelta {
+                        id: state.id.clone(),
+                        arguments: state.arguments.clone(),
+                    });
+                }
             }
 
             if let Some(args) = function
                 .and_then(|f| f.get("arguments"))
                 .and_then(|a| a.as_str())
                 && !args.is_empty()
-                && !state.id.is_empty()
             {
-                events.push(AssistantMessageEvent::ToolCallDelta {
-                    id: state.id.clone(),
-                    arguments: args.to_string(),
-                });
+                state.arguments.push_str(args);
+                if state.emitted_start {
+                    events.push(AssistantMessageEvent::ToolCallDelta {
+                        id: state.id.clone(),
+                        arguments: args.to_string(),
+                    });
+                }
             }
         }
     }
@@ -595,6 +647,23 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
     if let Some(reason) = finish_reason {
         if reason == "tool_calls" {
             for state in &mut parser.tool_calls {
+                if !state.emitted_start && !state.id.is_empty() {
+                    state.emitted_start = true;
+                    events.push(AssistantMessageEvent::ToolCallStart {
+                        id: state.id.clone(),
+                        name: if state.name.is_empty() {
+                            "unknown".to_string()
+                        } else {
+                            state.name.clone()
+                        },
+                    });
+                    if !state.arguments.is_empty() {
+                        events.push(AssistantMessageEvent::ToolCallDelta {
+                            id: state.id.clone(),
+                            arguments: state.arguments.clone(),
+                        });
+                    }
+                }
                 if state.emitted_start && !state.emitted_end {
                     state.emitted_end = true;
                     events.push(AssistantMessageEvent::ToolCallEnd {
@@ -800,6 +869,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tool_call_arguments_before_id_is_retained() {
+        let mut parser = OpenAiCompatStreamParser::new();
+        let mut accumulator = EventAccumulator::new();
+
+        let chunks = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\""}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read","arguments":":\"Cargo.toml\"}"}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#,
+        ];
+
+        let events: Vec<AssistantMessageEvent> = chunks
+            .iter()
+            .flat_map(|chunk| parser.parse_data(chunk))
+            .collect();
+
+        for event in &events {
+            accumulator.feed(event);
+        }
+
+        let blocks = accumulator.content_blocks();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, "call_abc");
+                assert_eq!(name, "read");
+                assert_eq!(arguments["path"], "Cargo.toml");
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_tool_result_conversion_omits_non_openai_fields() {
         let model = Model {
             id: "test-model".into(),
@@ -831,5 +936,192 @@ mod tests {
         assert_eq!(converted["tool_call_id"], "call_123");
         assert_eq!(converted["content"], "done");
         assert!(converted.get("is_error").is_none());
+    }
+
+    #[test]
+    fn test_transform_synthesizes_missing_tool_result() {
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "OpenAI".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::OpenAI,
+            base_url: "https://api.openai.com".into(),
+            reasoning: false,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let messages = vec![
+            Message::User {
+                content: vec![ContentBlock::text("do thing")],
+                timestamp: 1,
+            },
+            Message::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path":"Cargo.toml"}),
+                }],
+                api: Some(crate::types::Api::OpenAiCompletions),
+                provider: Some(crate::types::Provider::OpenAI),
+                model: Some("gpt-5.5".into()),
+                usage: None,
+                stop_reason: Some(StopReason::ToolUse),
+                error_message: None,
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![ContentBlock::text("next")],
+                timestamp: 3,
+            },
+        ];
+
+        let (transformed, _stats) = sanitize_messages_for_replay(&messages, &model);
+        assert!(
+            transformed.iter().any(|m| matches!(
+                m,
+                Message::ToolResult {
+                    tool_call_id,
+                    is_error,
+                    ..
+                } if tool_call_id == "call_1" && *is_error
+            )),
+            "expected synthetic tool result for orphan tool call"
+        );
+    }
+
+    #[test]
+    fn test_transform_drops_aborted_assistant_message() {
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "OpenAI".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::OpenAI,
+            base_url: "https://api.openai.com".into(),
+            reasoning: false,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let messages = vec![
+            Message::User {
+                content: vec![ContentBlock::text("hi")],
+                timestamp: 1,
+            },
+            Message::Assistant {
+                content: vec![ContentBlock::text("partial")],
+                api: Some(crate::types::Api::OpenAiCompletions),
+                provider: Some(crate::types::Provider::OpenAI),
+                model: Some("gpt-5.5".into()),
+                usage: None,
+                stop_reason: Some(StopReason::Aborted),
+                error_message: Some("aborted".into()),
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![ContentBlock::text("continue")],
+                timestamp: 3,
+            },
+        ];
+
+        let (transformed, _stats) = sanitize_messages_for_replay(&messages, &model);
+        assert_eq!(
+            transformed
+                .iter()
+                .filter(|m| matches!(m, Message::Assistant { .. }))
+                .count(),
+            0,
+            "aborted assistant message should not be replayed"
+        );
+    }
+
+    #[test]
+    fn test_bridge_assistant_inserted_after_tool_before_user() {
+        let mut model = Model {
+            id: "deepseek-v4-pro".into(),
+            name: "DeepSeek".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::DeepSeek,
+            base_url: "https://api.deepseek.com".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_deepseek(),
+        };
+        model.compat.requires_assistant_after_tool_result = true;
+        let ctx = Context {
+            system: None,
+            messages: vec![
+                Message::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "read".into(),
+                    content: vec![ContentBlock::text("ok")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 1,
+                },
+                Message::User {
+                    content: vec![ContentBlock::text("next")],
+                    timestamp: 2,
+                },
+            ],
+            tools: vec![],
+            thinking_level: None,
+        };
+        let msgs = convert_messages(&model, &ctx);
+        let arr = msgs.as_array().expect("messages array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[1]["role"], "assistant");
+        assert_eq!(arr[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_tools_empty_sent_when_tool_history_present() {
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "OpenAI".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::OpenAI,
+            base_url: "https://api.openai.com".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let ctx = Context {
+            system: None,
+            messages: vec![Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentBlock::text("ok")],
+                details: None,
+                is_error: false,
+                timestamp: 1,
+            }],
+            tools: vec![],
+            thinking_level: None,
+        };
+        let body = build_request_body(&model, &ctx, &StreamOptions::default(), true).unwrap();
+        assert!(body.get("tools").is_some());
+        assert_eq!(
+            body["tools"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            0
+        );
     }
 }

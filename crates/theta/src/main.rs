@@ -20,15 +20,20 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".theta");
     let _ = std::fs::create_dir_all(&log_dir);
-    let log_file = std::fs::File::create(log_dir.join("theta.log"))
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("theta.log"))
         .unwrap_or_else(|_| tempfile::tempfile().unwrap());
     tracing_subscriber::fmt()
         .with_writer(std::sync::Mutex::new(log_file))
+        .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    tracing::info!("theta startup");
 
     let cli = Cli::parse();
 

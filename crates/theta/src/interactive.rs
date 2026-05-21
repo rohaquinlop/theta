@@ -435,6 +435,15 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
                     let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
                 }
+                Ok(AgentEvent::ReplaySanitized {
+                    dropped_assistant_messages,
+                    synthesized_tool_results,
+                    normalized_tool_call_ids,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::Info(format!(
+                        "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}"
+                    )));
+                }
                 Ok(AgentEvent::Error { message }) => {
                     let _ = event_tx.send(TuiEvent::Error(message));
                 }

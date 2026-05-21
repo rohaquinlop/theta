@@ -120,29 +120,27 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
 fn resolve_path(ctx: &ToolContext, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     let resolved = if p.is_absolute() {
-        p.clone()
+        p
     } else {
-        ctx.working_dir.join(&p)
+        ctx.working_dir.join(p)
     };
-    // Canonicalize to resolve .. and symlinks, then verify it stays
-    // within the working directory. If canonicalization fails (path
-    // doesn't exist yet), fall back to component-level check.
-    if let Ok(canonical) = resolved.canonicalize() {
-        if canonical.starts_with(&ctx.working_dir) {
-            return canonical;
-        }
-    } else {
-        // Path doesn't exist yet — check components manually.
-        let normalized = resolved.components().collect::<Vec<_>>();
-        let working_components = ctx.working_dir.components().collect::<Vec<_>>();
-        if normalized.starts_with(&working_components) {
-            return resolved;
-        }
+    resolved.canonicalize().unwrap_or(resolved)
+}
+
+fn classify_io_error(err: &std::io::Error) -> &'static str {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "path not found",
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        std::io::ErrorKind::InvalidInput => "invalid path",
+        _ => "I/O error",
     }
-    // Path escapes working directory — clamp it.
-    ctx.working_dir.join(
-        p.file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("denied")),
+}
+
+fn format_path_io_error(action: &str, path: &std::path::Path, err: &std::io::Error) -> String {
+    let reason = classify_io_error(err);
+    format!(
+        "{action} failed ({reason}) at '{}': {err}",
+        path.to_string_lossy()
     )
 }
 
@@ -159,4 +157,26 @@ pub fn builtin_tools(
         std::sync::Arc::new(FindTool::new(ctx.clone())),
         std::sync::Arc::new(LsTool::new(ctx.clone())),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolContext, resolve_path};
+
+    #[test]
+    fn resolve_path_keeps_absolute_path() {
+        let ctx = ToolContext::new(std::path::PathBuf::from("/tmp/theta-workdir"));
+        let resolved = resolve_path(&ctx, "/Users/rhafid/.theta");
+        assert_eq!(resolved, std::path::PathBuf::from("/Users/rhafid/.theta"));
+    }
+
+    #[test]
+    fn resolve_path_resolves_relative_from_workdir() {
+        let ctx = ToolContext::new(std::path::PathBuf::from("/tmp/theta-workdir"));
+        let resolved = resolve_path(&ctx, "src/main.rs");
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/tmp/theta-workdir/src/main.rs")
+        );
+    }
 }

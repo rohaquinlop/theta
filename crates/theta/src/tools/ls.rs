@@ -6,7 +6,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
 
 pub struct LsTool {
     ctx: ToolContext,
@@ -66,7 +66,7 @@ impl AgentTool for LsTool {
                 .await
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "ls".into(),
-                    message: format!("failed to list directory: {e}"),
+                    message: format_path_io_error("list directory", &dir_path, &e),
                 })?;
 
         let mut results = Vec::new();

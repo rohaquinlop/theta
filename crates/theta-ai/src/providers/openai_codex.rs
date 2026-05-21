@@ -263,6 +263,9 @@ async fn ws_stream(
         |(mut read, mut parser, mut pending, mut done_emitted)| async move {
             loop {
                 if let Some(event) = pending.pop_front() {
+                    if matches!(event, AssistantMessageEvent::Done { .. }) {
+                        done_emitted = true;
+                    }
                     return Some((event, (read, parser, pending, done_emitted)));
                 }
 
@@ -271,7 +274,7 @@ async fn ws_stream(
                         pending.extend(parser.parse_json_str(&text));
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        if !done_emitted {
+                        if !done_emitted && !parser.done_emitted() {
                             done_emitted = true;
                             return Some((done_event(), (read, parser, pending, done_emitted)));
                         }
@@ -314,14 +317,18 @@ fn byte_stream_to_events(
             false,
             CodexEventParser::default(),
             VecDeque::new(),
+            false,
         ),
-        |(mut stream, mut buf, mut exhausted, mut parser, mut pending)| async move {
+        |(mut stream, mut buf, mut exhausted, mut parser, mut pending, mut done_emitted)| async move {
             if exhausted {
                 return None;
             }
             loop {
                 if let Some(event) = pending.pop_front() {
-                    return Some((event, (stream, buf, exhausted, parser, pending)));
+                    if matches!(event, AssistantMessageEvent::Done { .. }) {
+                        done_emitted = true;
+                    }
+                    return Some((event, (stream, buf, exhausted, parser, pending, done_emitted)));
                 }
 
                 while let Some(pos) = buf.find('\n') {
@@ -329,7 +336,10 @@ fn byte_stream_to_events(
                     buf = buf[pos + 1..].to_string();
                     pending.extend(parser.parse_sse_line(&line));
                     if let Some(event) = pending.pop_front() {
-                        return Some((event, (stream, buf, exhausted, parser, pending)));
+                        if matches!(event, AssistantMessageEvent::Done { .. }) {
+                            done_emitted = true;
+                        }
+                        return Some((event, (stream, buf, exhausted, parser, pending, done_emitted)));
                     }
                 }
 
@@ -344,12 +354,16 @@ fn byte_stream_to_events(
                                 code: "stream".into(),
                                 message: e.to_string(),
                             },
-                            (stream, buf, exhausted, parser, pending),
+                            (stream, buf, exhausted, parser, pending, done_emitted),
                         ));
                     }
                     None => {
                         exhausted = true;
-                        return Some((done_event(), (stream, buf, exhausted, parser, pending)));
+                        if !done_emitted && !parser.done_emitted() {
+                            done_emitted = true;
+                            return Some((done_event(), (stream, buf, exhausted, parser, pending, done_emitted)));
+                        }
+                        return None;
                     }
                 }
             }
@@ -363,7 +377,15 @@ fn byte_stream_to_events(
 // ---------------------------------------------------------------------------
 
 fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
-    let messages = convert_messages(model, context);
+    let (sanitized_messages, _stats) =
+        crate::sanitize_messages_for_replay(&context.messages, model);
+    let sanitized_context = Context {
+        system: context.system.clone(),
+        messages: sanitized_messages,
+        tools: context.tools.clone(),
+        thinking_level: context.thinking_level,
+    };
+    let messages = convert_messages(model, &sanitized_context);
     let instructions = extract_system_text(&context.system)
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
 
@@ -379,8 +401,8 @@ fn build_request_body(model: &Model, context: &Context, options: &StreamOptions)
         "parallel_tool_calls": true,
     });
 
-    if !context.tools.is_empty() {
-        body["tools"] = serde_json::json!(convert_tools(&context.tools));
+    if !sanitized_context.tools.is_empty() {
+        body["tools"] = serde_json::json!(convert_tools(&sanitized_context.tools));
     }
     if let Some(temp) = options.temperature {
         body["temperature"] = serde_json::json!(temp);
@@ -565,11 +587,21 @@ fn done_event() -> AssistantMessageEvent {
 #[derive(Default)]
 struct CodexEventParser {
     text_started: bool,
+    text_emitted: bool,
     text_delta_seen_by_item: HashMap<String, bool>,
     text_end_emitted_by_item: HashSet<String>,
+    tool_call_ids: HashMap<String, String>,
+    tool_call_started: HashSet<String>,
+    tool_call_ended: HashSet<String>,
+    tool_call_received_delta: HashSet<String>,
+    done_seen: bool,
 }
 
 impl CodexEventParser {
+    fn done_emitted(&self) -> bool {
+        self.done_seen
+    }
+
     fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
         let line = line.trim();
         if let Some(data) = line.strip_prefix("data: ") {
@@ -613,10 +645,28 @@ impl CodexEventParser {
                         let name = item["name"].as_str().unwrap_or("unknown");
                         let call_id = item["call_id"].as_str().unwrap_or("");
                         let item_id = item["id"].as_str().unwrap_or("");
-                        out.push(AssistantMessageEvent::ToolCallStart {
-                            id: format!("{call_id}|{item_id}"),
-                            name: name.to_string(),
-                        });
+                        let full_id = format!("{call_id}|{item_id}");
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id,
+                                arguments,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -624,6 +674,7 @@ impl CodexEventParser {
             "response.output_text.delta" => {
                 let key = output_item_key(data, data);
                 self.text_delta_seen_by_item.insert(key, true);
+                self.text_emitted = true;
                 let delta = data["delta"].as_str().unwrap_or("");
                 out.push(AssistantMessageEvent::TextDelta {
                     text: delta.to_string(),
@@ -635,6 +686,7 @@ impl CodexEventParser {
                 if !saw_delta {
                     let text = data["text"].as_str().unwrap_or("");
                     if !text.is_empty() {
+                        self.text_emitted = true;
                         out.push(AssistantMessageEvent::TextDelta {
                             text: text.to_string(),
                         });
@@ -653,17 +705,28 @@ impl CodexEventParser {
             "response.function_call_arguments.delta" => {
                 let delta = data["delta"].as_str().unwrap_or("");
                 let call_id = data["call_id"].as_str().unwrap_or("");
+                let full_id = self
+                    .tool_call_ids
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| call_id.to_string());
+                self.tool_call_received_delta.insert(full_id.clone());
                 out.push(AssistantMessageEvent::ToolCallDelta {
-                    id: call_id.to_string(),
+                    id: full_id,
                     arguments: delta.to_string(),
                 });
             }
             "response.function_call_arguments.done" => {
                 let call_id = data["call_id"].as_str().unwrap_or("");
                 let item_id = data["id"].as_str().unwrap_or("");
-                out.push(AssistantMessageEvent::ToolCallEnd {
-                    id: format!("{call_id}|{item_id}"),
-                });
+                let full_id = self
+                    .tool_call_ids
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{call_id}|{item_id}"));
+                if self.tool_call_ended.insert(full_id.clone()) {
+                    out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                }
             }
             "response.output_item.done" => {
                 let item = &data["item"];
@@ -675,10 +738,116 @@ impl CodexEventParser {
                             out.push(AssistantMessageEvent::TextEnd);
                         }
                     }
+                    Some("function_call") => {
+                        let name = item["name"].as_str().unwrap_or("unknown");
+                        let call_id = item["call_id"].as_str().unwrap_or("");
+                        let item_id = item["id"].as_str().unwrap_or("");
+                        let full_id = if !call_id.is_empty() || !item_id.is_empty() {
+                            format!("{call_id}|{item_id}")
+                        } else {
+                            "tool_call_0".to_string()
+                        };
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id.clone(),
+                                arguments,
+                            });
+                        }
+                        if self.tool_call_ended.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                        }
+                    }
                     _ => {}
                 }
             }
-            "response.completed" | "response.done" => {}
+            "response.completed" | "response.done" => {
+                let output = data
+                    .get("response")
+                    .and_then(|r| r.get("output"))
+                    .and_then(|o| o.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for item in &output {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let full_id = if !call_id.is_empty() || !item_id.is_empty() {
+                            format!("{call_id}|{item_id}")
+                        } else {
+                            "tool_call_0".to_string()
+                        };
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id.clone(),
+                                arguments,
+                            });
+                        }
+                        if self.tool_call_ended.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                        }
+                    }
+                }
+                if !self.text_emitted {
+                    let final_text = extract_text_from_response_output(&output);
+                    if !final_text.is_empty() {
+                        if !self.text_started {
+                            self.text_started = true;
+                            out.push(AssistantMessageEvent::TextStart);
+                        }
+                        out.push(AssistantMessageEvent::TextDelta { text: final_text });
+                        out.push(AssistantMessageEvent::TextEnd);
+                        self.text_emitted = true;
+                    }
+                }
+                let has_function_call = output
+                    .iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+                    || !self.tool_call_started.is_empty();
+
+                out.push(AssistantMessageEvent::Done {
+                    stop_reason: if has_function_call {
+                        StopReason::ToolUse
+                    } else {
+                        StopReason::Stop
+                    },
+                    usage: None,
+                });
+                self.done_seen = true;
+            }
             "error" => {
                 let code = data["code"].as_str().unwrap_or("unknown");
                 let message = data["message"].as_str().unwrap_or("unknown error");
@@ -692,6 +861,45 @@ impl CodexEventParser {
 
         out
     }
+}
+
+fn extract_text_from_response_output(output: &[Value]) -> String {
+    let mut parts = Vec::new();
+    for item in output {
+        if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+            for part in content {
+                match part.get("type").and_then(|t| t.as_str()) {
+                    Some("output_text") => {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            parts.push(text.to_string());
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            parts.push(text.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn parse_function_call_arguments(value: Option<&Value>) -> Option<String> {
+    let v = value?;
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    serde_json::to_string(v).ok()
 }
 
 fn output_item_key(primary: &Value, fallback: &Value) -> String {
@@ -889,5 +1097,225 @@ mod tests {
             }
         }
         assert_eq!(deltas, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn test_function_call_delta_uses_full_id() {
+        let mut parser = CodexEventParser::default();
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read"}
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "call_id": "call_1",
+                "delta": "{\"path\":\"Cargo.toml\"}"
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "call_id": "call_1",
+                "id": "fc_1"
+            })),
+        ]
+        .concat();
+
+        assert!(matches!(
+            events[0],
+            AssistantMessageEvent::ToolCallStart { ref id, .. } if id == "call_1|fc_1"
+        ));
+        assert!(matches!(
+            events[1],
+            AssistantMessageEvent::ToolCallDelta { ref id, .. } if id == "call_1|fc_1"
+        ));
+        assert!(matches!(
+            events[2],
+            AssistantMessageEvent::ToolCallEnd { ref id } if id == "call_1|fc_1"
+        ));
+    }
+
+    #[test]
+    fn test_response_completed_with_function_call_sets_tool_use() {
+        let mut parser = CodexEventParser::default();
+        let events = parser.parse_event(&serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read"}
+                ]
+            }
+        }));
+
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_response_completed_emits_final_text_when_no_deltas() {
+        let mut parser = CodexEventParser::default();
+        let events = parser.parse_event(&serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type":"output_text","text":"final answer from completed payload"}
+                        ]
+                    }
+                ]
+            }
+        }));
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextStart))
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::TextDelta { text } if text.contains("final answer from completed payload")
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextEnd))
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_response_completed_function_call_emits_toolcall_events() {
+        let mut parser = CodexEventParser::default();
+        let events = parser.parse_event(&serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_9",
+                        "call_id": "call_9",
+                        "name": "edit",
+                        "arguments": "{\"path\":\"a.rs\",\"edits\":[]}"
+                    }
+                ]
+            }
+        }));
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallStart { id, name } if id == "call_9|fc_9" && name == "edit"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallDelta { id, arguments } if id == "call_9|fc_9" && arguments.contains("\"path\"")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallEnd { id } if id == "call_9|fc_9"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_output_item_done_function_call_emits_toolcall_events() {
+        let mut parser = CodexEventParser::default();
+        let events = parser.parse_event(&serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_done",
+                "call_id": "call_done",
+                "name": "edit",
+                "arguments": {"path":"a.rs","edits":[]}
+            }
+        }));
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallStart { id, name } if id == "call_done|fc_done" && name == "edit"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallDelta { id, arguments } if id == "call_done|fc_done" && arguments.contains("\"path\"")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::ToolCallEnd { id } if id == "call_done|fc_done"
+        )));
+    }
+
+    #[test]
+    fn test_no_duplicate_tool_arguments_when_added_then_completed_repeat_same_call() {
+        let mut parser = CodexEventParser::default();
+        let mut acc = crate::event::EventAccumulator::new();
+
+        let events = [
+            parser.parse_event(&serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "find",
+                    "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
+                }
+            })),
+            parser.parse_event(&serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [{
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "find",
+                        "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
+                    }]
+                }
+            })),
+        ]
+        .concat();
+
+        for e in &events {
+            acc.feed(e);
+        }
+        let blocks = acc.content_blocks();
+        let tc = blocks
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolCall { arguments, .. } => Some(arguments),
+                _ => None,
+            })
+            .expect("tool call block");
+        assert_eq!(tc["path"], ".");
+        assert_eq!(tc["pattern"], "*.toml");
+    }
+
+    #[test]
+    fn test_parser_marks_done_seen_after_completed_event() {
+        let mut parser = CodexEventParser::default();
+        assert!(!parser.done_emitted());
+        let _ = parser.parse_event(&serde_json::json!({
+            "type": "response.completed",
+            "response": { "output": [] }
+        }));
+        assert!(parser.done_emitted());
     }
 }

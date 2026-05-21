@@ -7,7 +7,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
 
 pub struct ReadTool {
     ctx: ToolContext,
@@ -79,13 +79,6 @@ impl AgentTool for ReadTool {
 
         let file_path = resolve_path(&self.ctx, path);
 
-        if !file_path.exists() {
-            return Err(AgentError::ToolExecution {
-                tool_name: "read".into(),
-                message: format!("file not found: {path}"),
-            });
-        }
-
         // Attempt to read as image first.
         let ext = file_path
             .extension()
@@ -98,7 +91,7 @@ impl AgentTool for ReadTool {
                     .await
                     .map_err(|e| AgentError::ToolExecution {
                         tool_name: "read".into(),
-                        message: format!("failed to read image file: {e}"),
+                        message: format_path_io_error("read image file", &file_path, &e),
                     })?;
             let mime = match ext.as_str() {
                 "jpg" | "jpeg" => "image/jpeg",
@@ -125,7 +118,7 @@ impl AgentTool for ReadTool {
                 .await
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "read".into(),
-                    message: format!("failed to read file: {e}"),
+                    message: format_path_io_error("read file", &file_path, &e),
                 })?;
 
         let lines: Vec<&str> = content.lines().collect();

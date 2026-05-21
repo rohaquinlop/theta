@@ -7,7 +7,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, resolve_path};
+use super::{ToolContext, format_path_io_error, resolve_path};
 
 const MAX_DIFF_HUNKS: usize = 6;
 const MAX_DIFF_CHARS: usize = 6000;
@@ -134,7 +134,7 @@ impl AgentTool for EditTool {
                 .await
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "edit".into(),
-                    message: format!("failed to read file: {e}"),
+                    message: format_path_io_error("read file", &file_path, &e),
                 })?;
 
         let mut modified = original.clone();
@@ -180,7 +180,7 @@ impl AgentTool for EditTool {
             .await
             .map_err(|e| AgentError::ToolExecution {
                 tool_name: "edit".into(),
-                message: format!("failed to write file: {e}"),
+                message: format_path_io_error("write file", &file_path, &e),
             })?;
 
         let diff_preview = make_diff_preview(path, &original, &modified);

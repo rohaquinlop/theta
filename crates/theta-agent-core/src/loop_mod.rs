@@ -165,6 +165,7 @@ async fn run_single_turn(
     // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
     let max_rounds = config.max_tool_rounds.unwrap_or(20);
+    let mut empty_assistant_retries: u32 = 0;
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -175,11 +176,17 @@ async fn run_single_turn(
 
         if tool_round >= max_rounds {
             tracing::warn!("max tool rounds reached ({max_rounds})");
+            let _ = event_tx.send(AgentEvent::Error {
+                message: format!(
+                    "agent stopped after reaching max tool rounds ({max_rounds}); likely provider/tool-call loop"
+                ),
+            });
             break;
         }
 
         // Build the LLM context from current state, with compaction.
-        let (context, compaction_stats) = build_context(state, provider, config, event_tx).await;
+        let (context, compaction_stats, replay_stats) =
+            build_context(state, provider, config, event_tx).await;
 
         // Emit compaction event if messages were trimmed.
         if let Some(stats) = compaction_stats {
@@ -187,6 +194,13 @@ async fn run_single_turn(
                 trimmed_count: stats.trimmed_count,
                 tokens_before: stats.tokens_before,
                 tokens_after: stats.tokens_after,
+            });
+        }
+        if let Some(stats) = replay_stats {
+            let _ = event_tx.send(AgentEvent::ReplaySanitized {
+                dropped_assistant_messages: stats.dropped_assistant_messages,
+                synthesized_tool_results: stats.synthesized_tool_results,
+                normalized_tool_call_ids: stats.normalized_tool_call_ids,
             });
         }
 
@@ -225,9 +239,15 @@ async fn run_single_turn(
         )
         .await
         {
-            Ok((assistant_msg, stop_reason)) => {
+            Ok((assistant_msg, stop_reason, unresolved_tool_calls)) => {
                 state.is_streaming = false;
-                let has_tool_calls = stop_reason == Some(StopReason::ToolUse);
+
+                let assistant_has_text = match &assistant_msg {
+                    Message::Assistant { content, .. } => content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if !text.trim().is_empty())
+                    }),
+                    _ => false,
+                };
 
                 state.add_assistant_message(assistant_msg.clone());
 
@@ -235,15 +255,70 @@ async fn run_single_turn(
                     message: assistant_msg,
                 });
 
+                let tool_calls =
+                    ToolCall::from_message(state.messages.last().expect("just pushed"));
+                let has_tool_calls = !tool_calls.is_empty();
+
+                if !assistant_has_text && !has_tool_calls {
+                    if empty_assistant_retries < 2 {
+                        empty_assistant_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "empty assistant response; retrying same turn".to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(
+                                "Previous response was empty. Continue and provide the requested answer or emit required tool calls now.",
+                            )],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: "assistant produced no text and no tool calls after retries"
+                            .to_string(),
+                    });
+                    break;
+                }
+
+                empty_assistant_retries = 0;
+
+                let unresolved_tool_use = unresolved_tool_calls > 0
+                    && !has_tool_calls
+                    && stop_reason == Some(StopReason::ToolUse);
+
+                if unresolved_tool_use {
+                    if assistant_has_text {
+                        tracing::warn!(
+                            unresolved_tool_calls,
+                            "ignoring unresolved tool-call state because assistant returned text"
+                        );
+                    } else {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: format!(
+                                "tool-call parsing incomplete: {unresolved_tool_calls} unresolved tool call(s); requesting tool-call replay"
+                            ),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(
+                                "Previous turn indicated tool use, but tool-call payload was incomplete. Re-emit the tool call(s) now using function-calling only, no prose.",
+                            )],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+                }
+
                 if !has_tool_calls {
                     break;
                 }
 
-                let tool_calls =
-                    ToolCall::from_message(state.messages.last().expect("just pushed"));
-
-                if tool_calls.is_empty() {
-                    break;
+                if stop_reason != Some(StopReason::ToolUse) {
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: "tool calls detected without tool_use stop reason; executing tools via fallback".to_string(),
+                    });
                 }
 
                 tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx)
@@ -286,7 +361,7 @@ async fn run_llm_stream(
     event_tx: &broadcast::Sender<AgentEvent>,
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
-) -> Result<(Message, Option<StopReason>), AgentError> {
+) -> Result<(Message, Option<StopReason>, usize), AgentError> {
     let retry = &config.retry;
 
     // Retry loop for provider.stream().
@@ -379,7 +454,11 @@ async fn run_llm_stream(
         timestamp: now_ms(),
     };
 
-    Ok((assistant_msg, accumulator.stop_reason()))
+    Ok((
+        assistant_msg,
+        accumulator.stop_reason(),
+        accumulator.unresolved_tool_call_count(),
+    ))
 }
 
 /// Build the LLM Context from the current agent state, with optional
@@ -395,7 +474,11 @@ async fn build_context(
     provider: &dyn LlmProvider,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
-) -> (Context, Option<CompactionStats>) {
+) -> (
+    Context,
+    Option<CompactionStats>,
+    Option<theta_ai::ReplaySanitizationStats>,
+) {
     let system = if state.system_prompt.is_empty() {
         None
     } else {
@@ -417,9 +500,11 @@ async fn build_context(
 
     let all_messages = state.llm_messages();
     let all_slice: Vec<theta_ai::Message> = all_messages.into_iter().cloned().collect();
+    let (sanitized_messages, replay_stats) =
+        theta_ai::sanitize_messages_for_replay(&all_slice, &state.model);
 
     let mut compact_result = crate::compact::compact_messages(
-        &all_slice,
+        &sanitized_messages,
         sys_tokens,
         state.model.context_window,
         &config.compaction,
@@ -478,6 +563,7 @@ async fn build_context(
             thinking_level: Some(state.thinking_level),
         },
         stats,
+        replay_stats.changed().then_some(replay_stats),
     )
 }
 

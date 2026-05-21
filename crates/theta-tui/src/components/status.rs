@@ -60,10 +60,19 @@ impl Component for StatusBar {
             Span::styled(session_str, Style::default().fg(self.theme.dim)),
         ];
 
-        let state_color = match self.agent_state.as_str() {
-            "streaming" | "thinking" | "tool executing" | "compacting" => self.theme.warning,
-            "error" | "tool error" => self.theme.error,
-            _ => self.theme.success,
+        let state_color = if self.agent_state.starts_with("error")
+            || self.agent_state.starts_with("tool error")
+        {
+            self.theme.error
+        } else if self.agent_state.starts_with("streaming")
+            || self.agent_state.starts_with("thinking")
+            || self.agent_state.starts_with("tool")
+            || self.agent_state.starts_with("compacting")
+            || self.agent_state.starts_with("retrying")
+        {
+            self.theme.warning
+        } else {
+            self.theme.success
         };
 
         let mut right_text = if self.tool_progress.is_empty() {
