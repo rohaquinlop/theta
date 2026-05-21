@@ -172,9 +172,7 @@ async fn run_single_turn(
     let mut validation_noop_retries: u32 = 0;
     let mut reproduction_noop_retries: u32 = 0;
     let mut executed_tools_in_turn = false;
-    let flags = latest_user_text(state)
-        .map(|text| determine_turn_flags(&text))
-        .unwrap_or_default();
+    let mut flags = recompute_turn_flags(state);
     let mut executed_inspection_tools_in_turn = false;
     let mut executed_git_tools_in_turn = false;
     let mut executed_validation_tools_in_turn = false;
@@ -283,6 +281,7 @@ async fn run_single_turn(
                             )],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -318,6 +317,7 @@ async fn run_single_turn(
                             )],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -340,6 +340,7 @@ async fn run_single_turn(
                             content: vec![ContentBlock::text(INSPECTION_RETRY_PROMPT)],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -357,6 +358,7 @@ async fn run_single_turn(
                             content: vec![ContentBlock::text(COMMIT_OPS_RETRY_PROMPT)],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -373,6 +375,7 @@ async fn run_single_turn(
                             content: vec![ContentBlock::text(REPRODUCTION_RETRY_PROMPT)],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -398,6 +401,7 @@ async fn run_single_turn(
                                 content: vec![ContentBlock::text(ACTION_RETRY_PROMPT)],
                                 timestamp: now_ms(),
                             });
+                            flags = recompute_turn_flags(state);
                             tool_round += 1;
                             continue;
                         }
@@ -439,6 +443,7 @@ async fn run_single_turn(
                             content: vec![ContentBlock::text(VALIDATION_RETRY_PROMPT)],
                             timestamp: now_ms(),
                         });
+                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -579,48 +584,80 @@ struct TurnFlags {
 
 fn determine_turn_flags(text: &str) -> TurnFlags {
     let t = text.to_lowercase();
+    let tokens = tokenize_words(&t);
+
     let requires_plan_only = [
-        "plan only",
-        "just plan",
-        "brainstorm",
-        "do not implement",
-        "don't implement",
+        &["plan", "only"][..],
+        &["just", "plan"],
+        &["brainstorm"],
+        &["do", "not", "implement"],
+        &["don't", "implement"],
     ]
     .iter()
-    .any(|kw| t.contains(kw));
+    .any(|seq| contains_token_sequence(&tokens, seq));
     let requires_action = looks_like_execution_request(&t) && !requires_plan_only;
     let requires_inspection = [
-        "review",
-        "inspect",
-        "analyze",
-        "analyse",
-        "check",
-        "what changed",
-        "uncommitted",
-        "diff",
-        "status",
+        &["review"][..],
+        &["inspect"],
+        &["analyze"],
+        &["analyse"],
+        &["what", "changed"],
+        &["uncommitted"],
+        &["git", "diff"],
+        &["show", "diff"],
+        &["git", "status"],
+        &["check", "file"],
+        &["check", "files"],
+        &["check", "contents"],
     ]
     .iter()
-    .any(|kw| t.contains(kw));
+    .any(|seq| contains_token_sequence(&tokens, seq));
     let requires_validation = [
-        "validate",
-        "verify",
-        "make sure",
-        "ensure",
-        "run tests",
-        "test it",
+        &["validate"][..],
+        &["verify"],
+        &["make", "sure"],
+        &["ensure"],
+        &["run", "tests"],
+        &["test", "it"],
+        &["cargo", "test"],
+        &["pytest"],
     ]
     .iter()
-    .any(|kw| t.contains(kw));
-    let requires_reproduction = ["reproduce", "bug", "fails", "failure", "error", "issue"]
+    .any(|seq| contains_token_sequence(&tokens, seq));
+    let requires_reproduction = [
+        &["reproduce"][..],
+        &["bug"],
+        &["fails"],
+        &["failure"],
+        &["error"],
+        &["issue"],
+    ]
+    .iter()
+    .any(|seq| contains_token_sequence(&tokens, seq));
+    let requires_commit_ops = [
+        &["git"][..],
+        &["commit"],
+        &["push"],
+        &["pull", "request"],
+        &["stash"],
+    ]
+    .iter()
+    .any(|seq| contains_token_sequence(&tokens, seq));
+    let requires_clarification = [&["do", "it"][..], &["implement", "it"], &["fix", "it"]]
         .iter()
-        .any(|kw| t.contains(kw));
-    let requires_commit_ops = ["git", "commit", "push", "pull request", "pr", "stash"]
-        .iter()
-        .any(|kw| t.contains(kw));
-    let requires_clarification = ["do it", "implement it", "fix it"]
-        .iter()
-        .any(|kw| t.trim() == *kw);
+        .any(|seq| contains_token_sequence(&tokens, seq))
+        && tokens.len() <= 2;
+
+    tracing::debug!(
+        "intent matched: action={} inspection={} validation={} reproduction={} git={} plan_only={} clarification={}",
+        requires_action,
+        requires_inspection,
+        requires_validation,
+        requires_reproduction,
+        requires_commit_ops,
+        requires_plan_only,
+        requires_clarification
+    );
 
     TurnFlags {
         requires_action,
@@ -631,6 +668,34 @@ fn determine_turn_flags(text: &str) -> TurnFlags {
         requires_plan_only,
         requires_clarification,
     }
+}
+
+fn recompute_turn_flags(state: &AgentState) -> TurnFlags {
+    latest_user_text(state)
+        .map(|text| determine_turn_flags(&text))
+        .unwrap_or_default()
+}
+
+fn tokenize_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn contains_token_sequence(tokens: &[String], phrase_tokens: &[&str]) -> bool {
+    if phrase_tokens.is_empty() {
+        return false;
+    }
+    if phrase_tokens.len() == 1 {
+        return tokens.iter().any(|tok| tok == phrase_tokens[0]);
+    }
+    tokens.windows(phrase_tokens.len()).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(phrase_tokens.iter().copied())
+    })
 }
 
 fn is_inspection_tool_call(tc: &ToolCall) -> bool {
@@ -721,22 +786,23 @@ fn latest_user_text(state: &AgentState) -> Option<String> {
 
 fn looks_like_execution_request(text: &str) -> bool {
     let t = text.to_lowercase();
+    let tokens = tokenize_words(&t);
     [
-        "implement",
-        "fix",
-        "patch",
-        "edit",
-        "modify",
-        "update code",
-        "change code",
-        "add",
-        "remove",
-        "refactor",
-        "run it",
-        "do it",
+        &["implement"][..],
+        &["fix"],
+        &["patch"],
+        &["edit"],
+        &["modify"],
+        &["update", "code"],
+        &["change", "code"],
+        &["add", "code"],
+        &["remove", "code"],
+        &["refactor"],
+        &["run", "it"],
+        &["do", "it"],
     ]
     .iter()
-    .any(|kw| t.contains(kw))
+    .any(|seq| contains_token_sequence(&tokens, seq))
 }
 
 fn looks_like_execution_promise(text: &str) -> bool {
@@ -1131,4 +1197,40 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_flags_do_not_treat_providers_as_pr() {
+        let flags = determine_turn_flags(
+            "Use grep tool on crates/theta-ai/src/providers/openai_compat.rs and report lines",
+        );
+        assert!(
+            !flags.requires_commit_ops,
+            "providers path should not trigger git intent"
+        );
+    }
+
+    #[test]
+    fn turn_flags_detect_explicit_commit_ops() {
+        let flags = determine_turn_flags("Please commit changes and push after git status.");
+        assert!(flags.requires_commit_ops);
+    }
+
+    #[test]
+    fn turn_flags_check_file_contents_is_inspection_not_validation_or_git() {
+        let flags = determine_turn_flags("check file contents in Cargo.toml");
+        assert!(flags.requires_inspection);
+        assert!(!flags.requires_validation);
+        assert!(!flags.requires_commit_ops);
+    }
+
+    #[test]
+    fn token_sequence_matching_requires_boundaries() {
+        let tokens = tokenize_words("providers openai_compat");
+        assert!(!contains_token_sequence(&tokens, &["pr"]));
+    }
 }
