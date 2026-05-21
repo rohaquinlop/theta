@@ -9,6 +9,7 @@ use tokio::sync::{RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing;
 
+use theta_ai::Provider as ProviderKind;
 use theta_ai::providers::ProviderRegistry;
 use theta_ai::{ContentBlock, Message, Model, ModelCatalog};
 
@@ -106,6 +107,11 @@ impl Agent {
     pub async fn add_tool(&self, tool: Arc<dyn AgentTool>) {
         let mut state = self.state.write().await;
         state.tools.push(tool);
+    }
+
+    /// Add or replace an authentication token for a provider.
+    pub fn set_api_key(&self, provider: ProviderKind, key: impl Into<String>) {
+        self.provider.set_api_key(provider, key);
     }
 
     /// Set the system prompt.

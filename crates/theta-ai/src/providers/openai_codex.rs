@@ -12,8 +12,10 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures_util::SinkExt;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::RwLock;
+
+use serde_json::Value;
 
 use crate::error::ThetaError;
 use crate::event::AssistantMessageEvent;
@@ -27,7 +29,7 @@ const CODEX_TOKEN_ENV: &str = "OPENAI_CODEX_TOKEN";
 
 pub struct OpenAiCodexProvider {
     client: reqwest::Client,
-    token: tokio::sync::RwLock<Option<String>>,
+    token: RwLock<Option<String>>,
 }
 
 impl OpenAiCodexProvider {
@@ -35,7 +37,7 @@ impl OpenAiCodexProvider {
         let env_token = std::env::var(CODEX_TOKEN_ENV).ok();
         Self {
             client: reqwest::Client::new(),
-            token: tokio::sync::RwLock::new(env_token),
+            token: RwLock::new(env_token),
         }
     }
 }
@@ -48,8 +50,10 @@ impl Default for OpenAiCodexProvider {
 
 #[async_trait]
 impl Provider for OpenAiCodexProvider {
-    fn set_token(&mut self, token: &str) {
-        self.token = tokio::sync::RwLock::new(Some(token.to_string()));
+    fn set_token(&self, token: &str) {
+        if let Ok(mut stored_token) = self.token.write() {
+            *stored_token = Some(token.to_string());
+        }
     }
 
     async fn stream<'a>(
@@ -61,8 +65,8 @@ impl Provider for OpenAiCodexProvider {
         let token = self
             .token
             .read()
-            .await
-            .clone()
+            .ok()
+            .and_then(|stored_token| stored_token.clone())
             .ok_or_else(|| ThetaError::MissingApiKey {
                 provider: crate::types::Provider::OpenAiCodex,
             })?;

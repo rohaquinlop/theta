@@ -35,5 +35,5 @@ pub trait Provider: Send + Sync {
     /// Set an authentication token for this provider.
     /// Default is a no-op; providers that need tokens (e.g. Codex OAuth)
     /// override this.
-    fn set_token(&mut self, _token: &str) {}
+    fn set_token(&self, _token: &str) {}
 }

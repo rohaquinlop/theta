@@ -215,6 +215,39 @@ pub fn provider_env_var(provider: &str) -> &'static str {
 }
 
 impl AuthConfig {
+    /// Merge existing on-disk auth with a newer in-memory auth snapshot.
+    ///
+    /// New entries win for the same provider. Entries for unrelated providers
+    /// are preserved so saving one login cannot delete another provider.
+    fn merge_with_existing(mut self, existing: AuthConfig) -> Self {
+        for token in existing.tokens {
+            let replaced_by_token = self.tokens.iter().any(|t| t.provider == token.provider);
+            let replaced_by_oauth = self
+                .oauth_tokens
+                .iter()
+                .any(|t| t.provider == token.provider);
+            if !replaced_by_token && !replaced_by_oauth {
+                self.tokens.push(token);
+            }
+        }
+
+        for oauth_token in existing.oauth_tokens {
+            let replaced_by_oauth = self
+                .oauth_tokens
+                .iter()
+                .any(|t| t.provider == oauth_token.provider);
+            let replaced_by_token = self
+                .tokens
+                .iter()
+                .any(|t| t.provider == oauth_token.provider);
+            if !replaced_by_oauth && !replaced_by_token {
+                self.oauth_tokens.push(oauth_token);
+            }
+        }
+
+        self
+    }
+
     /// Get a token for a specific provider. Checks stored tokens first,
     /// then OAuth tokens, then environment variables.
     ///
@@ -485,7 +518,14 @@ pub async fn save_auth(auth: &AuthConfig, auth_path: Option<&Path>) -> Result<()
             .map_err(ConfigError::Write)?;
     }
 
-    let contents = serde_json::to_string_pretty(auth).map_err(|e| ConfigError::Parse {
+    let auth = if path.exists() {
+        let existing = load_auth(Some(&path)).await?;
+        auth.clone().merge_with_existing(existing)
+    } else {
+        auth.clone()
+    };
+
+    let contents = serde_json::to_string_pretty(&auth).map_err(|e| ConfigError::Parse {
         path: path.display().to_string(),
         error: e.to_string(),
     })?;
@@ -552,5 +592,63 @@ mod tests {
         let auth = AuthConfig::default();
         // Without env vars, returns None for unknown provider.
         assert_eq!(auth.get_token("nonexistent"), None);
+    }
+
+    #[tokio::test]
+    async fn test_save_auth_preserves_unrelated_provider_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("auth.json");
+
+        let mut existing = AuthConfig::default();
+        existing.set_oauth_token(
+            "openai-codex",
+            "codex-access",
+            "codex-refresh",
+            now_ms() + 3600_000,
+        );
+        save_auth(&existing, Some(&path))
+            .await
+            .expect("initial auth should save");
+
+        let mut incoming = AuthConfig::default();
+        incoming.set_token("deepseek", "deepseek-key", None);
+        save_auth(&incoming, Some(&path))
+            .await
+            .expect("merged auth should save");
+
+        let saved = load_auth(Some(&path))
+            .await
+            .expect("merged auth should load");
+        assert_eq!(saved.get_token("deepseek"), Some("deepseek-key".into()));
+        assert_eq!(saved.get_token("openai-codex"), Some("codex-access".into()));
+    }
+
+    #[tokio::test]
+    async fn test_save_auth_replaces_same_provider_across_auth_kinds() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("auth.json");
+
+        let mut existing = AuthConfig::default();
+        existing.set_oauth_token(
+            "openai-codex",
+            "old-access",
+            "old-refresh",
+            now_ms() + 3600_000,
+        );
+        save_auth(&existing, Some(&path))
+            .await
+            .expect("initial auth should save");
+
+        let mut incoming = AuthConfig::default();
+        incoming.set_token("openai-codex", "manual-token", None);
+        save_auth(&incoming, Some(&path))
+            .await
+            .expect("replacement auth should save");
+
+        let saved = load_auth(Some(&path))
+            .await
+            .expect("replacement auth should load");
+        assert_eq!(saved.get_token("openai-codex"), Some("manual-token".into()));
+        assert!(saved.oauth_tokens.is_empty());
     }
 }

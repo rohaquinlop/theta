@@ -32,7 +32,7 @@ pub async fn run_prompt_print_mode(
     let (model, api_key) = resolve_auth(config, &catalog, model_id).await?;
 
     // Provider registry.
-    let mut registry = default_registry();
+    let registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     // Register tools.
@@ -215,7 +215,7 @@ pub async fn run_continue_print_mode(
     let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
     // Provider registry.
-    let mut registry = default_registry();
+    let registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     // Register tools.
@@ -352,7 +352,7 @@ pub async fn run_resume_print_mode(
     let catalog = BuiltInCatalog::new();
     let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
-    let mut registry = default_registry();
+    let registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());

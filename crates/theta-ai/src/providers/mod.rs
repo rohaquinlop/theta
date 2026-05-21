@@ -1,7 +1,7 @@
 //! Provider registry and built-in provider registration.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use super::error::ThetaError;
 use super::model::Model;
@@ -21,7 +21,7 @@ pub type ProviderFactory = Arc<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
 pub struct ProviderRegistry {
     providers: HashMap<Api, Box<dyn Provider>>,
     /// Per-provider API keys.
-    api_keys: HashMap<ProviderKind, Option<String>>,
+    api_keys: RwLock<HashMap<ProviderKind, Option<String>>>,
 }
 
 impl ProviderRegistry {
@@ -29,7 +29,7 @@ impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
             providers: HashMap::new(),
-            api_keys: HashMap::new(),
+            api_keys: RwLock::new(HashMap::new()),
         }
     }
 
@@ -41,20 +41,25 @@ impl ProviderRegistry {
     /// Set an API key for a provider.
     /// Also passes the token to the registered provider via [`Provider::set_token`]
     /// if the provider stores it (e.g. Codex OAuth).
-    pub fn set_api_key(&mut self, provider: ProviderKind, key: impl Into<String>) {
+    pub fn set_api_key(&self, provider: ProviderKind, key: impl Into<String>) {
         let key: String = key.into();
-        self.api_keys.insert(provider, Some(key.clone()));
+        if let Ok(mut api_keys) = self.api_keys.write() {
+            api_keys.insert(provider, Some(key.clone()));
+        }
         // Forward token to the matching provider.
         if let Some(api) = provider_kind_to_api(provider)
-            && let Some(p) = self.providers.get_mut(&api)
+            && let Some(p) = self.providers.get(&api)
         {
             p.set_token(&key);
         }
     }
 
     /// Get the API key for a provider.
-    pub fn get_api_key(&self, provider: ProviderKind) -> Option<&str> {
-        self.api_keys.get(&provider).and_then(|k| k.as_deref())
+    pub fn get_api_key(&self, provider: ProviderKind) -> Option<String> {
+        self.api_keys
+            .read()
+            .ok()
+            .and_then(|api_keys| api_keys.get(&provider).cloned().flatten())
     }
 
     /// Stream using the provider matching the model's API.

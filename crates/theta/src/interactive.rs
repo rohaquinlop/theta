@@ -339,7 +339,7 @@ async fn create_agent(
     thinking: &str,
 ) -> anyhow::Result<Agent> {
     let catalog = BuiltInCatalog::new();
-    let mut registry = default_registry();
+    let registry = default_registry();
     registry.set_api_key(model.provider, api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
@@ -503,6 +503,10 @@ async fn handle_tui_action(
                                     .send(TuiEvent::Error(format!("Failed to save token: {e}")));
                                 return;
                             }
+                            if let Some(agent) = agent_cell.read().await.clone() {
+                                agent
+                                    .set_api_key(Provider::OpenAiCodex, creds.access_token.clone());
+                            }
                             // If initial login, find Codex model variant and create agent.
                             if agent_cell.read().await.is_none() {
                                 let codex_catalog = BuiltInCatalog::new();
@@ -572,6 +576,11 @@ async fn handle_tui_action(
                             event_tx.send(TuiEvent::Error(format!("Failed to save token: {e}")));
                         return;
                     }
+                    if let Some(agent) = agent_cell.read().await.clone()
+                        && let Some(provider_kind) = provider_from_string(&provider)
+                    {
+                        agent.set_api_key(provider_kind, token.clone());
+                    }
                     // If this was the initial login (no agent yet), create the agent now.
                     if agent_cell.read().await.is_none() {
                         match create_agent(model, &token, config, working_dir, model_id, thinking)
@@ -617,21 +626,23 @@ async fn handle_tui_action(
 
             if let Some(m) = model {
                 let provider = provider_to_string(m.provider);
-                match crate::config::load_auth(None).await {
-                    Ok(mut auth) => {
-                        if auth.get_api_key(&provider).await.is_none() {
+                let key = match crate::config::load_auth(None).await {
+                    Ok(mut auth) => match auth.get_api_key(&provider).await {
+                        Some(key) => key,
+                        None => {
                             let _ = event_tx.send(TuiEvent::Error(format!(
                                 "Model {model_id} is unavailable: missing auth for {provider}"
                             )));
                             return;
                         }
-                    }
+                    },
                     Err(e) => {
                         let _ = event_tx.send(TuiEvent::Error(format!("Failed to load auth: {e}")));
                         return;
                     }
-                }
+                };
 
+                agent.set_api_key(m.provider, key);
                 agent.set_model(m).await;
                 let blocks = build_system_prompt(working_dir, &model_id, None).await;
                 agent.set_system_prompt(blocks).await;
@@ -922,6 +933,17 @@ fn provider_to_string(provider: Provider) -> String {
         Provider::DeepSeek => "deepseek".into(),
         Provider::OpenCode => "opencode".into(),
         Provider::OpenCodeGo => "opencode-go".into(),
+    }
+}
+
+fn provider_from_string(provider: &str) -> Option<Provider> {
+    match provider {
+        "openai" => Some(Provider::OpenAI),
+        "openai-codex" => Some(Provider::OpenAiCodex),
+        "deepseek" => Some(Provider::DeepSeek),
+        "opencode" => Some(Provider::OpenCode),
+        "opencode-go" => Some(Provider::OpenCodeGo),
+        _ => None,
     }
 }
 

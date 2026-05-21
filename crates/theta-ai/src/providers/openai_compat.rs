@@ -4,6 +4,8 @@
 //! with per-model compatibility flags. All three speak OpenAI's
 //! `/v1/chat/completions` API with SSE streaming.
 
+use std::sync::RwLock;
+
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -23,14 +25,14 @@ use crate::types::{
 /// The single OpenAI-compatible provider.
 pub struct OpenAiCompatProvider {
     client: Client,
-    api_key: Option<String>,
+    api_key: RwLock<Option<String>>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new() -> Self {
         Self {
             client: Client::new(),
-            api_key: None,
+            api_key: RwLock::new(None),
         }
     }
 }
@@ -64,7 +66,9 @@ impl Provider for OpenAiCompatProvider {
 
         let api_key = self
             .api_key
-            .clone()
+            .read()
+            .ok()
+            .and_then(|key| key.clone())
             .or_else(|| std::env::var(api_key_env(model.provider)).ok())
             .ok_or(ThetaError::MissingApiKey {
                 provider: model.provider,
@@ -130,8 +134,10 @@ impl Provider for OpenAiCompatProvider {
         self.stream(model, context, &stream_opts).await
     }
 
-    fn set_token(&mut self, token: &str) {
-        self.api_key = Some(token.to_string());
+    fn set_token(&self, token: &str) {
+        if let Ok(mut api_key) = self.api_key.write() {
+            *api_key = Some(token.to_string());
+        }
     }
 }
 

@@ -125,7 +125,7 @@ async fn prompt(
         .await
         .ok_or_else(|| anyhow::anyhow!("{}", crate::config::auth_error_message(provider)))?;
 
-    let mut registry = default_registry();
+    let registry = default_registry();
     registry.set_api_key(model.provider, key);
 
     let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
