@@ -31,6 +31,24 @@ pub struct Theme {
     pub code_fg: Option<Color>,
     /// Code block background.
     pub code_bg: Color,
+    /// Markdown heading level 1 color.
+    pub md_heading_1: Color,
+    /// Markdown heading level 2/3 color.
+    pub md_heading_2: Color,
+    /// Markdown list marker color.
+    pub md_list_marker: Color,
+    /// Markdown quote text color.
+    pub md_quote: Color,
+    /// Markdown link color.
+    pub md_link: Color,
+    /// Markdown inline code color.
+    pub md_inline_code: Color,
+    /// Markdown rule and table border color.
+    pub md_rule_border: Color,
+    /// Markdown table header color.
+    pub md_table_header: Color,
+    /// Markdown task marker color.
+    pub md_task_marker: Color,
 }
 
 impl Default for Theme {
@@ -45,10 +63,19 @@ impl Default for Theme {
             warning: Color::Yellow,
             border: Color::Rgb(60, 60, 60),
             highlight: Color::Rgb(70, 70, 140),
-            user_bubble: Color::Rgb(40, 50, 70),
+            user_bubble: Color::Rgb(52, 66, 92),
             assistant_bubble: Color::Reset,
             code_fg: None, // falls back to accent
             code_bg: Color::Rgb(30, 30, 40),
+            md_heading_1: Color::Green,
+            md_heading_2: Color::Cyan,
+            md_list_marker: Color::Yellow,
+            md_quote: Color::DarkGray,
+            md_link: Color::Cyan,
+            md_inline_code: Color::Cyan,
+            md_rule_border: Color::Rgb(60, 60, 60),
+            md_table_header: Color::Cyan,
+            md_task_marker: Color::Cyan,
         }
     }
 }
@@ -77,10 +104,19 @@ impl Theme {
             warning: Color::Rgb(230, 219, 116), // yellow
             border: Color::Rgb(58, 58, 48),
             highlight: Color::Rgb(73, 72, 62),
-            user_bubble: Color::Rgb(58, 58, 48),
+            user_bubble: Color::Rgb(70, 70, 58),
             assistant_bubble: Color::Rgb(39, 40, 34),
             code_fg: Some(Color::Rgb(230, 219, 116)), // yellow for monokai
             code_bg: Color::Rgb(58, 58, 48),
+            md_heading_1: Color::Rgb(166, 226, 46),
+            md_heading_2: Color::Rgb(102, 217, 239),
+            md_list_marker: Color::Rgb(230, 219, 116),
+            md_quote: Color::Rgb(117, 113, 94),
+            md_link: Color::Rgb(102, 217, 239),
+            md_inline_code: Color::Rgb(230, 219, 116),
+            md_rule_border: Color::Rgb(58, 58, 48),
+            md_table_header: Color::Rgb(249, 38, 114),
+            md_task_marker: Color::Rgb(166, 226, 46),
         }
     }
 }

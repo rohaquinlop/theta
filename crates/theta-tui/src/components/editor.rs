@@ -95,7 +95,7 @@ impl Editor {
     pub fn desired_height(&self, width: usize, max_height: u16) -> u16 {
         let inner_width = width.saturating_sub(2).max(1);
         let lines = wrap_text(&self.text, inner_width).len() as u16;
-        lines.saturating_add(2).clamp(3, max_height.max(3))
+        lines.saturating_add(1).clamp(2, max_height.max(2))
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -415,7 +415,7 @@ impl Component for Editor {
             self.theme.warning
         };
         let block = Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
+            .borders(Borders::TOP)
             .border_style(Style::default().fg(input_border));
 
         let inner = block.inner(area);

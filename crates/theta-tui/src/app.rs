@@ -17,7 +17,6 @@ use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
-use crate::components::settings_selector::{SettingsSelector, SettingsView};
 use crate::components::status::StatusBar;
 use crate::components::tree_selector::{TreeFilter, TreeSelector};
 use crate::components::{Action, Component};
@@ -65,8 +64,6 @@ pub enum TuiAction {
     ShowTree(String),
     Steer(String),
     FollowUp(String),
-    SaveSettings(SettingsPayload),
-    ShowSettings,
     /// Start Codex OAuth flow (triggered from login_flow).
     StartCodexOAuth,
 }
@@ -157,7 +154,6 @@ pub struct App {
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
     tree_selector: TreeSelector,
-    settings_selector: SettingsSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
@@ -183,6 +179,9 @@ pub struct App {
     last_tool_records: Vec<ToolRecord>,
     steer_queue_count: usize,
     follow_up_queue_count: usize,
+    show_thinking: bool,
+    steering_mode: String,
+    follow_up_mode: String,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
 }
@@ -258,15 +257,6 @@ impl App {
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
             tree_selector: TreeSelector::new(theme.clone()),
-            settings_selector: SettingsSelector::new(
-                theme.clone(),
-                SettingsView {
-                    steering_mode: settings.steering_mode,
-                    follow_up_mode: settings.follow_up_mode,
-                    transport_preference: settings.transport_preference,
-                    show_thinking: settings.show_thinking,
-                },
-            ),
             commands,
             skill_commands,
             keybindings: default_bindings(),
@@ -286,6 +276,9 @@ impl App {
             last_tool_records: Vec::new(),
             steer_queue_count: 0,
             follow_up_queue_count: 0,
+            show_thinking: settings.show_thinking,
+            steering_mode: settings.steering_mode,
+            follow_up_mode: settings.follow_up_mode,
             login_flow: None,
         }
     }
@@ -332,10 +325,6 @@ impl App {
         if self.model_selector.visible {
             return;
         }
-        self.settings_selector.render(area, frame);
-        if self.settings_selector.visible {
-            return;
-        }
         self.tree_selector.render(area, frame);
         if self.tree_selector.visible {
             return;
@@ -364,7 +353,7 @@ impl App {
             return;
         }
 
-        let editor_height = self.editor.desired_height(area.width as usize, 8);
+        let editor_height = self.editor.desired_height(area.width as usize, 6);
         let main = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -475,21 +464,6 @@ impl App {
             return;
         }
 
-        if self.settings_selector.handle_event(event) {
-            if !self.settings_selector.visible {
-                let view = self.settings_selector.current_view();
-                let _ = self
-                    .action_tx
-                    .send(TuiAction::SaveSettings(SettingsPayload {
-                        steering_mode: view.steering_mode,
-                        follow_up_mode: view.follow_up_mode,
-                        transport_preference: view.transport_preference,
-                        show_thinking: view.show_thinking,
-                    }));
-            }
-            return;
-        }
-
         if self.mode == AppMode::TreePicker {
             if let crossterm::event::Event::Key(key) = event {
                 match key.code {
@@ -547,6 +521,11 @@ impl App {
                         let _ = self.action_tx.send(TuiAction::NewSession);
                         self.mode = AppMode::Chat;
                         self.session_picker = None;
+                    }
+                    crossterm::event::KeyCode::Char('s') => {
+                        if let Some(ref mut picker) = self.session_picker {
+                            picker.cycle_sort_mode();
+                        }
                     }
                     _ => {}
                 }
@@ -611,7 +590,7 @@ impl App {
                     return;
                 }
                 if self.streaming {
-                    if self.settings_selector.current_view().steering_mode == "follow-up" {
+                    if self.steering_mode == "follow-up" {
                         let _ = self.action_tx.send(TuiAction::FollowUp(text.clone()));
                         self.follow_up_queue_count += 1;
                         self.chat.add_message(ChatMessage {
@@ -649,7 +628,7 @@ impl App {
                 self.model_selector.show();
             }
             Action::FollowUpMessage(text) => {
-                if self.settings_selector.current_view().follow_up_mode == "steer" {
+                if self.follow_up_mode == "steer" {
                     let _ = self.action_tx.send(TuiAction::Steer(text));
                     self.steer_queue_count += 1;
                 } else {
@@ -665,6 +644,13 @@ impl App {
                     self.status.set_tool_progress("copied selection");
                 } else {
                     self.status.set_tool_progress("copy failed");
+                }
+            }
+            Action::OpenUrl(url) => {
+                if open::that(&url).is_ok() {
+                    self.status.set_tool_progress("opened link");
+                } else {
+                    self.status.set_tool_progress("open link failed");
                 }
             }
             _ => {}
@@ -710,9 +696,8 @@ impl App {
                     "  /clear          Clear the chat display",
                     "  /session        Show current session info",
                     "  /fork           Fork the current session",
-                    "  /sessions       List recent sessions to resume",
+                    "  /sessions       List recent sessions (in picker press s to sort)",
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
-                    "  /settings       Open settings selector",
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
                     "  /diag on|off    Toggle diagnostic event stream in chat",
@@ -791,9 +776,6 @@ impl App {
             "tree" => {
                 let filter = if arg.is_empty() { "default" } else { arg };
                 let _ = self.action_tx.send(TuiAction::ShowTree(filter.to_string()));
-            }
-            "settings" => {
-                self.settings_selector.show();
             }
             "skills" => {
                 if self.skill_commands.is_empty() {
@@ -987,6 +969,9 @@ impl App {
             TuiEvent::ThinkingDelta(text) => {
                 let summary = text.lines().next().unwrap_or("").trim();
                 self.status.set_agent_state("thinking");
+                if self.show_thinking {
+                    self.chat.update_last(&text, ChatRole::Thinking, true);
+                }
                 if summary.is_empty() {
                     self.status.set_tool_progress("");
                 } else {
@@ -1084,6 +1069,7 @@ impl App {
             }
             TuiEvent::TurnEnd { stop_reason } => {
                 self.chat.finish_last(ChatRole::Assistant);
+                self.chat.finish_last(ChatRole::Thinking);
                 self.streaming = false;
                 let turn_result = if stop_reason == "error" {
                     "failed"
@@ -1145,6 +1131,7 @@ impl App {
             }
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);
+                self.chat.finish_last(ChatRole::Thinking);
                 for msg in &mut self.chat.messages {
                     if msg.role == ChatRole::Tool && msg.is_streaming {
                         msg.is_streaming = false;
@@ -1167,16 +1154,10 @@ impl App {
             }
             TuiEvent::Error(msg) => {
                 self.turn_intent = infer_intent_from_error(&msg).to_string();
-                if !self.diag_enabled
-                    && let Some(card) = normalize_failure_card(&msg)
-                {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: card,
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                    self.status.set_agent_state("error");
+                // Internal execution-enforcement diagnostics are noisy in
+                // normal mode; keep them in diagnostics-only mode.
+                if !self.diag_enabled && is_diagnostic_message(&msg) {
+                    self.status.set_agent_state("streaming");
                     return;
                 }
                 self.chat.add_message(ChatMessage {
@@ -1190,9 +1171,13 @@ impl App {
             TuiEvent::LoadHistory(entries) => {
                 self.chat.messages.clear();
                 for entry in entries {
+                    if entry.role == "thinking" && !self.show_thinking {
+                        continue;
+                    }
                     let role = match entry.role.as_str() {
                         "user" => ChatRole::User,
                         "assistant" => ChatRole::Assistant,
+                        "thinking" => ChatRole::Thinking,
                         "tool" => ChatRole::Tool,
                         _ => ChatRole::System,
                     };
@@ -1224,7 +1209,14 @@ impl App {
 
 fn compact_summary(summary: &str) -> String {
     let first = summary.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    truncate_status_text(first.trim(), 100)
+    let mut s = first.trim().to_string();
+    while s.starts_with("[tool:") {
+        let Some(end) = s.find(']') else {
+            break;
+        };
+        s = s[end + 1..].trim_start().to_string();
+    }
+    truncate_status_text(&s, 100)
 }
 
 fn is_diagnostic_message(msg: &str) -> bool {
@@ -1232,6 +1224,8 @@ fn is_diagnostic_message(msg: &str) -> bool {
         || msg.contains("retrying same turn")
         || msg.contains("validation")
         || msg.contains("tool calls detected")
+        || msg.contains("assistant promised execution but emitted no tool calls")
+        || msg.contains("Execution gap:")
 }
 
 fn infer_intent_from_error(msg: &str) -> &'static str {
@@ -1256,33 +1250,6 @@ fn retry_reason_hint(intent: &str) -> &'static str {
         "action" => "no action tool call",
         _ => "missing tool call",
     }
-}
-
-fn normalize_failure_card(msg: &str) -> Option<String> {
-    if msg.contains("inspection turn produced no inspection tool calls") {
-        return Some(
-            "Execution gap: assistant produced no inspection tool calls.\nAction: auto-retry triggered."
-                .to_string(),
-        );
-    }
-    if msg.contains("git turn produced no git tool calls") {
-        return Some(
-            "Execution gap: assistant produced no git tool calls.\nAction: auto-retry triggered."
-                .to_string(),
-        );
-    }
-    if msg.contains("empty assistant response") {
-        return Some(
-            "Execution gap: assistant returned empty response.\nAction: auto-retry triggered."
-                .to_string(),
-        );
-    }
-    if msg.contains("assistant produced no text and no tool calls after retries") {
-        return Some(
-            "Execution failed: assistant produced no text or tool calls after retries.".to_string(),
-        );
-    }
-    None
 }
 
 fn truncate_status_text(text: &str, max_chars: usize) -> String {

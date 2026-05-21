@@ -32,10 +32,22 @@ pub struct SessionPicker {
     list_state: ListState,
     /// Theme colors.
     theme: Theme,
+    /// Active sort mode.
+    sort_mode: SessionSortMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSortMode {
+    Newest,
+    Oldest,
+    Title,
+    Messages,
 }
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>, theme: Theme) -> Self {
+        let mut sessions = sessions;
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
         let mut list_state = ListState::default();
         if !sessions.is_empty() {
             list_state.select(Some(0));
@@ -45,6 +57,7 @@ impl SessionPicker {
             selected: 0,
             list_state,
             theme,
+            sort_mode: SessionSortMode::Newest,
         }
     }
 
@@ -75,6 +88,63 @@ impl SessionPicker {
         self.theme = theme;
     }
 
+    pub fn cycle_sort_mode(&mut self) {
+        let selected_id = self.selected_session().map(|s| s.id.clone());
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Newest => SessionSortMode::Oldest,
+            SessionSortMode::Oldest => SessionSortMode::Title,
+            SessionSortMode::Title => SessionSortMode::Messages,
+            SessionSortMode::Messages => SessionSortMode::Newest,
+        };
+        self.apply_sort();
+        if let Some(id) = selected_id
+            && let Some(idx) = self.sessions.iter().position(|s| s.id == id)
+        {
+            self.selected = idx;
+        }
+        self.list_state.select(if self.sessions.is_empty() {
+            None
+        } else {
+            Some(self.selected)
+        });
+    }
+
+    pub fn sort_mode_label(&self) -> &'static str {
+        match self.sort_mode {
+            SessionSortMode::Newest => "newest",
+            SessionSortMode::Oldest => "oldest",
+            SessionSortMode::Title => "title",
+            SessionSortMode::Messages => "messages",
+        }
+    }
+
+    fn apply_sort(&mut self) {
+        match self.sort_mode {
+            SessionSortMode::Newest => {
+                self.sessions
+                    .sort_by_key(|s| std::cmp::Reverse(s.created_at));
+            }
+            SessionSortMode::Oldest => {
+                self.sessions.sort_by_key(|s| s.created_at);
+            }
+            SessionSortMode::Title => {
+                self.sessions.sort_by(|a, b| {
+                    a.title
+                        .to_lowercase()
+                        .cmp(&b.title.to_lowercase())
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                });
+            }
+            SessionSortMode::Messages => {
+                self.sessions.sort_by(|a, b| {
+                    b.message_count
+                        .cmp(&a.message_count)
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                });
+            }
+        }
+    }
+
     /// Render the session picker.
     pub fn render(&mut self, area: Rect, frame: &mut Frame) {
         let chunks = Layout::default()
@@ -94,7 +164,7 @@ impl SessionPicker {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "j/k to navigate  Enter to resume  N to start new  Esc to start new",
+                "j/k navigate  Enter resume  s sort  N new  Esc new",
                 Style::default().fg(self.theme.dim),
             )),
         ]));
@@ -123,7 +193,7 @@ impl SessionPicker {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.dim))
-                    .title("Sessions"),
+                    .title(format!("Sessions (sort: {})", self.sort_mode_label())),
             )
             .highlight_style(Style::default().fg(self.theme.accent).bg(Color::DarkGray))
             .highlight_symbol("> ");
@@ -164,5 +234,47 @@ fn format_relative_time(ts: u64) -> String {
         format!("{}d ago", diff / 86400)
     } else {
         format!("{}w ago", diff / 604800)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(id: &str, title: &str, created_at: u64, messages: usize) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            title: title.to_string(),
+            model: None,
+            branch: None,
+            token_count: 0,
+            created_at,
+            message_count: messages,
+        }
+    }
+
+    #[test]
+    fn cycle_sort_mode_reorders_and_preserves_selection() {
+        let sessions = vec![
+            mk("a", "zeta", 3000, 2),
+            mk("b", "alpha", 1000, 10),
+            mk("c", "beta", 2000, 5),
+        ];
+        let mut picker = SessionPicker::new(sessions, Theme::default());
+        assert_eq!(picker.selected_session().map(|s| s.id.as_str()), Some("a"));
+
+        picker.select_down();
+        let selected = picker.selected_session().map(|s| s.id.clone());
+        picker.cycle_sort_mode();
+        assert_eq!(picker.sort_mode_label(), "oldest");
+        assert_eq!(picker.selected_session().map(|s| s.id.clone()), selected);
+
+        picker.cycle_sort_mode();
+        assert_eq!(picker.sort_mode_label(), "title");
+        assert_eq!(picker.sessions[0].title, "alpha");
+
+        picker.cycle_sort_mode();
+        assert_eq!(picker.sort_mode_label(), "messages");
+        assert_eq!(picker.sessions[0].message_count, 10);
     }
 }
