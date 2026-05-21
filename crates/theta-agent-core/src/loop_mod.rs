@@ -171,6 +171,7 @@ async fn run_single_turn(
     let mut commit_ops_noop_retries: u32 = 0;
     let mut validation_noop_retries: u32 = 0;
     let mut reproduction_noop_retries: u32 = 0;
+    let mut promised_execution_noop_retries: u32 = 0;
     let mut executed_tools_in_turn = false;
     let mut flags = recompute_turn_flags(state);
     let mut executed_inspection_tools_in_turn = false;
@@ -324,6 +325,26 @@ async fn run_single_turn(
                 }
 
                 if !has_tool_calls {
+                    let assistant_text =
+                        assistant_text_opt(&state.messages[state.messages.len() - 1])
+                            .unwrap_or_default();
+
+                    if looks_like_execution_promise(&assistant_text)
+                        && promised_execution_noop_retries < 1
+                    {
+                        promised_execution_noop_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "assistant promised execution but emitted no tool calls; retrying same turn".to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(ACTION_RETRY_PROMPT)],
+                            timestamp: now_ms(),
+                        });
+                        flags = recompute_turn_flags(state);
+                        tool_round += 1;
+                        continue;
+                    }
+
                     if flags.requires_plan_only {
                         break;
                     }
@@ -387,9 +408,6 @@ async fn run_single_turn(
                     }
 
                     if flags.requires_action && !executed_tools_in_turn {
-                        let assistant_text =
-                            assistant_text_opt(&state.messages[state.messages.len() - 1])
-                                .unwrap_or_default();
                         let blocker = classify_action_blocker(&assistant_text);
 
                         if blocker == ActionBlocker::None && action_noop_retries < 1 {
@@ -602,7 +620,13 @@ fn determine_turn_flags(text: &str) -> TurnFlags {
         &["analyze"],
         &["analyse"],
         &["what", "changed"],
+        &["current", "changes"],
+        &["changes", "impact"],
+        &["impact", "project"],
         &["uncommitted"],
+        &["uncommited"],
+        &["uncommitted", "changes"],
+        &["uncommited", "changes"],
         &["git", "diff"],
         &["show", "diff"],
         &["git", "status"],
