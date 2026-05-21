@@ -86,6 +86,14 @@ Use this `AGENTS.md` as the canonical implementation guidance and phase status.
 
 **No Anthropic, no Google, no Mistral in MVP.** Those are deferred.
 
+### Codex Transport Notes
+
+- Codex provider supports WebSocket + SSE fallback.
+- WebSocket TLS is enabled via:
+  - `tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }`
+- If WS fails, provider falls back to SSE.
+- Do not emit duplicate synthetic `Done(stop)` after parser already emitted `Done(toolUse)` or other terminal reason.
+
 ## Session Format
 
 **Pi-compatible JSONL.** Theta reads and writes the same session format as pi.
@@ -108,6 +116,12 @@ Seven built-in tools (same set as pi):
 - `grep` — regex search in files
 - `find` — file search by name
 - `ls` — directory listing
+
+Path behavior:
+- Built-in file tools (`read/write/edit/find/grep/ls`) honor absolute paths directly.
+- Relative paths resolve from tool working directory.
+- Do not silently clamp absolute paths back into working directory.
+- Surface explicit path errors (`path not found`, `permission denied`, `invalid path`) with target path.
 
 **Agent-level trait** (`theta-agent-core::AgentTool`):
 ```rust
@@ -162,6 +176,28 @@ The agent loop uses a nested pattern:
 - **Outer loop** (follow-up turns): after each turn, checks hooks and follow-up/steering queues; drains them into state for the next turn.
 - **Inner loop** (tool calling): LLM call → accumulate stream events → if tool calls, execute tools → add results → call LLM again.
 
+### Turn Enforcement Contract (Pi-style robustness)
+
+The loop enforces intent-specific execution instead of accepting offer-only text:
+
+- `requires_action`: implementation/fix/edit intent.
+- `requires_inspection`: inspect/review/status/diff intent.
+- `requires_commit_ops`: git operation intent.
+- `requires_reproduction`: bug reproduction/evidence intent.
+- `requires_validation`: verify/test intent.
+- `requires_plan_only`: explicit plan-only/brainstorm/no-implement intent.
+- `requires_clarification`: very underspecified imperative (e.g., "implement it").
+
+Behavior:
+- For action/inspection/commit/reproduction turns, if assistant returns text with no relevant tool calls, loop injects one corrective retry prompt and re-runs same turn.
+- For action turns, explicit blockers (missing info/permission/runtime constraint) end the turn without forced execution loops.
+- For validation turns, if tools ran but no validation command ran, loop requests one validation retry.
+- `requires_plan_only` bypasses forced tool execution.
+- Retry is bounded (one-shot per enforcement path) to avoid infinite loops.
+
+Diagnostics:
+- Enforcement decisions are surfaced through `AgentEvent::Error` messages so TUI does not silently idle.
+
 **Steering vs Follow-up:**
 - `steer()`: injects message MID-TURN. Uses `AtomicBool` per-stream abort flag (not the permanent `CancellationToken`). After abort, inner loop drains steering queue and continues.
 - `follow_up()`: queues message for AFTER current turn completes. Outer loop picks it up.
@@ -189,6 +225,13 @@ The agent loop uses a nested pattern:
 - **LLM-dependent tests:** behind `#[cfg(feature = "integration-tests")]` with real API keys
 - **Faux provider:** create a mock `theta-ai` provider that returns canned responses for testing the agent loop without hitting real APIs
 - **No paid API keys in CI.** Integration tests are local-only.
+
+Critical loop regression tests must cover:
+- action turn with promise/no-tools -> retry -> tool execution
+- action turn with explicit blocker -> no forced retry loop
+- inspection turn offer-only -> retry -> read-only tool execution
+- commit-op turn offer-only -> retry -> git command execution
+- no duplicate terminal stop-reason downgrades (`toolUse` must not be overwritten by synthetic `stop`)
 
 ## Commands
 
@@ -236,4 +279,3 @@ When a new provider is needed beyond the first four:
 5. Add env var or auth token detection in the provider implementation
 6. Add default model to `theta/src/models.rs`
 7. Update this file
-

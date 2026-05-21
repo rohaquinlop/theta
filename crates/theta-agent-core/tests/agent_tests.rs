@@ -557,6 +557,133 @@ async fn test_action_turn_with_explicit_blocker_does_not_retry() {
 }
 
 #[tokio::test]
+async fn test_inspection_turn_retries_and_executes_read_only_tool() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("I can inspect if you want."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_i1".into(),
+                name: "read".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("call_i1", r#"{"input":"inspect"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_i1".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("Inspected."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "read",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text(
+            "explain what changed and inspect files",
+        )])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|msg| matches!(msg, Message::ToolResult { .. })),
+        "inspection turn should retry and execute at least one tool"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_turn_retries_and_executes_git_bash_tool() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("I can run git status if you want."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_g1".into(),
+                name: "bash".into(),
+            },
+            AssistantMessageEvent::tool_call_delta(
+                "call_g1",
+                r#"{"command":"git status --short"}"#,
+            ),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_g1".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("Git status checked."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "bash",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text("check git status and commit plan")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    assert!(
+        state.messages.iter().any(|msg| {
+            matches!(
+                msg,
+                Message::ToolResult { tool_name, .. } if tool_name == "bash"
+            )
+        }),
+        "commit-op turn should retry and run git command via bash tool"
+    );
+}
+
+#[tokio::test]
 async fn test_agent_abort() {
     let model = test_model();
 

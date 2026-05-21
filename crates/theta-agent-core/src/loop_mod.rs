@@ -167,10 +167,17 @@ async fn run_single_turn(
     let max_rounds = config.max_tool_rounds.unwrap_or(20);
     let mut empty_assistant_retries: u32 = 0;
     let mut action_noop_retries: u32 = 0;
+    let mut inspection_noop_retries: u32 = 0;
+    let mut commit_ops_noop_retries: u32 = 0;
+    let mut validation_noop_retries: u32 = 0;
+    let mut reproduction_noop_retries: u32 = 0;
     let mut executed_tools_in_turn = false;
-    let requires_action = latest_user_text(state)
-        .map(|text| looks_like_execution_request(&text))
-        .unwrap_or(false);
+    let flags = latest_user_text(state)
+        .map(|text| determine_turn_flags(&text))
+        .unwrap_or_default();
+    let mut executed_inspection_tools_in_turn = false;
+    let mut executed_git_tools_in_turn = false;
+    let mut executed_validation_tools_in_turn = false;
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -317,7 +324,66 @@ async fn run_single_turn(
                 }
 
                 if !has_tool_calls {
-                    if requires_action && !executed_tools_in_turn {
+                    if flags.requires_plan_only {
+                        break;
+                    }
+
+                    if flags.requires_inspection
+                        && !executed_inspection_tools_in_turn
+                        && inspection_noop_retries < 1
+                    {
+                        inspection_noop_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "inspection turn produced no inspection tool calls; retrying same turn".to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(INSPECTION_RETRY_PROMPT)],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
+                    if flags.requires_commit_ops
+                        && !executed_git_tools_in_turn
+                        && commit_ops_noop_retries < 1
+                    {
+                        commit_ops_noop_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "git turn produced no git tool calls; retrying same turn"
+                                .to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(COMMIT_OPS_RETRY_PROMPT)],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
+                    if flags.requires_reproduction
+                        && !executed_inspection_tools_in_turn
+                        && reproduction_noop_retries < 1
+                    {
+                        reproduction_noop_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "reproduction turn produced no evidence-gathering tool calls; retrying same turn".to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(REPRODUCTION_RETRY_PROMPT)],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
+                    if flags.requires_clarification {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "request appears underspecified; assistant should ask one precise clarification".to_string(),
+                        });
+                    }
+
+                    if flags.requires_action && !executed_tools_in_turn {
                         let assistant_text =
                             assistant_text_opt(&state.messages[state.messages.len() - 1])
                                 .unwrap_or_default();
@@ -360,6 +426,23 @@ async fn run_single_turn(
                         }
                     }
 
+                    if flags.requires_validation
+                        && executed_tools_in_turn
+                        && !executed_validation_tools_in_turn
+                        && validation_noop_retries < 1
+                    {
+                        validation_noop_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: "action turn completed without validation commands; retrying for validation".to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(VALIDATION_RETRY_PROMPT)],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
                     break;
                 }
 
@@ -372,6 +455,15 @@ async fn run_single_turn(
                 tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx)
                     .await?;
                 executed_tools_in_turn = true;
+                if tool_calls.iter().any(is_inspection_tool_call) {
+                    executed_inspection_tools_in_turn = true;
+                }
+                if tool_calls.iter().any(is_git_tool_call) {
+                    executed_git_tools_in_turn = true;
+                }
+                if tool_calls.iter().any(is_validation_tool_call) {
+                    executed_validation_tools_in_turn = true;
+                }
 
                 tool_round += 1;
             }
@@ -398,6 +490,13 @@ async fn run_single_turn(
 }
 
 const ACTION_RETRY_PROMPT: &str = "This is an action request. Execute now by calling required tools first. If blocked, state the exact blocker briefly.";
+const INSPECTION_RETRY_PROMPT: &str = "This is an inspection request. Run relevant read-only tools now and report findings; do not ask for confirmation.";
+const COMMIT_OPS_RETRY_PROMPT: &str =
+    "This requires git operations. Run the required git commands now via tools and report results.";
+const VALIDATION_RETRY_PROMPT: &str =
+    "Run validation commands now (tests/build/lint as appropriate) and report outcomes.";
+const REPRODUCTION_RETRY_PROMPT: &str =
+    "Reproduce or gather evidence first using tools (logs/status/tests), then report findings.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionBlocker {
@@ -465,6 +564,117 @@ fn classify_action_blocker(text: &str) -> ActionBlocker {
     }
 
     ActionBlocker::None
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnFlags {
+    requires_action: bool,
+    requires_inspection: bool,
+    requires_validation: bool,
+    requires_reproduction: bool,
+    requires_commit_ops: bool,
+    requires_plan_only: bool,
+    requires_clarification: bool,
+}
+
+fn determine_turn_flags(text: &str) -> TurnFlags {
+    let t = text.to_lowercase();
+    let requires_plan_only = [
+        "plan only",
+        "just plan",
+        "brainstorm",
+        "do not implement",
+        "don't implement",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw));
+    let requires_action = looks_like_execution_request(&t) && !requires_plan_only;
+    let requires_inspection = [
+        "review",
+        "inspect",
+        "analyze",
+        "analyse",
+        "check",
+        "what changed",
+        "uncommitted",
+        "diff",
+        "status",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw));
+    let requires_validation = [
+        "validate",
+        "verify",
+        "make sure",
+        "ensure",
+        "run tests",
+        "test it",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw));
+    let requires_reproduction = ["reproduce", "bug", "fails", "failure", "error", "issue"]
+        .iter()
+        .any(|kw| t.contains(kw));
+    let requires_commit_ops = ["git", "commit", "push", "pull request", "pr", "stash"]
+        .iter()
+        .any(|kw| t.contains(kw));
+    let requires_clarification = ["do it", "implement it", "fix it"]
+        .iter()
+        .any(|kw| t.trim() == *kw);
+
+    TurnFlags {
+        requires_action,
+        requires_inspection,
+        requires_validation,
+        requires_reproduction,
+        requires_commit_ops,
+        requires_plan_only,
+        requires_clarification,
+    }
+}
+
+fn is_inspection_tool_call(tc: &ToolCall) -> bool {
+    matches!(tc.name.as_str(), "read" | "ls" | "find" | "grep")
+        || (tc.name == "bash"
+            && tc
+                .arguments
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|cmd| {
+                    let c = cmd.to_lowercase();
+                    c.contains("git status")
+                        || c.contains("git diff")
+                        || c.contains("cat ")
+                        || c.contains("ls ")
+                        || c.contains("rg ")
+                }))
+}
+
+fn is_git_tool_call(tc: &ToolCall) -> bool {
+    tc.name == "bash"
+        && tc
+            .arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cmd| cmd.trim_start().starts_with("git "))
+}
+
+fn is_validation_tool_call(tc: &ToolCall) -> bool {
+    tc.name == "bash"
+        && tc
+            .arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cmd| {
+                let c = cmd.to_lowercase();
+                c.contains("cargo test")
+                    || c.contains("cargo check")
+                    || c.contains("cargo clippy")
+                    || c.contains("cargo fmt")
+                    || c.contains("npm test")
+                    || c.contains("pytest")
+                    || c.contains("go test")
+            })
 }
 
 fn assistant_text_opt(message: &Message) -> Option<String> {
