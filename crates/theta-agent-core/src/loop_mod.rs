@@ -4,6 +4,7 @@
 //! - Outer loop: handles follow-up turns (until shouldStopAfterTurn or queue empty)
 //! - Inner loop: handles LLM call + tool execution cycle
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -177,6 +178,8 @@ async fn run_single_turn(
     let mut executed_inspection_tools_in_turn = false;
     let mut executed_git_tools_in_turn = false;
     let mut executed_validation_tools_in_turn = false;
+    let mut repeated_tool_signature_counts: HashMap<String, u32> = HashMap::new();
+    let max_same_tool_signature_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -473,6 +476,23 @@ async fn run_single_turn(
                     let _ = event_tx.send(AgentEvent::Error {
                         message: "tool calls detected without tool_use stop reason; executing tools via fallback".to_string(),
                     });
+                }
+
+                for tc in &tool_calls {
+                    let signature = format!("{}:{}", tc.name, tc.arguments);
+                    let count = repeated_tool_signature_counts
+                        .entry(signature.clone())
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    if *count > max_same_tool_signature_repeats {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: format!(
+                                "agent stopped repeated identical tool call loop: '{}' exceeded {} repeats",
+                                signature, max_same_tool_signature_repeats
+                            ),
+                        });
+                        return Ok(());
+                    }
                 }
 
                 tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx)

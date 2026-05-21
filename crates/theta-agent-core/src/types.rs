@@ -84,6 +84,9 @@ pub trait AgentTool: Send + Sync {
 pub struct AgentLoopConfig {
     /// Maximum iterations of the inner (tool-calling) loop per turn.
     pub max_tool_rounds: Option<u32>,
+    /// Maximum repeats allowed for the same tool call signature
+    /// (same tool name + same arguments) within a turn.
+    pub max_same_tool_call_repeats: Option<u32>,
     /// Maximum output tokens for each LLM call.
     pub max_tokens: Option<u32>,
     /// Temperature for LLM sampling.
@@ -102,6 +105,7 @@ impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_tool_rounds: Some(20),
+            max_same_tool_call_repeats: Some(6),
             max_tokens: None,
             temperature: None,
             include_usage: false,

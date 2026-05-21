@@ -44,6 +44,10 @@ pub struct ThetaConfig {
     /// Provider transport settings.
     #[serde(default)]
     pub provider: ProviderSettings,
+
+    /// Agent loop controls.
+    #[serde(default)]
+    pub agent: AgentSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -116,6 +120,21 @@ impl Default for ProviderSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSettings {
+    /// Maximum same-signature tool-call repeats in one turn before aborting.
+    #[serde(default = "default_max_same_tool_call_repeats")]
+    pub max_same_tool_call_repeats: u32,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            max_same_tool_call_repeats: default_max_same_tool_call_repeats(),
+        }
+    }
+}
+
 impl Default for RetrySettings {
     fn default() -> Self {
         Self {
@@ -142,6 +161,9 @@ fn default_base_delay() -> u64 {
 }
 fn default_timeout_ms() -> u64 {
     120_000
+}
+fn default_max_same_tool_call_repeats() -> u32 {
+    6
 }
 
 /// Provider auth tokens loaded from ~/.theta/auth.json or env vars.
@@ -416,6 +438,7 @@ impl AuthConfig {
 /// Build an AgentLoopConfig from the Theta toml config.
 pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
     theta_agent_core::AgentLoopConfig {
+        max_same_tool_call_repeats: Some(tc.agent.max_same_tool_call_repeats),
         compaction: theta_agent_core::CompactionConfig {
             enabled: tc.compaction.enabled,
             reserve_tokens: tc.compaction.reserve_tokens,
