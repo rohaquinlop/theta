@@ -166,7 +166,11 @@ async fn run_single_turn(
     let mut tool_round: u32 = 0;
     let max_rounds = config.max_tool_rounds.unwrap_or(20);
     let mut empty_assistant_retries: u32 = 0;
-    let mut execution_promise_retries: u32 = 0;
+    let mut action_noop_retries: u32 = 0;
+    let mut executed_tools_in_turn = false;
+    let requires_action = latest_user_text(state)
+        .map(|text| looks_like_execution_request(&text))
+        .unwrap_or(false);
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -313,32 +317,47 @@ async fn run_single_turn(
                 }
 
                 if !has_tool_calls {
-                    let user_wants_execution = latest_user_text(state)
-                        .map(|text| looks_like_execution_request(&text))
-                        .unwrap_or(false);
-                    let assistant_promised_execution =
-                        assistant_text_opt(&state.messages[state.messages.len() - 1])
-                            .map(|text| looks_like_execution_promise(&text))
-                            .unwrap_or(false);
+                    if requires_action && !executed_tools_in_turn {
+                        let assistant_text =
+                            assistant_text_opt(&state.messages[state.messages.len() - 1])
+                                .unwrap_or_default();
+                        let blocker = classify_action_blocker(&assistant_text);
 
-                    if user_wants_execution
-                        && assistant_promised_execution
-                        && execution_promise_retries < 1
-                    {
-                        execution_promise_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message:
-                                "assistant promised implementation without tool calls; retrying same turn"
+                        if blocker == ActionBlocker::None && action_noop_retries < 1 {
+                            action_noop_retries += 1;
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "action turn produced no tool calls and no explicit blocker; retrying same turn".to_string(),
+                            });
+                            state.messages.push(Message::User {
+                                content: vec![ContentBlock::text(ACTION_RETRY_PROMPT)],
+                                timestamp: now_ms(),
+                            });
+                            tool_round += 1;
+                            continue;
+                        }
+
+                        if blocker != ActionBlocker::None {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!(
+                                    "action turn ended without tool calls due to explicit blocker ({})",
+                                    blocker.as_str()
+                                ),
+                            });
+                        } else if action_noop_retries >= 1 {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "action turn still produced no tool calls after retry; ending turn".to_string(),
+                            });
+                        } else if looks_like_execution_promise(&assistant_text) {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "assistant promised execution but emitted no tool calls"
                                     .to_string(),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(
-                                "You said you would implement now. Execute now by calling required tools first; do not send status-only text.",
-                            )],
-                            timestamp: now_ms(),
-                        });
-                        tool_round += 1;
-                        continue;
+                            });
+                        } else {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "action turn produced no tool calls; ending turn"
+                                    .to_string(),
+                            });
+                        }
                     }
 
                     break;
@@ -352,6 +371,7 @@ async fn run_single_turn(
 
                 tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx)
                     .await?;
+                executed_tools_in_turn = true;
 
                 tool_round += 1;
             }
@@ -375,6 +395,76 @@ async fn run_single_turn(
     }
 
     Ok(())
+}
+
+const ACTION_RETRY_PROMPT: &str = "This is an action request. Execute now by calling required tools first. If blocked, state the exact blocker briefly.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionBlocker {
+    MissingInfo,
+    Permission,
+    RuntimeConstraint,
+    None,
+}
+
+impl ActionBlocker {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingInfo => "missing_info",
+            Self::Permission => "permission",
+            Self::RuntimeConstraint => "runtime_constraint",
+            Self::None => "none",
+        }
+    }
+}
+
+fn classify_action_blocker(text: &str) -> ActionBlocker {
+    let t = text.to_lowercase();
+    if [
+        "need more detail",
+        "what should i implement",
+        "provide the target",
+        "please provide",
+        "missing info",
+        "which file",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
+    {
+        return ActionBlocker::MissingInfo;
+    }
+
+    if [
+        "permission denied",
+        "not permitted",
+        "need approval",
+        "requires approval",
+        "access denied",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
+    {
+        return ActionBlocker::Permission;
+    }
+
+    if [
+        "no such file or directory",
+        "path not found",
+        "sandbox",
+        "token expired",
+        "authentication",
+        "network",
+        "timeout",
+        "cannot access",
+        "blocked",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
+    {
+        return ActionBlocker::RuntimeConstraint;
+    }
+
+    ActionBlocker::None
 }
 
 fn assistant_text_opt(message: &Message) -> Option<String> {
@@ -427,8 +517,8 @@ fn looks_like_execution_request(text: &str) -> bool {
         "patch",
         "edit",
         "modify",
-        "update",
-        "change",
+        "update code",
+        "change code",
         "add",
         "remove",
         "refactor",

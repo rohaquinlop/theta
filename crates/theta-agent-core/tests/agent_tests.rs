@@ -452,6 +452,111 @@ async fn test_agent_retries_when_execution_promised_without_tool_calls() {
 }
 
 #[tokio::test]
+async fn test_action_turn_retries_without_promise_when_no_tools_and_no_blocker() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("Plan: edit config and run tests."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_2".into(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("call_2", r#"{"input":"run"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_2".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("Done."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text("implement this change")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|msg| matches!(msg, Message::ToolResult { .. })),
+        "action turn should retry and execute tool calls"
+    );
+}
+
+#[tokio::test]
+async fn test_action_turn_with_explicit_blocker_does_not_retry() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta(
+                "What should I implement exactly? Please provide target file.",
+            ),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("This second response should not be reached."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .prompt(vec![ContentBlock::text("implement it")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let has_retry_injected_user_message = state.messages.iter().any(|msg| match msg {
+        Message::User { content, .. } => content.iter().any(|b| {
+            matches!(b, ContentBlock::Text { text } if text.contains("This is an action request. Execute now by calling required tools first."))
+        }),
+        _ => false,
+    });
+    assert!(
+        !has_retry_injected_user_message,
+        "explicit blocker should end turn without injecting corrective retry"
+    );
+}
+
+#[tokio::test]
 async fn test_agent_abort() {
     let model = test_model();
 
