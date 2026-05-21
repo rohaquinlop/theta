@@ -261,10 +261,6 @@ pub async fn run_tui(
             description: "Open session tree selector".into(),
         },
         CommandEntry {
-            name: "settings".into(),
-            description: "Open settings selector".into(),
-        },
-        CommandEntry {
             name: "login".into(),
             description: "Log in to a provider".into(),
         },
@@ -361,16 +357,19 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut saw_assistant_text_delta = false;
+        let mut saw_thinking_delta = false;
         loop {
             match events.recv().await {
                 Ok(AgentEvent::MessageStart) => {
                     saw_assistant_text_delta = false;
+                    saw_thinking_delta = false;
                 }
                 Ok(AgentEvent::TextDelta { text }) => {
                     saw_assistant_text_delta = true;
                     let _ = event_tx.send(TuiEvent::TextDelta(text));
                 }
                 Ok(AgentEvent::ThinkingDelta { thinking }) => {
+                    saw_thinking_delta = true;
                     let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
                 }
                 Ok(AgentEvent::ToolCallStart { .. }) => {}
@@ -401,22 +400,38 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     });
                 }
                 Ok(AgentEvent::MessageEnd { message }) => {
-                    if !saw_assistant_text_delta
-                        && let theta_ai::Message::Assistant { content, .. } = message
-                    {
-                        let final_text = content
-                            .iter()
-                            .filter_map(|b| match b {
-                                theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !final_text.is_empty() {
-                            let _ = event_tx.send(TuiEvent::TextDelta(final_text));
+                    if let theta_ai::Message::Assistant { content, .. } = message {
+                        if !saw_assistant_text_delta {
+                            let final_text = content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !final_text.is_empty() {
+                                let _ = event_tx.send(TuiEvent::TextDelta(final_text));
+                            }
+                        }
+                        if !saw_thinking_delta {
+                            let final_thinking = content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    theta_ai::ContentBlock::Thinking { thinking, .. } => {
+                                        Some(thinking.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !final_thinking.is_empty() {
+                                let _ = event_tx.send(TuiEvent::ThinkingDelta(final_thinking));
+                            }
                         }
                     }
                     saw_assistant_text_delta = false;
+                    saw_thinking_delta = false;
                 }
                 Ok(AgentEvent::TurnStart { .. }) => {
                     let _ = event_tx.send(TuiEvent::TurnStart);
@@ -807,7 +822,7 @@ async fn handle_tui_action(
                     // Send history to display in chat.
                     let history: Vec<HistoryEntry> = messages
                         .into_iter()
-                        .filter_map(|msg| message_to_history(&msg))
+                        .flat_map(|msg| message_to_history_entries(&msg))
                         .collect();
                     let _ = event_tx.send(TuiEvent::Info(recap));
                     if !history.is_empty() {
@@ -857,16 +872,6 @@ async fn handle_tui_action(
             let (steer, follow_up) = agent.queue_lengths();
             let _ = event_tx.send(TuiEvent::QueueStatus { steer, follow_up });
         }
-        TuiAction::SaveSettings(payload) => {
-            let mut s = crate::settings::load_settings().await;
-            s.steering_mode = payload.steering_mode;
-            s.follow_up_mode = payload.follow_up_mode;
-            s.transport_preference = payload.transport_preference;
-            s.show_thinking = payload.show_thinking;
-            let _ = crate::settings::save_settings(&s).await;
-            let _ = event_tx.send(TuiEvent::Info("Settings saved".into()));
-        }
-        TuiAction::ShowSettings => {}
     }
 }
 
@@ -1151,7 +1156,7 @@ fn session_recap(session: &crate::session::Session) -> String {
 }
 
 /// Convert a session message to a history entry for display.
-fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
+fn message_to_history_entries(msg: &theta_ai::Message) -> Vec<HistoryEntry> {
     match msg {
         theta_ai::Message::User { content, .. } => {
             let text = content
@@ -1162,36 +1167,48 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            Some(HistoryEntry {
+            vec![HistoryEntry {
                 role: "user".into(),
                 text,
-            })
+            }]
         }
         theta_ai::Message::Assistant { content, .. } => {
             let text = content
                 .iter()
                 .filter_map(|b| match b {
                     theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                    theta_ai::ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-                    theta_ai::ContentBlock::ToolCall { name, .. } => Some(name.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if text.is_empty() {
-                None
-            } else {
-                Some(HistoryEntry {
+            let thinking = content
+                .iter()
+                .filter_map(|b| match b {
+                    theta_ai::ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut out = Vec::new();
+            if !text.is_empty() {
+                out.push(HistoryEntry {
                     role: "assistant".into(),
                     text,
-                })
+                });
             }
+            if !thinking.is_empty() {
+                out.push(HistoryEntry {
+                    role: "thinking".into(),
+                    text: thinking,
+                });
+            }
+            out
         }
-        theta_ai::Message::ToolResult { tool_name, .. } => Some(HistoryEntry {
+        theta_ai::Message::ToolResult { tool_name, .. } => vec![HistoryEntry {
             role: "tool".into(),
             text: format!("[{tool_name}] done"),
-        }),
-        _ => None,
+        }],
+        _ => Vec::new(),
     }
 }
 

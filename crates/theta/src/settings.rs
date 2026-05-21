@@ -36,11 +36,11 @@ pub struct ThetaSettings {
 }
 
 fn default_steering_mode() -> String {
-    "steer".to_string()
+    "follow-up".to_string()
 }
 
 fn default_follow_up_mode() -> String {
-    "follow-up".to_string()
+    "steer".to_string()
 }
 
 fn default_transport_preference() -> String {
