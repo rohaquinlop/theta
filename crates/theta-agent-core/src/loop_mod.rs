@@ -166,6 +166,7 @@ async fn run_single_turn(
     let mut tool_round: u32 = 0;
     let max_rounds = config.max_tool_rounds.unwrap_or(20);
     let mut empty_assistant_retries: u32 = 0;
+    let mut execution_promise_retries: u32 = 0;
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -312,6 +313,34 @@ async fn run_single_turn(
                 }
 
                 if !has_tool_calls {
+                    let user_wants_execution = latest_user_text(state)
+                        .map(|text| looks_like_execution_request(&text))
+                        .unwrap_or(false);
+                    let assistant_promised_execution =
+                        assistant_text_opt(&state.messages[state.messages.len() - 1])
+                            .map(|text| looks_like_execution_promise(&text))
+                            .unwrap_or(false);
+
+                    if user_wants_execution
+                        && assistant_promised_execution
+                        && execution_promise_retries < 1
+                    {
+                        execution_promise_retries += 1;
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message:
+                                "assistant promised implementation without tool calls; retrying same turn"
+                                    .to_string(),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::text(
+                                "You said you would implement now. Execute now by calling required tools first; do not send status-only text.",
+                            )],
+                            timestamp: now_ms(),
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+
                     break;
                 }
 
@@ -346,6 +375,83 @@ async fn run_single_turn(
     }
 
     Ok(())
+}
+
+fn assistant_text_opt(message: &Message) -> Option<String> {
+    match message {
+        Message::Assistant { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn latest_user_text(state: &AgentState) -> Option<String> {
+    state.messages.iter().rev().find_map(|msg| match msg {
+        Message::User { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
+    })
+}
+
+fn looks_like_execution_request(text: &str) -> bool {
+    let t = text.to_lowercase();
+    [
+        "implement",
+        "fix",
+        "patch",
+        "edit",
+        "modify",
+        "update",
+        "change",
+        "add",
+        "remove",
+        "refactor",
+        "run it",
+        "do it",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
+}
+
+fn looks_like_execution_promise(text: &str) -> bool {
+    let t = text.to_lowercase();
+    [
+        "on it",
+        "i'll",
+        "i will",
+        "starting now",
+        "let me",
+        "i can implement",
+        "i can patch",
+    ]
+    .iter()
+    .any(|kw| t.contains(kw))
 }
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.

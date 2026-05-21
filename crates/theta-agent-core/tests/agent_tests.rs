@@ -366,6 +366,92 @@ async fn test_agent_retries_empty_assistant_turn() {
 }
 
 #[tokio::test]
+async fn test_agent_retries_when_execution_promised_without_tool_calls() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("On it. I'll implement now."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_1".into(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("call_1", r#"{"input":"go"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_1".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("Implemented."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let mut config = AgentLoopConfig::default();
+    config.max_tool_rounds = Some(5);
+
+    let mut agent = Agent::new(model, registry, catalog);
+    agent.set_config(config);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+
+    agent
+        .prompt(vec![ContentBlock::text("implement it")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let has_tool_result = state
+        .messages
+        .iter()
+        .any(|msg| matches!(msg, Message::ToolResult { .. }));
+    assert!(
+        has_tool_result,
+        "execution retry should drive an actual tool call"
+    );
+
+    let last_assistant_text = state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|msg| match msg {
+            Message::Assistant { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(last_assistant_text.contains("Implemented."));
+}
+
+#[tokio::test]
 async fn test_agent_abort() {
     let model = test_model();
 
