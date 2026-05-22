@@ -165,7 +165,6 @@ async fn run_single_turn(
 
     // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
-    let max_rounds = config.max_tool_rounds.unwrap_or(20);
     let mut empty_assistant_retries: u32 = 0;
     let mut action_noop_retries: u32 = 0;
     let mut inspection_noop_retries: u32 = 0;
@@ -188,7 +187,9 @@ async fn run_single_turn(
         // Only check abort if no steering messages are pending.
         check_abort!(abort_token, steering_queue);
 
-        if tool_round >= max_rounds {
+        if let Some(max_rounds) = config.max_tool_rounds
+            && tool_round >= max_rounds
+        {
             tracing::warn!("max tool rounds reached ({max_rounds})");
             let _ = event_tx.send(AgentEvent::Error {
                 message: format!(

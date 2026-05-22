@@ -78,7 +78,7 @@ Available fields:
 - `[retry].max_retries` (u32, default: `2`): retry attempts for retryable provider errors.
 - `[retry].base_delay_ms` (u64, default: `1000`): exponential backoff base delay in milliseconds.
 - `[provider].timeout_ms` (u64, default: `120000`): provider request timeout in milliseconds.
-- `[agent].max_same_tool_call_repeats` (u32, default: `6`): maximum repeated identical tool-call signatures in one turn before aborting that tool loop.
+- `[agent].max_same_tool_call_repeats` (u32, default: `6`): primary loop guard; maximum repeated identical tool-call signatures in one turn before aborting that loop.
 
 Auth note:
 

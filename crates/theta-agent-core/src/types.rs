@@ -82,7 +82,8 @@ pub trait AgentTool: Send + Sync {
 /// Configuration for the agent loop.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
-    /// Maximum iterations of the inner (tool-calling) loop per turn.
+    /// Optional hard safety cap for inner-loop iterations per turn.
+    /// `None` disables this cap.
     pub max_tool_rounds: Option<u32>,
     /// Maximum repeats allowed for the same tool call signature
     /// (same tool name + same arguments) within a turn.
@@ -104,7 +105,7 @@ pub struct AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            max_tool_rounds: Some(20),
+            max_tool_rounds: None,
             max_same_tool_call_repeats: Some(6),
             max_tokens: None,
             temperature: None,

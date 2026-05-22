@@ -452,6 +452,171 @@ async fn test_agent_retries_when_execution_promised_without_tool_calls() {
 }
 
 #[tokio::test]
+async fn test_agent_allows_long_progressive_tool_runs_without_round_cap() {
+    let model = test_model();
+    let mut responses: Vec<Vec<AssistantMessageEvent>> = Vec::new();
+    for i in 0..25 {
+        let call_id = format!("call_progress_{i}");
+        let args = format!(r#"{{"input":"step-{i}"}}"#);
+        responses.push(vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta(&call_id, &args),
+            AssistantMessageEvent::ToolCallEnd { id: call_id },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+    }
+    responses.push(vec![
+        AssistantMessageEvent::text_delta("Completed after long tool run."),
+        AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let mock = MockProvider::new(responses);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text("implement this large change")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let tool_results = state
+        .messages
+        .iter()
+        .filter(|msg| {
+            matches!(
+                msg,
+                Message::ToolResult { tool_name, .. } if tool_name == "mock"
+            )
+        })
+        .count();
+    assert_eq!(
+        tool_results, 25,
+        "progressive, non-identical tool calls should not be capped by default"
+    );
+
+    let last_assistant_text = state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|msg| match msg {
+            Message::Assistant { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        last_assistant_text.contains("Completed after long tool run."),
+        "turn should reach final assistant completion after many tool rounds"
+    );
+}
+
+#[tokio::test]
+async fn test_agent_stops_repeated_identical_tool_call_loop() {
+    let model = test_model();
+    let mut responses: Vec<Vec<AssistantMessageEvent>> = Vec::new();
+    for i in 0..7 {
+        let call_id = format!("call_repeat_{i}");
+        responses.push(vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta(&call_id, r#"{"input":"same"}"#),
+            AssistantMessageEvent::ToolCallEnd { id: call_id },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+    }
+
+    let mock = MockProvider::new(responses);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Arc::new(Agent::new(model, registry, catalog));
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+
+    let mut rx = agent.subscribe();
+    let agent_clone = agent.clone();
+    let handle = tokio::spawn(async move {
+        agent_clone
+            .prompt(vec![ContentBlock::text("implement and keep trying")])
+            .await
+            .unwrap();
+    });
+
+    let mut saw_repeat_guard_error = false;
+    loop {
+        match rx.recv().await.unwrap() {
+            AgentEvent::Error { message } => {
+                if message.contains("repeated identical tool call loop") {
+                    saw_repeat_guard_error = true;
+                }
+            }
+            AgentEvent::AgentEnd { .. } => break,
+            _ => {}
+        }
+    }
+
+    handle.await.unwrap();
+
+    let state = agent.state().await;
+    let tool_results = state
+        .messages
+        .iter()
+        .filter(|msg| {
+            matches!(
+                msg,
+                Message::ToolResult { tool_name, .. } if tool_name == "mock"
+            )
+        })
+        .count();
+    assert_eq!(
+        tool_results, 6,
+        "repeat guard should stop before executing the 7th identical call"
+    );
+    assert!(
+        saw_repeat_guard_error,
+        "agent should emit a diagnostic error when repeat guard triggers"
+    );
+}
+
+#[tokio::test]
 async fn test_action_turn_retries_without_promise_when_no_tools_and_no_blocker() {
     let model = test_model();
     let mock = MockProvider::new(vec![
