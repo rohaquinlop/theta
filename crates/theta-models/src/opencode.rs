@@ -258,7 +258,7 @@ pub async fn fetch_models() -> Vec<Model> {
 pub fn models() -> Vec<Model> {
     vec![Model {
         id: "opencode".into(),
-        name: "OpenCode Zen (loading...)".into(),
+        name: "OpenCode Zen".into(),
         api: Api::OpenAiCompletions,
         provider: Provider::OpenCode,
         base_url: "https://opencode.ai/zen".into(),
