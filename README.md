@@ -32,6 +32,38 @@ cargo run -- rpc
 - `Ctrl+T` cycles themes.
 - `Tab` switches focus between input and chat.
 
+## Extensions (Rhai Scripts)
+
+Theta supports scriptable tool hooks via `.rhai` files — no fork, no recompile, no external runtime. The agent can write these for you when you ask.
+
+**Ask the agent:**
+- "Block any `git push --force` and ask me to confirm"
+- "Warn me before editing `.env` files"
+- "Don't allow `rm -rf` commands"
+
+**Script locations:**
+- `~/.theta/extensions/*.rhai` — global (all projects)
+- `./.theta/extensions/*.rhai` — project-local
+
+**Example script** (`~/.theta/extensions/guard.rhai`):
+```rhai
+// Block dangerous commands
+tool.before("bash", |ctx| {
+    if ctx.args.command.contains("rm -rf") {
+        return #{ blocked: true, reason: "Blocked: rm -rf" };
+    }
+});
+
+// Protect sensitive files
+tool.before("write", |ctx| {
+    if ctx.args.path.ends_with(".env") {
+        return #{ blocked: true, reason: "no .env writes" };
+    }
+});
+```
+
+Scripts load automatically on next session. Script errors never block the tool they're guarding.
+
 ## Config
 
 Config lives at `~/.theta/config.toml`.

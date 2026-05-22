@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod print_mode;
 pub mod prompts;
 pub mod rpc;
+pub mod scripts;
 pub mod session;
 pub mod settings;
 pub mod skills;

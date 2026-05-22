@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use theta_ai::ContentBlock;
 
+use crate::scripts;
 use crate::skills;
 use crate::tools::{ToolContext, builtin_tools};
 
@@ -26,6 +27,12 @@ pub async fn build_system_prompt(
     let discovered = skills::discover_skills(working_dir).await;
     if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
         parts.push(skills_block);
+    }
+
+    // Available extension scripts.
+    let ext_scripts = scripts::discover_scripts(working_dir).await;
+    if let Some(ext_block) = scripts::build_extensions_prompt_block(&ext_scripts) {
+        parts.push(ext_block);
     }
 
     let tools_prompt = build_tools_prompt(working_dir);
@@ -224,6 +231,43 @@ fn build_guidelines() -> String {
         "The following skills provide specialized instructions for specific tasks.",
         "Use the read tool to load a skill's SKILL.md file when the task matches its description.",
         "When a skill file references a relative path, resolve it against the skill directory.",
+        "",
+        "## Theta Extensions",
+        "",
+        "Theta supports Rhai script extensions in `~/.theta/extensions/*.rhai` (global) and `./.theta/extensions/*.rhai` (project-local).",
+        "Scripts use `tool.before(name, callback)` and `tool.after(name, callback)` to intercept tool calls at runtime.",
+        "Extensions take effect on the next session (loaded at agent startup).",
+        "",
+        "CRITICAL — Only create an extension when the user uses one of these EXACT phrases:",
+        "- \"create an extension\" or \"write an extension\" or \"make an extension\"",
+        "- \"create a theta extension\" or \"write a theta extension\"",
+        "- \"add a tool hook\" or \"add a before hook\" or \"add an after hook\"",
+        "- \"install an extension\"",
+        "- \"I want to extend theta\" or \"how do I extend theta\"",
+        "",
+        "Do NOT create an extension from general task language. These are NOT extension triggers:",
+        "- \"block write access to .env\" — this is a coding task, implement it in code.",
+        "- \"guard this function with a null check\" — this is a coding task.",
+        "- \"protect the API key\" — this is a coding task, use .env or secrets.",
+        "- \"intercept network calls\" — this is a coding task.",
+        "- When in doubt, do NOT create an extension. Extensions are ONLY for modifying Theta's tool execution pipeline.",
+        "",
+        "When the user says \"modify theta\" or \"extend theta\" without specifying how, ask:",
+        "1. A skill (Markdown file, adds agent knowledge/instructions)",
+        "2. An extension (Rhai script, intercepts tool calls at runtime)",
+        "3. A Rust change (fork + recompile, for TUI/custom tools/new features)",
+        "",
+        "Rules for writing extensions:",
+        "- Use `tool.before(\"tool_name\", |ctx| {{ ... }})` to block or modify before execution.",
+        "- Use `tool.after(\"tool_name\", |ctx, result| {{ ... }})` to react after execution.",
+        "- Return `#{{ blocked: true, reason: \"...\" }}` to block a tool call.",
+        "- `ctx.args` contains the tool arguments as an object map.",
+        "- `call` is reserved in Rhai — use `ctx` or another name for the callback parameter.",
+        "- Write to `~/.theta/extensions/` for global or `./.theta/extensions/` for project-local.",
+        "- After writing, tell the user the extension takes effect on next session.",
+        "",
+        "Extensions are limited to tool-call hooks only. TUI changes, custom tools,",
+        "and UI components require Rust forking and recompilation.",
     ]
     .join("\n")
 }

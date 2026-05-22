@@ -19,17 +19,18 @@ Users should extend Theta without forking internals: custom tools via Rust trait
 
 ## Architecture
 
-Three layers, mirroring pi:
+Six layers, mirroring pi:
 
 ```
-theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes  [Done]
-theta-agent-core (lib)  — agent runtime: loop, tool calling, compaction, events    [Done]
-theta-ai (lib)          — unified LLM API: types, provider trait, streaming          [Done]
-theta-tui (lib)         — terminal UI (ratatui + crossterm)                          [Done]
-theta-models (lib)      — built-in model catalog (compile-time)                      [Done]
+theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes + scripts  [Done]
+theta-agent-core (lib)  — agent runtime: loop, tool calling, compaction, events             [Done]
+theta-ai (lib)          — unified LLM API: types, provider trait, streaming                   [Done]
+theta-tui (lib)         — terminal UI (ratatui + crossterm)                                   [Done]
+theta-models (lib)      — built-in model catalog (compile-time)                               [Done]
+theta-script (lib)      — Rhai-powered scriptable hooks for tool-call interception            [Done]
 ```
 
-**Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`)
+**Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`, `theta-script`)
 
 Use this `AGENTS.md` as the canonical implementation guidance and phase status.
 
@@ -232,6 +233,36 @@ Critical loop regression tests must cover:
 - inspection turn offer-only -> retry -> read-only tool execution
 - commit-op turn offer-only -> retry -> git command execution
 - no duplicate terminal stop-reason downgrades (`toolUse` must not be overwritten by synthetic `stop`)
+
+## Script Extensions (Rhai)
+
+Theta supports scriptable tool hooks via `.rhai` files — no fork, no recompile, no external runtime.
+
+**Locations:**
+- `~/.theta/extensions/*.rhai` — global (all projects)
+- `./.theta/extensions/*.rhai` — project-local
+
+**API:** Scripts call `tool.before(name, callback)` and `tool.after(name, callback)` to intercept tool calls. The `ctx` object provides `ctx.notify(msg)`.
+
+```rhai
+// Block dangerous commands
+tool.before("bash", |ctx| {
+    if ctx.args.command.contains("rm -rf") {
+        return #{ blocked: true, reason: "Blocked: rm -rf" };
+    }
+});
+
+// Protect sensitive files
+tool.before("write", |ctx| {
+    if ctx.args.path.ends_with(".env") {
+        return #{ blocked: true, reason: "no .env writes" };
+    }
+});
+```
+
+**Agent as author:** Theta can write these scripts when the user asks for guardrails ("block force pushes", "warn before editing .env"). Scripts are auto-discovered on agent creation — no `/reload` needed for new sessions.
+
+**Implementation:** `crates/theta-script/` — `ScriptEngine` loads scripts, `ScriptHooks` bridges to `theta_agent_core::hooks::Hooks`. Blocked calls return `AgentError::ToolExecution`. Script errors never block the tool.
 
 ## Commands
 

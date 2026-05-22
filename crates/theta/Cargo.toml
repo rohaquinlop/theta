@@ -15,6 +15,7 @@ theta-ai = { workspace = true }
 theta-agent-core = { workspace = true }
 theta-tui = { workspace = true }
 theta-models = { workspace = true }
+theta-script = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -39,3 +40,4 @@ base64 = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }
 open = { workspace = true }
+rhai = { version = "1.24.0", features = ["sync", "serde"] }

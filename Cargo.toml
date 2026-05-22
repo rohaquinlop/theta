@@ -5,6 +5,7 @@ members = [
     "crates/theta-agent-core",
     "crates/theta-tui",
     "crates/theta-models",
+    "crates/theta-script",
     "crates/theta",
 ]
 
@@ -53,6 +54,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
 
 # Misc
+rhai = { version = "1", features = ["sync", "serde"] }
 regex = "1"
 glob = "0.3"
 serde_yaml = "0.9"
@@ -71,3 +73,4 @@ theta-ai = { path = "crates/theta-ai" }
 theta-agent-core = { path = "crates/theta-agent-core" }
 theta-tui = { path = "crates/theta-tui" }
 theta-models = { path = "crates/theta-models" }
+theta-script = { path = "crates/theta-script" }
