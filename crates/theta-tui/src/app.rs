@@ -112,6 +112,8 @@ pub enum TuiEvent {
         id: String,
         model: String,
     },
+    /// Clear the chat display (used for /new and /clear).
+    ClearChat,
     /// Informational system message (not an error).
     Info(String),
     /// Live session info: token counts, context window, compaction status.
@@ -757,6 +759,7 @@ impl App {
                     "  /session        Show session info (tokens, context window, compaction)",
                     "  /compact        Manually compact context to fit in context window",
                     "  /fork           Fork the current session",
+                    "  /new            Start a new unsaved session",
                     "  /sessions       List recent sessions (in picker press s to sort)",
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
                     "  /skills         List available skills",
@@ -831,6 +834,11 @@ impl App {
                 // Start the login flow.
                 let providers = known_providers(false, false, false, false);
                 self.login_flow = Some(LoginFlow::new(self.theme.clone(), providers));
+            }
+            "new" => {
+                // Clear chat immediately in the UI — agent reset happens async.
+                self.chat.clear_messages();
+                let _ = self.action_tx.send(TuiAction::NewSession);
             }
             "sessions" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessions);
@@ -1246,6 +1254,9 @@ impl App {
                 self.current_tool = None;
                 self.status.set_agent_state("idle");
                 self.status.set_detail("");
+            }
+            TuiEvent::ClearChat => {
+                self.chat.clear_messages();
             }
             TuiEvent::Info(msg) => {
                 if self.diag_enabled || !is_diagnostic_message(&msg) {

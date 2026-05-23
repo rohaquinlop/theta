@@ -307,6 +307,10 @@ pub async fn run_tui(
             description: "Fork the current session".into(),
         },
         CommandEntry {
+            name: "new".into(),
+            description: "Start a new unsaved session".into(),
+        },
+        CommandEntry {
             name: "sessions".into(),
             description: "List recent sessions to resume".into(),
         },
@@ -1025,11 +1029,13 @@ async fn handle_tui_action(
                 return;
             };
 
-            // Lazy session behavior: clear in-memory transcript, but do not
-            // create a session file until first real message.
+            // Clear in-memory transcript — no session file until first message.
             agent.load_messages(Vec::new()).await;
             let blocks = build_system_prompt(working_dir, model_id, None).await;
             agent.set_system_prompt(blocks).await;
+
+            // Clear the chat display.
+            let _ = event_tx.send(TuiEvent::ClearChat);
 
             *session_id_cell.write().await = None;
             let _ = event_tx.send(TuiEvent::SessionCreated {
