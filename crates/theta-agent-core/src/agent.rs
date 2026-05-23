@@ -68,7 +68,7 @@ impl Agent {
     ) -> Self {
         Self {
             state: RwLock::new(AgentState::new(model)),
-            event_tx: broadcast::channel(256).0,
+            event_tx: broadcast::channel(8192).0,
             provider,
             model_catalog,
             hooks: Arc::new(NoopHooks),
