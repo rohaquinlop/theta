@@ -1050,7 +1050,19 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
 
     let mut out: Vec<String> = Vec::new();
 
-    // If user types "/git-...", proactively suggest "/skill:git-..." matches.
+    // Built-in commands first.
+    let builtins: Vec<&String> = commands
+        .iter()
+        .filter(|c| !c.starts_with("skill:"))
+        .collect();
+    for cmd in fuzzy_filter(&builtins, query, |s| s) {
+        out.push(cmd.to_string());
+        if out.len() >= 10 {
+            return out;
+        }
+    }
+
+    // Then skill matches (proactive: match /git-... → /skill:git-...).
     let skill_commands: Vec<&String> = commands
         .iter()
         .filter(|c| c.starts_with("skill:"))
@@ -1058,18 +1070,7 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
     for cmd in fuzzy_filter(&skill_commands, query, |s| &s[6..]) {
         out.push(cmd.to_string());
         if out.len() >= 10 {
-            return out;
-        }
-    }
-
-    // Normal command matching.
-    let cmds: Vec<&String> = commands.iter().collect();
-    for cmd in fuzzy_filter(&cmds, query, |s| s) {
-        if !out.iter().any(|existing| existing == cmd.as_str()) {
-            out.push(cmd.to_string());
-            if out.len() >= 10 {
-                break;
-            }
+            break;
         }
     }
 
