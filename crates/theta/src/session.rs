@@ -1,4 +1,7 @@
-//! Session management: create, open, fork, resume, and append to Pi-compatible JSONL sessions.
+//! Session management: create, open, fork, resume, and append JSONL sessions.
+//!
+//! Writes Theta-native message keys while remaining backward-compatible when
+//! reading legacy Pi-compatible entries.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
@@ -563,6 +566,18 @@ mod tests {
         // Reopen and verify message is persisted.
         let reopened = mgr.open(&session.file_path).await.unwrap();
         assert_eq!(reopened.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_open_parses_legacy_pi_tool_result_entry() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+        let session = mgr.create(None).await.unwrap();
+        let legacy = r#"{"type":"toolResult","toolCallId":"c1","toolName":"read","content":[{"type":"text","text":"ok"}],"details":null,"isError":false,"timestamp":1}"#;
+        std::fs::write(&session.file_path, format!("{legacy}\n")).unwrap();
+        let reopened = mgr.open(&session.file_path).await.unwrap();
+        assert_eq!(reopened.messages.len(), 1);
+        assert!(matches!(reopened.messages[0], Message::ToolResult { .. }));
     }
 
     #[tokio::test]

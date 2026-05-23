@@ -139,8 +139,8 @@ pub struct CompactionConfig {
     pub enabled: bool,
     /// Tokens to reserve for the model's response.
     pub reserve_tokens: u32,
-    /// Whether to ask the model to summarize trimmed context.
-    pub summarize_with_llm: bool,
+    /// Strategy for handling trimmed context.
+    pub strategy: CompactionStrategy,
     /// Maximum output tokens for compaction summaries.
     pub summary_max_tokens: u32,
 }
@@ -150,10 +150,29 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             reserve_tokens: 4096,
-            summarize_with_llm: true,
+            strategy: CompactionStrategy::Llm,
             summary_max_tokens: 512,
         }
     }
+}
+
+/// Compaction summary strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionStrategy {
+    None,
+    Textual,
+    Llm,
+}
+
+/// High-level intent for the current turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentIntent {
+    Execute,
+    PlanOnly,
+    Inspect,
+    AnalyzeOnly,
+    Clarify,
+    Default,
 }
 
 /// Provider retry settings.

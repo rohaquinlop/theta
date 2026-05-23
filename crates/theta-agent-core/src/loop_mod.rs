@@ -20,11 +20,11 @@ use theta_ai::{
 };
 
 use crate::error::AgentError;
-use crate::events::AgentEvent;
+use crate::events::{AgentEvent, TurnDecisionReason};
 use crate::hooks::Hooks;
 use crate::state::AgentState;
 use crate::tools;
-use crate::types::{AgentLoopConfig, ToolCall};
+use crate::types::{AgentIntent, AgentLoopConfig, CompactionStrategy, ToolCall};
 
 /// Drain all messages from a shared queue and add them to state.
 fn drain_queue(queue: &Arc<Mutex<Vec<(Message, u64)>>>, state: &mut AgentState) -> bool {
@@ -166,17 +166,8 @@ async fn run_single_turn(
     // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
     let mut empty_assistant_retries: u32 = 0;
-    let mut action_noop_retries: u32 = 0;
-    let mut inspection_noop_retries: u32 = 0;
-    let mut commit_ops_noop_retries: u32 = 0;
-    let mut validation_noop_retries: u32 = 0;
-    let mut reproduction_noop_retries: u32 = 0;
-    let mut promised_execution_noop_retries: u32 = 0;
+    let mut consecutive_noop_rounds: u32 = 0;
     let mut executed_tools_in_turn = false;
-    let mut flags = recompute_turn_flags(state);
-    let mut executed_inspection_tools_in_turn = false;
-    let mut executed_git_tools_in_turn = false;
-    let mut executed_validation_tools_in_turn = false;
     let mut repeated_tool_signature_counts: HashMap<String, u32> = HashMap::new();
     let max_same_tool_signature_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
 
@@ -191,13 +182,17 @@ async fn run_single_turn(
             && tool_round >= max_rounds
         {
             tracing::warn!("max tool rounds reached ({max_rounds})");
-            let _ = event_tx.send(AgentEvent::Error {
-                message: format!(
-                    "agent stopped after reaching max tool rounds ({max_rounds}); likely provider/tool-call loop"
+            let _ = event_tx.send(AgentEvent::TurnDecision {
+                reason: TurnDecisionReason::MaxRounds,
+                details: format!(
+                    "stopped after reaching max tool rounds ({max_rounds}); likely provider/tool-call loop"
                 ),
+                turn: turn_index,
+                round: tool_round,
             });
             break;
         }
+        let intent = infer_intent(latest_user_text(state).as_deref().unwrap_or_default());
 
         // Build the LLM context from current state, with compaction.
         let (context, compaction_stats, replay_stats) =
@@ -251,6 +246,7 @@ async fn run_single_turn(
             event_tx,
             abort_token.clone(),
             steering_abort.clone(),
+            true,
         )
         .await
         {
@@ -286,7 +282,6 @@ async fn run_single_turn(
                             )],
                             timestamp: now_ms(),
                         });
-                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -322,7 +317,6 @@ async fn run_single_turn(
                             )],
                             timestamp: now_ms(),
                         });
-                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
@@ -333,145 +327,58 @@ async fn run_single_turn(
                         assistant_text_opt(&state.messages[state.messages.len() - 1])
                             .unwrap_or_default();
 
-                    if looks_like_execution_promise(&assistant_text)
-                        && promised_execution_noop_retries < 1
-                    {
-                        promised_execution_noop_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "assistant promised execution but emitted no tool calls; retrying same turn".to_string(),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(ACTION_RETRY_PROMPT)],
-                            timestamp: now_ms(),
-                        });
-                        flags = recompute_turn_flags(state);
-                        tool_round += 1;
-                        continue;
-                    }
-
-                    if flags.requires_plan_only {
+                    if intent == AgentIntent::PlanOnly || intent == AgentIntent::Clarify {
                         break;
                     }
 
-                    if flags.requires_inspection
-                        && !executed_inspection_tools_in_turn
-                        && inspection_noop_retries < 1
+                    if intent == AgentIntent::Execute
+                        && !executed_tools_in_turn
+                        && (consecutive_noop_rounds < 1
+                            || looks_like_execution_promise(&assistant_text))
                     {
-                        inspection_noop_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "inspection turn produced no inspection tool calls; retrying same turn".to_string(),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(INSPECTION_RETRY_PROMPT)],
-                            timestamp: now_ms(),
-                        });
-                        flags = recompute_turn_flags(state);
-                        tool_round += 1;
-                        continue;
-                    }
-
-                    if flags.requires_commit_ops
-                        && !executed_git_tools_in_turn
-                        && commit_ops_noop_retries < 1
-                    {
-                        commit_ops_noop_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "git turn produced no git tool calls; retrying same turn"
+                        consecutive_noop_rounds += 1;
+                        let _ = event_tx.send(AgentEvent::TurnDecision {
+                            reason: TurnDecisionReason::NoopRetry,
+                            details: "execute intent produced no tool calls; retrying once"
                                 .to_string(),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(COMMIT_OPS_RETRY_PROMPT)],
-                            timestamp: now_ms(),
-                        });
-                        flags = recompute_turn_flags(state);
-                        tool_round += 1;
-                        continue;
-                    }
-
-                    if flags.requires_reproduction
-                        && !executed_inspection_tools_in_turn
-                        && reproduction_noop_retries < 1
-                    {
-                        reproduction_noop_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "reproduction turn produced no evidence-gathering tool calls; retrying same turn".to_string(),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(REPRODUCTION_RETRY_PROMPT)],
-                            timestamp: now_ms(),
-                        });
-                        flags = recompute_turn_flags(state);
-                        tool_round += 1;
-                        continue;
-                    }
-
-                    if flags.requires_clarification {
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "request appears underspecified; assistant should ask one precise clarification".to_string(),
-                        });
-                    }
-
-                    if flags.requires_action && !executed_tools_in_turn {
-                        let blocker = classify_action_blocker(&assistant_text);
-
-                        if blocker == ActionBlocker::None && action_noop_retries < 1 {
-                            action_noop_retries += 1;
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: "action turn produced no tool calls and no explicit blocker; retrying same turn".to_string(),
-                            });
-                            state.messages.push(Message::User {
-                                content: vec![ContentBlock::text(ACTION_RETRY_PROMPT)],
-                                timestamp: now_ms(),
-                            });
-                            flags = recompute_turn_flags(state);
-                            tool_round += 1;
-                            continue;
-                        }
-
-                        if blocker != ActionBlocker::None {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: format!(
-                                    "action turn ended without tool calls due to explicit blocker ({})",
-                                    blocker.as_str()
-                                ),
-                            });
-                        } else if action_noop_retries >= 1 {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: "action turn still produced no tool calls after retry; ending turn".to_string(),
-                            });
-                        } else if looks_like_execution_promise(&assistant_text) {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: "assistant promised execution but emitted no tool calls"
-                                    .to_string(),
-                            });
-                        } else {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: "action turn produced no tool calls; ending turn"
-                                    .to_string(),
-                            });
-                        }
-                    }
-
-                    if flags.requires_validation
-                        && executed_tools_in_turn
-                        && !executed_validation_tools_in_turn
-                        && validation_noop_retries < 1
-                    {
-                        validation_noop_retries += 1;
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: "action turn completed without validation commands; retrying for validation".to_string(),
+                            turn: turn_index,
+                            round: tool_round,
                         });
                         state.messages.push(Message::User {
                             content: vec![ContentBlock::text(VALIDATION_RETRY_PROMPT)],
                             timestamp: now_ms(),
                         });
-                        flags = recompute_turn_flags(state);
                         tool_round += 1;
                         continue;
                     }
+                    if intent == AgentIntent::Execute
+                        && !executed_tools_in_turn
+                        && classify_action_blocker(&assistant_text)
+                    {
+                        let _ = event_tx.send(AgentEvent::TurnDecision {
+                            reason: TurnDecisionReason::BlockedNoop,
+                            details: "execute intent stopped due to explicit blocker".to_string(),
+                            turn: turn_index,
+                            round: tool_round,
+                        });
+                    }
 
+                    if intent == AgentIntent::Inspect && !executed_tools_in_turn {
+                        consecutive_noop_rounds += 1;
+                        if consecutive_noop_rounds <= 1 {
+                            state.messages.push(Message::User {
+                                content: vec![ContentBlock::text(
+                                    "This is an inspection request. Use read-only tools now and report findings.",
+                                )],
+                                timestamp: now_ms(),
+                            });
+                            tool_round += 1;
+                            continue;
+                        }
+                    }
                     break;
                 }
+                consecutive_noop_rounds = 0;
 
                 if stop_reason != Some(StopReason::ToolUse) {
                     let _ = event_tx.send(AgentEvent::Error {
@@ -496,17 +403,45 @@ async fn run_single_turn(
                     }
                 }
 
-                tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx, hooks)
+                if intent == AgentIntent::AnalyzeOnly {
+                    let mut allowed = Vec::new();
+                    for tc in &tool_calls {
+                        if is_read_only_tool_call(tc) {
+                            allowed.push(tc.clone());
+                        } else {
+                            let _ = event_tx.send(AgentEvent::TurnDecision {
+                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
+                                details: format!(
+                                    "blocked mutating tool call '{}' during analyze-only turn",
+                                    tc.name
+                                ),
+                                turn: turn_index,
+                                round: tool_round,
+                            });
+                        }
+                    }
+                    if allowed.is_empty() {
+                        break;
+                    }
+                    tools::execute_tool_calls(
+                        state,
+                        &allowed,
+                        abort_token.clone(),
+                        event_tx,
+                        hooks,
+                    )
                     .await?;
-                executed_tools_in_turn = true;
-                if tool_calls.iter().any(is_inspection_tool_call) {
-                    executed_inspection_tools_in_turn = true;
-                }
-                if tool_calls.iter().any(is_git_tool_call) {
-                    executed_git_tools_in_turn = true;
-                }
-                if tool_calls.iter().any(is_validation_tool_call) {
-                    executed_validation_tools_in_turn = true;
+                    executed_tools_in_turn = true;
+                } else {
+                    tools::execute_tool_calls(
+                        state,
+                        &tool_calls,
+                        abort_token.clone(),
+                        event_tx,
+                        hooks,
+                    )
+                    .await?;
+                    executed_tools_in_turn = true;
                 }
 
                 tool_round += 1;
@@ -533,37 +468,11 @@ async fn run_single_turn(
     Ok(())
 }
 
-const ACTION_RETRY_PROMPT: &str = "This is an action request. Execute now by calling required tools first. If blocked, state the exact blocker briefly.";
-const INSPECTION_RETRY_PROMPT: &str = "This is an inspection request. Run relevant read-only tools now and report findings; do not ask for confirmation.";
-const COMMIT_OPS_RETRY_PROMPT: &str =
-    "This requires git operations. Run the required git commands now via tools and report results.";
-const VALIDATION_RETRY_PROMPT: &str =
-    "Run validation commands now (tests/build/lint as appropriate) and report outcomes.";
-const REPRODUCTION_RETRY_PROMPT: &str =
-    "Reproduce or gather evidence first using tools (logs/status/tests), then report findings.";
+const VALIDATION_RETRY_PROMPT: &str = "This is an execution request. Call the relevant tools now. If blocked, state the blocker clearly and stop.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActionBlocker {
-    MissingInfo,
-    Permission,
-    RuntimeConstraint,
-    None,
-}
-
-impl ActionBlocker {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MissingInfo => "missing_info",
-            Self::Permission => "permission",
-            Self::RuntimeConstraint => "runtime_constraint",
-            Self::None => "none",
-        }
-    }
-}
-
-fn classify_action_blocker(text: &str) -> ActionBlocker {
+fn classify_action_blocker(text: &str) -> bool {
     let t = text.to_lowercase();
-    if [
+    let missing_info = [
         "need more detail",
         "what should i implement",
         "provide the target",
@@ -572,12 +481,8 @@ fn classify_action_blocker(text: &str) -> ActionBlocker {
         "which file",
     ]
     .iter()
-    .any(|kw| t.contains(kw))
-    {
-        return ActionBlocker::MissingInfo;
-    }
-
-    if [
+    .any(|kw| t.contains(kw));
+    let permission = [
         "permission denied",
         "not permitted",
         "need approval",
@@ -585,12 +490,8 @@ fn classify_action_blocker(text: &str) -> ActionBlocker {
         "access denied",
     ]
     .iter()
-    .any(|kw| t.contains(kw))
-    {
-        return ActionBlocker::Permission;
-    }
-
-    if [
+    .any(|kw| t.contains(kw));
+    let runtime = [
         "no such file or directory",
         "path not found",
         "sandbox",
@@ -602,123 +503,8 @@ fn classify_action_blocker(text: &str) -> ActionBlocker {
         "blocked",
     ]
     .iter()
-    .any(|kw| t.contains(kw))
-    {
-        return ActionBlocker::RuntimeConstraint;
-    }
-
-    ActionBlocker::None
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct TurnFlags {
-    requires_action: bool,
-    requires_inspection: bool,
-    requires_validation: bool,
-    requires_reproduction: bool,
-    requires_commit_ops: bool,
-    requires_plan_only: bool,
-    requires_clarification: bool,
-}
-
-fn determine_turn_flags(text: &str) -> TurnFlags {
-    let t = text.to_lowercase();
-    let tokens = tokenize_words(&t);
-
-    let requires_plan_only = [
-        &["plan", "only"][..],
-        &["just", "plan"],
-        &["brainstorm"],
-        &["do", "not", "implement"],
-        &["don't", "implement"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq));
-    let requires_action = looks_like_execution_request(&t) && !requires_plan_only;
-    let requires_inspection = [
-        &["review"][..],
-        &["inspect"],
-        &["analyze"],
-        &["analyse"],
-        &["what", "changed"],
-        &["current", "changes"],
-        &["changes", "impact"],
-        &["impact", "project"],
-        &["uncommitted"],
-        &["uncommited"],
-        &["uncommitted", "changes"],
-        &["uncommited", "changes"],
-        &["git", "diff"],
-        &["show", "diff"],
-        &["git", "status"],
-        &["check", "file"],
-        &["check", "files"],
-        &["check", "contents"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq));
-    let requires_validation = [
-        &["validate"][..],
-        &["verify"],
-        &["make", "sure"],
-        &["ensure"],
-        &["run", "tests"],
-        &["test", "it"],
-        &["cargo", "test"],
-        &["pytest"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq));
-    let requires_reproduction = [
-        &["reproduce"][..],
-        &["bug"],
-        &["fails"],
-        &["failure"],
-        &["error"],
-        &["issue"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq));
-    let requires_commit_ops = [
-        &["git"][..],
-        &["commit"],
-        &["push"],
-        &["pull", "request"],
-        &["stash"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq));
-    let requires_clarification = [&["do", "it"][..], &["implement", "it"], &["fix", "it"]]
-        .iter()
-        .any(|seq| contains_token_sequence(&tokens, seq))
-        && tokens.len() <= 2;
-
-    tracing::debug!(
-        "intent matched: action={} inspection={} validation={} reproduction={} git={} plan_only={} clarification={}",
-        requires_action,
-        requires_inspection,
-        requires_validation,
-        requires_reproduction,
-        requires_commit_ops,
-        requires_plan_only,
-        requires_clarification
-    );
-
-    TurnFlags {
-        requires_action,
-        requires_inspection,
-        requires_validation,
-        requires_reproduction,
-        requires_commit_ops,
-        requires_plan_only,
-        requires_clarification,
-    }
-}
-
-fn recompute_turn_flags(state: &AgentState) -> TurnFlags {
-    latest_user_text(state)
-        .map(|text| determine_turn_flags(&text))
-        .unwrap_or_default()
+    .any(|kw| t.contains(kw));
+    missing_info || permission || runtime
 }
 
 fn tokenize_words(text: &str) -> Vec<String> {
@@ -743,59 +529,78 @@ fn contains_token_sequence(tokens: &[String], phrase_tokens: &[&str]) -> bool {
     })
 }
 
-fn is_inspection_tool_call(tc: &ToolCall) -> bool {
-    matches!(tc.name.as_str(), "read" | "ls" | "find" | "grep")
-        || (tc.name == "bash"
-            && tc
-                .arguments
-                .get("command")
-                .and_then(|v| v.as_str())
-                .is_some_and(|cmd| {
-                    let c = cmd.to_lowercase();
-                    c.contains("git status")
-                        || c.contains("git diff")
-                        || c.contains("git show")
-                        || c.contains("cat ")
-                        || c.contains("ls ")
-                        || c.contains("rg ")
-                        || c.contains("sed ")
-                        || c.contains("head ")
-                        || c.contains("tail ")
-                        || c.contains("wc ")
-                }))
+fn is_read_only_tool_call(tc: &ToolCall) -> bool {
+    if matches!(tc.name.as_str(), "read" | "ls" | "find" | "grep") {
+        return true;
+    }
+    if tc.name != "bash" {
+        return false;
+    }
+    let Some(cmd) = tc.arguments.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    is_read_only_bash_command(cmd)
 }
 
-fn is_git_tool_call(tc: &ToolCall) -> bool {
-    tc.name == "bash"
-        && tc
-            .arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .is_some_and(|cmd| cmd.trim_start().starts_with("git "))
+fn is_read_only_bash_command(command: &str) -> bool {
+    for segment in split_shell_command_segments(command) {
+        let tokens = tokenize_shell_segment(segment);
+        if tokens.is_empty() {
+            continue;
+        }
+        if !is_read_only_tokenized_command(&tokens) {
+            return false;
+        }
+    }
+    true
 }
 
-fn is_validation_tool_call(tc: &ToolCall) -> bool {
-    tc.name == "bash"
-        && tc
-            .arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .is_some_and(|cmd| {
-                let c = cmd.to_lowercase();
-                c.contains("cargo test")
-                    || c.contains("cargo check")
-                    || c.contains("cargo clippy")
-                    || c.contains("cargo fmt")
-                    || c.contains("cargo nextest")
-                    || c.contains("npm test")
-                    || c.contains("npm run test")
-                    || c.contains("pnpm test")
-                    || c.contains("pnpm run test")
-                    || c.contains("yarn test")
-                    || c.contains("pytest")
-                    || c.contains("uv run pytest")
-                    || c.contains("go test")
-            })
+fn is_read_only_tokenized_command(tokens: &[String]) -> bool {
+    let first = tokens[0].as_str();
+    match first {
+        "cat" | "head" | "tail" | "wc" | "ls" | "rg" | "grep" | "find" => true,
+        "sed" => !tokens.iter().any(|t| t == "-i" || t.starts_with("-i")),
+        "git" => {
+            let sub = tokens.get(1).map(String::as_str).unwrap_or_default();
+            matches!(
+                sub,
+                "status" | "diff" | "show" | "log" | "rev-parse" | "branch" | "remote" | "ls-files"
+            )
+        }
+        _ => false,
+    }
+}
+
+fn split_shell_command_segments(command: &str) -> Vec<&str> {
+    command
+        .split(&[';', '|', '&'][..])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn tokenize_shell_segment(segment: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in segment.chars() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    tokens.push(cur.clone());
+                    cur.clear();
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 fn assistant_text_opt(message: &Message) -> Option<String> {
@@ -854,6 +659,9 @@ fn looks_like_execution_request(text: &str) -> bool {
         &["add", "code"],
         &["remove", "code"],
         &["refactor"],
+        &["commit"],
+        &["push"],
+        &["run", "git"],
         &["run", "it"],
         &["do", "it"],
     ]
@@ -865,15 +673,50 @@ fn looks_like_execution_promise(text: &str) -> bool {
     let t = text.to_lowercase();
     [
         "on it",
-        "i'll",
-        "i will",
-        "starting now",
-        "let me",
-        "i can implement",
-        "i can patch",
+        "i'll implement",
+        "i will implement",
+        "i'll patch",
+        "i will patch",
+        "starting code changes",
     ]
     .iter()
     .any(|kw| t.contains(kw))
+}
+
+fn infer_intent(text: &str) -> AgentIntent {
+    let t = text.to_lowercase();
+    if t.trim().is_empty() {
+        return AgentIntent::Default;
+    }
+    if (t.contains("plan only")
+        || t.contains("just plan")
+        || t.contains("brainstorm")
+        || t.contains("do not implement")
+        || t.contains("don't implement"))
+        && !looks_like_execution_request(&t)
+    {
+        return AgentIntent::PlanOnly;
+    }
+    if t.trim() == "do it" || t.trim() == "fix it" {
+        return AgentIntent::Clarify;
+    }
+    if t.contains("review")
+        || t.contains("analyze")
+        || t.contains("analyse")
+        || t.contains("architecture")
+    {
+        return AgentIntent::AnalyzeOnly;
+    }
+    if t.contains("commit") || t.contains("push") || t.contains("apply patch") {
+        return AgentIntent::Execute;
+    }
+    if t.contains("inspect") || t.contains("check") || t.contains("what changed") {
+        return AgentIntent::Inspect;
+    }
+    if looks_like_execution_request(&t) {
+        return AgentIntent::Execute;
+    }
+    AgentIntent::Default
 }
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.
@@ -889,6 +732,7 @@ async fn run_llm_stream(
     event_tx: &broadcast::Sender<AgentEvent>,
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
+    emit_events: bool,
 ) -> Result<(Message, Option<StopReason>, usize), AgentError> {
     let retry = &config.retry;
 
@@ -911,7 +755,9 @@ async fn run_llm_stream(
                 let delay_ms = retry
                     .base_delay_ms
                     .saturating_mul(2u64.pow(attempt.saturating_sub(1)));
-                let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                if emit_events {
+                    let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                }
                 tracing::warn!(
                     attempt = attempt,
                     delay_ms = delay_ms,
@@ -942,27 +788,27 @@ async fn run_llm_stream(
 
         // Emit corresponding agent events.
         match &event {
-            AssistantMessageEvent::TextDelta { text } => {
+            AssistantMessageEvent::TextDelta { text } if emit_events => {
                 let _ = event_tx.send(AgentEvent::TextDelta { text: text.clone() });
             }
-            AssistantMessageEvent::ThinkingDelta { thinking } => {
+            AssistantMessageEvent::ThinkingDelta { thinking } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ThinkingDelta {
                     thinking: thinking.clone(),
                 });
             }
-            AssistantMessageEvent::ToolCallStart { id, name } => {
+            AssistantMessageEvent::ToolCallStart { id, name } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallStart {
                     id: id.clone(),
                     name: name.clone(),
                 });
             }
-            AssistantMessageEvent::ToolCallDelta { id, arguments } => {
+            AssistantMessageEvent::ToolCallDelta { id, arguments } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallDelta {
                     id: id.clone(),
                     arguments: arguments.clone(),
                 });
             }
-            AssistantMessageEvent::ToolCallEnd { id } => {
+            AssistantMessageEvent::ToolCallEnd { id } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallEnd { id: id.clone() });
             }
             AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {}
@@ -1038,7 +884,7 @@ async fn build_context(
         &config.compaction,
     );
 
-    if compact_result.trimmed_count > 0 && config.compaction.summarize_with_llm {
+    if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm {
         let trimmed_len = (compact_result.trimmed_count as usize).min(all_slice.len());
         match summarize_compacted_messages(
             state,
@@ -1130,8 +976,18 @@ async fn summarize_compacted_messages(
         ..Default::default()
     };
 
-    let (message, _) =
-        run_silent_llm_stream(state, provider, &context, &options, config, event_tx).await?;
+    let (message, _, _) = run_llm_stream(
+        state,
+        provider,
+        &context,
+        &options,
+        config,
+        event_tx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        false,
+    )
+    .await?;
 
     Ok(Message::Assistant {
         content: vec![ContentBlock::text(format!(
@@ -1146,58 +1002,6 @@ async fn summarize_compacted_messages(
         error_message: None,
         timestamp: now_ms(),
     })
-}
-
-async fn run_silent_llm_stream(
-    state: &AgentState,
-    provider: &dyn LlmProvider,
-    context: &Context,
-    options: &StreamOptions,
-    config: &AgentLoopConfig,
-    event_tx: &broadcast::Sender<AgentEvent>,
-) -> Result<(Message, Option<StopReason>), AgentError> {
-    let retry = &config.retry;
-    let mut stream;
-    let mut attempt: u32 = 0;
-
-    loop {
-        match provider.stream(&state.model, context, options).await {
-            Ok(s) => {
-                stream = s;
-                break;
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if !retry.is_retryable(&msg) || attempt >= retry.max_retries {
-                    return Err(AgentError::Llm(e));
-                }
-                attempt += 1;
-                let delay_ms = retry
-                    .base_delay_ms
-                    .saturating_mul(2u64.pow(attempt.saturating_sub(1)));
-                let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-        }
-    }
-
-    let mut accumulator = EventAccumulator::new();
-    while let Some(event) = stream.next().await {
-        accumulator.feed(&event);
-    }
-
-    let assistant_msg = Message::Assistant {
-        content: accumulator.content_blocks(),
-        api: Some(state.model.api),
-        provider: Some(state.model.provider),
-        model: Some(state.model.id.clone()),
-        usage: accumulator.usage().cloned(),
-        stop_reason: accumulator.stop_reason(),
-        error_message: accumulator.error_message().map(|s| s.to_string()),
-        timestamp: now_ms(),
-    };
-
-    Ok((assistant_msg, accumulator.stop_reason()))
 }
 
 fn message_to_summary_text(message: &Message) -> String {
@@ -1260,28 +1064,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn turn_flags_do_not_treat_providers_as_pr() {
-        let flags = determine_turn_flags(
+    fn infer_intent_does_not_treat_provider_path_as_commit_ops() {
+        let intent = infer_intent(
             "Use grep tool on crates/theta-ai/src/providers/openai_compat.rs and report lines",
         );
-        assert!(
-            !flags.requires_commit_ops,
-            "providers path should not trigger git intent"
-        );
+        assert_ne!(intent, AgentIntent::Execute);
     }
 
     #[test]
-    fn turn_flags_detect_explicit_commit_ops() {
-        let flags = determine_turn_flags("Please commit changes and push after git status.");
-        assert!(flags.requires_commit_ops);
-    }
-
-    #[test]
-    fn turn_flags_check_file_contents_is_inspection_not_validation_or_git() {
-        let flags = determine_turn_flags("check file contents in Cargo.toml");
-        assert!(flags.requires_inspection);
-        assert!(!flags.requires_validation);
-        assert!(!flags.requires_commit_ops);
+    fn infer_intent_detects_analyze_only() {
+        let intent = infer_intent("Please review the architecture and analyze the current design.");
+        assert_eq!(intent, AgentIntent::AnalyzeOnly);
     }
 
     #[test]
@@ -1291,33 +1084,32 @@ mod tests {
     }
 
     #[test]
-    fn inspection_tool_call_detects_common_read_only_bash_commands() {
+    fn read_only_tool_call_detects_common_read_only_bash_commands() {
         let tc = ToolCall {
             id: "1".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"sed -n '1,20p' Cargo.toml && git show HEAD~1"}),
         };
-        assert!(is_inspection_tool_call(&tc));
+        assert!(is_read_only_tool_call(&tc));
     }
 
     #[test]
-    fn validation_tool_call_detects_common_variants() {
-        let cases = [
-            "cargo nextest run",
-            "npm run test",
-            "pnpm test",
-            "uv run pytest -q",
-        ];
-        for cmd in cases {
-            let tc = ToolCall {
-                id: "1".into(),
-                name: "bash".into(),
-                arguments: serde_json::json!({"command": cmd}),
-            };
-            assert!(
-                is_validation_tool_call(&tc),
-                "expected validation for {cmd}"
-            );
-        }
+    fn read_only_tool_call_rejects_mutating_git_commands() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"git commit -m test"}),
+        };
+        assert!(!is_read_only_tool_call(&tc));
+    }
+
+    #[test]
+    fn read_only_tool_call_rejects_sed_in_place() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"sed -i '' 's/a/b/g' file.txt"}),
+        };
+        assert!(!is_read_only_tool_call(&tc));
     }
 }

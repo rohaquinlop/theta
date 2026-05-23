@@ -54,22 +54,22 @@ pub enum Message {
         provider: Option<Provider>,
         model: Option<String>,
         usage: Option<Usage>,
-        #[serde(rename = "stopReason")]
+        #[serde(alias = "stopReason")]
         stop_reason: Option<StopReason>,
-        #[serde(rename = "errorMessage")]
+        #[serde(alias = "errorMessage")]
         error_message: Option<String>,
         timestamp: u64,
     },
     /// A tool execution result.
-    #[serde(rename = "toolResult")]
+    #[serde(rename = "tool_result", alias = "toolResult")]
     ToolResult {
-        #[serde(rename = "toolCallId")]
+        #[serde(alias = "toolCallId")]
         tool_call_id: String,
-        #[serde(rename = "toolName")]
+        #[serde(alias = "toolName")]
         tool_name: String,
         content: Vec<ContentBlock>,
         details: Option<serde_json::Value>,
-        #[serde(rename = "isError")]
+        #[serde(alias = "isError")]
         is_error: bool,
         timestamp: u64,
     },
@@ -77,7 +77,7 @@ pub enum Message {
     #[serde(rename = "model_change")]
     ModelChange {
         provider: Option<Provider>,
-        #[serde(rename = "modelId")]
+        #[serde(alias = "modelId")]
         model_id: Option<String>,
         timestamp: u64,
     },
@@ -168,16 +168,16 @@ pub enum Modality {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Usage {
     /// Input tokens consumed.
-    #[serde(rename = "inputTokens")]
+    #[serde(alias = "inputTokens")]
     pub input_tokens: u32,
     /// Output tokens generated.
-    #[serde(rename = "outputTokens")]
+    #[serde(alias = "outputTokens")]
     pub output_tokens: u32,
     /// Cache creation write tokens.
-    #[serde(rename = "cacheWriteTokens", default)]
+    #[serde(alias = "cacheWriteTokens", default)]
     pub cache_write_tokens: u32,
     /// Cache read tokens (prompt caching hit).
-    #[serde(rename = "cacheReadTokens", default)]
+    #[serde(alias = "cacheReadTokens", default)]
     pub cache_read_tokens: u32,
     /// Total cost in USD (calculated by provider).
     pub cost: Option<f64>,
@@ -191,10 +191,10 @@ pub struct ModelCost {
     /// Cost per 1M output tokens.
     pub output: f64,
     /// Cost per 1M cache-read tokens.
-    #[serde(rename = "cacheRead")]
+    #[serde(alias = "cacheRead")]
     pub cache_read: f64,
     /// Cost per 1M cache-write tokens.
-    #[serde(rename = "cacheWrite")]
+    #[serde(alias = "cacheWrite")]
     pub cache_write: f64,
 }
 
@@ -376,5 +376,37 @@ mod tests {
         ));
         let tc = ContentBlock::tool_call("id1", "read", serde_json::json!({"path": "foo"}));
         assert!(matches!(tc, ContentBlock::ToolCall { .. }));
+    }
+
+    #[test]
+    fn test_message_tool_result_serializes_to_theta_native_tag() {
+        let msg = Message::ToolResult {
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            content: vec![ContentBlock::text("ok")],
+            details: None,
+            is_error: false,
+            timestamp: 1,
+        };
+        let v = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(v.get("type").and_then(|x| x.as_str()), Some("tool_result"));
+        assert!(v.get("tool_call_id").is_some());
+        assert!(v.get("tool_name").is_some());
+        assert!(v.get("is_error").is_some());
+    }
+
+    #[test]
+    fn test_message_tool_result_deserializes_legacy_pi_keys() {
+        let v = serde_json::json!({
+            "type": "toolResult",
+            "toolCallId": "c1",
+            "toolName": "read",
+            "content": [{"type":"text","text":"ok"}],
+            "details": null,
+            "isError": false,
+            "timestamp": 1
+        });
+        let msg: Message = serde_json::from_value(v).expect("deserialize");
+        assert!(matches!(msg, Message::ToolResult { .. }));
     }
 }

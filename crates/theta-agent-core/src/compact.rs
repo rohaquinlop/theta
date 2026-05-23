@@ -6,7 +6,7 @@
 
 use theta_ai::Message;
 
-use crate::types::CompactionConfig;
+use crate::types::{CompactionConfig, CompactionStrategy};
 
 /// Result of a compaction pass.
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ pub fn compact_messages(
     kept.reverse();
     let mut kept_owned: Vec<Message> = kept.into_iter().cloned().collect();
     let trimmed_count = messages.len().saturating_sub(kept_owned.len()) as u32;
-    if trimmed_count > 0 {
+    if trimmed_count > 0 && config.strategy == CompactionStrategy::Textual {
         let trimmed_len = messages.len().saturating_sub(kept_owned.len());
         if let Some(summary) = compacted_summary(&messages[..trimmed_len], trimmed_count) {
             kept_owned.insert(0, summary);
@@ -232,7 +232,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );
@@ -258,7 +258,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );
@@ -287,7 +287,7 @@ mod tests {
             &CompactionConfig {
                 enabled: false,
                 reserve_tokens: 0,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );
@@ -306,7 +306,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 95,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );
@@ -329,7 +329,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );
@@ -351,7 +351,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
-                summarize_with_llm: false,
+                strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
         );

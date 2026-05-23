@@ -79,9 +79,12 @@ pub struct CompactionSettings {
     /// Tokens to reserve for the model's response.
     #[serde(default = "default_reserve_tokens")]
     pub reserve_tokens: u32,
-    /// Use an LLM call to summarize compacted context.
-    #[serde(default = "default_true")]
-    pub summarize_with_llm: bool,
+    /// Strategy to preserve trimmed context.
+    #[serde(default)]
+    pub strategy: CompactionStrategySetting,
+    /// Backward-compatible toggle; if present it overrides strategy.
+    #[serde(default)]
+    pub summarize_with_llm: Option<bool>,
     /// Maximum output tokens for compaction summaries.
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
@@ -92,10 +95,20 @@ impl Default for CompactionSettings {
         Self {
             enabled: true,
             reserve_tokens: 4096,
-            summarize_with_llm: true,
+            strategy: CompactionStrategySetting::Llm,
+            summarize_with_llm: None,
             summary_max_tokens: 512,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStrategySetting {
+    None,
+    Textual,
+    #[default]
+    Llm,
 }
 
 /// Retry settings loaded from config.toml.
@@ -441,12 +454,21 @@ impl AuthConfig {
 
 /// Build an AgentLoopConfig from the Theta toml config.
 pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
+    let strategy = match tc.compaction.summarize_with_llm {
+        Some(true) => theta_agent_core::CompactionStrategy::Llm,
+        Some(false) => theta_agent_core::CompactionStrategy::Textual,
+        None => match tc.compaction.strategy {
+            CompactionStrategySetting::None => theta_agent_core::CompactionStrategy::None,
+            CompactionStrategySetting::Textual => theta_agent_core::CompactionStrategy::Textual,
+            CompactionStrategySetting::Llm => theta_agent_core::CompactionStrategy::Llm,
+        },
+    };
     theta_agent_core::AgentLoopConfig {
         max_same_tool_call_repeats: Some(tc.agent.max_same_tool_call_repeats),
         compaction: theta_agent_core::CompactionConfig {
             enabled: tc.compaction.enabled,
             reserve_tokens: tc.compaction.reserve_tokens,
-            summarize_with_llm: tc.compaction.summarize_with_llm,
+            strategy,
             summary_max_tokens: tc.compaction.summary_max_tokens,
         },
         retry: theta_agent_core::RetryConfig {

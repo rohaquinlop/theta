@@ -19,6 +19,6 @@ pub use events::AgentEvent;
 pub use hooks::{Hooks, NoopHooks};
 pub use state::AgentState;
 pub use types::{
-    AgentLoopConfig, AgentTool, CompactionConfig, RetryConfig, ToolCall, ToolExecutionMode,
-    ToolResult, ToolUpdate, ToolUpdateSender, ToolUpdateStatus,
+    AgentIntent, AgentLoopConfig, AgentTool, CompactionConfig, CompactionStrategy, RetryConfig,
+    ToolCall, ToolExecutionMode, ToolResult, ToolUpdate, ToolUpdateSender, ToolUpdateStatus,
 };

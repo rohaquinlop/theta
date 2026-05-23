@@ -82,4 +82,19 @@ pub enum AgentEvent {
         synthesized_tool_results: u32,
         normalized_tool_call_ids: u32,
     },
+    /// Structured turn decision emitted by the runtime loop.
+    TurnDecision {
+        reason: TurnDecisionReason,
+        details: String,
+        turn: u32,
+        round: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDecisionReason {
+    NoopRetry,
+    BlockedNoop,
+    MaxRounds,
+    AnalyzeOnlyRejectedTool,
 }

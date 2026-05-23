@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use theta_agent_core::AgentIntent;
 use theta_ai::ContentBlock;
 
 use crate::scripts;
@@ -16,6 +17,7 @@ pub async fn build_system_prompt(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
+    latest_user_input: Option<&str>,
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -41,7 +43,8 @@ pub async fn build_system_prompt(
     }
 
     parts.push(build_runtime_context(working_dir, model_id, thinking_level));
-    parts.push(build_guidelines());
+    let intent = infer_prompt_intent(latest_user_input.unwrap_or_default());
+    parts.push(build_guidelines(intent));
 
     vec![ContentBlock::Text {
         text: parts.join(
@@ -214,8 +217,8 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-fn build_guidelines() -> String {
-    [
+fn build_guidelines(intent: AgentIntent) -> String {
+    let mut lines = vec![
         "# Guidelines",
         "",
         "- Keep answers short and concise.",
@@ -223,8 +226,6 @@ fn build_guidelines() -> String {
         "- Invoke tools using function-calling, not prose, plans, or XML-like text.",
         "- Read files before editing them.",
         "- Use edit (exact text replacement) not write for partial changes.",
-        "- If the user asks you to implement/change code, do the work in this turn: run tools, apply edits, and validate.",
-        "- Do not stop at a plan/status update unless the user explicitly asked for a plan only.",
         "- If blocked by missing info/permission, ask one precise question and stop.",
         "- Report what you changed and validation results after completing tool calls.",
         "",
@@ -284,14 +285,51 @@ fn build_guidelines() -> String {
         "",
         "Extensions can modify tool-call behavior and add TUI status lines.",
         "TUI component changes, custom tools, and UI components require Rust forking and recompilation.",
-    ]
-    .join("\n")
+    ];
+    match intent {
+        AgentIntent::AnalyzeOnly | AgentIntent::Inspect | AgentIntent::PlanOnly => {
+            lines.insert(
+                6,
+                "- This is a review/analysis turn. Do not mutate files unless the user explicitly asks for implementation in this turn.",
+            );
+        }
+        _ => {
+            lines.insert(
+                6,
+                "- If the user asks you to implement/change code, do the work in this turn: run tools, apply edits, and validate.",
+            );
+            lines.insert(
+                7,
+                "- Do not stop at a plan/status update unless the user explicitly asked for a plan only.",
+            );
+        }
+    }
+    lines.join("\n")
+}
+
+fn infer_prompt_intent(text: &str) -> AgentIntent {
+    let t = text.to_lowercase();
+    if t.contains("review")
+        || t.contains("analyze")
+        || t.contains("analyse")
+        || t.contains("architecture")
+    {
+        return AgentIntent::AnalyzeOnly;
+    }
+    if t.contains("plan only") || t.contains("just plan") || t.contains("brainstorm") {
+        return AgentIntent::PlanOnly;
+    }
+    if t.contains("inspect") || t.contains("what changed") {
+        return AgentIntent::Inspect;
+    }
+    AgentIntent::Default
 }
 
 #[cfg(test)]
 mod tests {
     use super::{build_guidelines, build_tools_prompt};
     use std::path::Path;
+    use theta_agent_core::AgentIntent;
 
     #[test]
     fn tools_prompt_uses_function_calling_not_xml() {
@@ -302,7 +340,7 @@ mod tests {
 
     #[test]
     fn guidelines_enforce_execute_not_plan_only() {
-        let s = build_guidelines();
+        let s = build_guidelines(AgentIntent::Execute);
         assert!(s.contains("Invoke tools using function-calling"));
         assert!(s.contains("do the work in this turn"));
         assert!(s.contains("Do not stop at a plan/status update"));

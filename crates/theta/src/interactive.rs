@@ -449,7 +449,7 @@ async fn create_agent(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking)).await;
+    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking), None).await;
     agent.set_system_prompt(system_blocks).await;
 
     // Load script hooks from ~/.theta/extensions/*.rhai and ./.theta/extensions/*.rhai.
@@ -838,7 +838,7 @@ async fn handle_tui_action(
 
                 agent.set_api_key(m.provider, key);
                 agent.set_model(m).await;
-                let blocks = build_system_prompt(working_dir, &model_id, None).await;
+                let blocks = build_system_prompt(working_dir, &model_id, None, None).await;
                 agent.set_system_prompt(blocks).await;
                 let _ = event_tx.send(TuiEvent::Info(format!(
                     "Switched to {model_id} ({provider})"
@@ -993,7 +993,7 @@ async fn handle_tui_action(
                         .last_model_id()
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| model_id.to_string());
-                    let blocks = build_system_prompt(working_dir, &mid, None).await;
+                    let blocks = build_system_prompt(working_dir, &mid, None, None).await;
                     agent.set_system_prompt(blocks).await;
                     *session_id_cell.write().await = Some(id.clone());
                     let _ = event_tx.send(TuiEvent::SessionCreated {
@@ -1041,7 +1041,7 @@ async fn handle_tui_action(
 
             // Clear in-memory transcript — no session file until first message.
             agent.load_messages(Vec::new()).await;
-            let blocks = build_system_prompt(working_dir, model_id, None).await;
+            let blocks = build_system_prompt(working_dir, model_id, None, None).await;
             agent.set_system_prompt(blocks).await;
 
             // Clear the chat display.
