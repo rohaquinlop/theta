@@ -215,16 +215,6 @@ pub async fn run_tui(
             // Reload agent in case it was replaced (model switch, etc.).
             let agent = msg_agent_cell.read().await.clone().unwrap_or(agent.clone());
 
-            let expanded_message = expand_skill_message(&message, &msg_skills);
-
-            let blocks =
-                crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
-            if let Err(e) = agent.prompt(blocks).await {
-                tracing::error!("agent prompt failed: {e}");
-                let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));
-                continue;
-            }
-
             // Lazy session creation on first real message — no session
             // file is left behind for login-only or no-message runs.
             if msg_session_id_cell.read().await.is_none() {
@@ -248,13 +238,32 @@ pub async fn run_tui(
                     }
                 }
             }
-
-            // Persist any state messages not yet in session storage.
-            let Some(ref sid) = *msg_session_id_cell.read().await else {
+            let Some(sid) = msg_session_id_cell.read().await.clone() else {
                 continue;
             };
+            let run_id = format!("run-{}", rand::random::<u64>());
+            let turn_id = format!("turn-{}", rand::random::<u64>());
+            if let Err(e) = session_mgr
+                .mark_run_in_progress(&sid, &run_id, &turn_id)
+                .await
+            {
+                tracing::warn!("failed to mark session run in progress: {e}");
+            }
+
+            let expanded_message = expand_skill_message(&message, &msg_skills);
+
+            let blocks =
+                crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
+            if let Err(e) = agent.prompt(blocks).await {
+                tracing::error!("agent prompt failed: {e}");
+                let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));
+                let _ = session_mgr
+                    .mark_run_completed(&sid, Some("ProviderFailure"))
+                    .await;
+                continue;
+            }
             let state = agent.state().await;
-            match session_mgr.open_by_id(sid).await {
+            match session_mgr.open_by_id(&sid).await {
                 Ok(mut session) => {
                     if let Err(e) = session_mgr
                         .append_missing_entries(&mut session, &state.messages)
@@ -263,6 +272,16 @@ pub async fn run_tui(
                         tracing::error!("failed to persist session entries: {e}");
                         let _ = msg_event_tx
                             .send(TuiEvent::Error(format!("Failed to persist session: {e}")));
+                    } else {
+                        let _ = session_mgr
+                            .mark_run_completed(
+                                &sid,
+                                state
+                                    .last_turn_end_reason
+                                    .map(|r| format!("{r:?}"))
+                                    .as_deref(),
+                            )
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -472,6 +491,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
         let mut pending_tool_progress: HashMap<String, String> = HashMap::new();
         let mut saw_assistant_text_delta = false;
         let mut saw_thinking_delta = false;
+        let mut latest_turn_end_reason = "completed".to_string();
         let interval_ms = (1000 / hz.max(1)).max(1);
         let mut progress_tick = time::interval(std::time::Duration::from_millis(interval_ms));
         progress_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -596,8 +616,43 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     }
                     Ok(AgentEvent::TurnEnd { .. }) => {
                         let _ = event_tx.send(TuiEvent::TurnEnd {
-                            stop_reason: "stop".into(),
+                            stop_reason: latest_turn_end_reason.clone(),
                         });
+                    }
+                    Ok(AgentEvent::TurnDecision { reason, details, .. }) => {
+                        let _ = event_tx.send(TuiEvent::TurnDecision {
+                            reason: format!("{reason:?}"),
+                            details,
+                        });
+                    }
+                    Ok(AgentEvent::TurnTerminated {
+                        reason, details, ..
+                    }) => {
+                        latest_turn_end_reason = format!("{reason:?}");
+                        if !matches!(reason, theta_agent_core::types::TurnEndReason::Completed) {
+                            let detail = details.trim();
+                            let message = if detail.is_empty() {
+                                format!("Turn ended: {reason:?}")
+                            } else {
+                                format!("Turn ended: {reason:?}\n{detail}")
+                            };
+                            let _ = event_tx.send(TuiEvent::Info(message));
+                        }
+                    }
+                    Ok(AgentEvent::SafetyDecision {
+                        decision,
+                        tool_name,
+                        details,
+                        ..
+                    }) => {
+                        if matches!(
+                            decision,
+                            theta_agent_core::types::SafetyDecisionKind::Rejected
+                        ) {
+                            let _ = event_tx.send(TuiEvent::Info(format!(
+                                "Safety policy rejected {tool_name}: {details}"
+                            )));
+                        }
                     }
                     Ok(AgentEvent::AgentEnd { .. }) => {
                         let _ = event_tx.send(TuiEvent::AgentEnd);
@@ -612,9 +667,10 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         dropped_assistant_messages,
                         synthesized_tool_results,
                         normalized_tool_call_ids,
+                        deduped_tool_results,
                     }) => {
                         let _ = event_tx.send(TuiEvent::Info(format!(
-                            "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}"
+                            "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}, deduped_tool_results={deduped_tool_results}"
                         )));
                     }
                     Ok(AgentEvent::Error { message }) => {
@@ -1103,6 +1159,54 @@ async fn handle_tui_action(
                     let _ = event_tx.send(TuiEvent::Error(format!("Compaction failed: {e}")));
                 }
             }
+        }
+        TuiAction::ShowRunTimeline => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+            let Some(report) = agent.last_run_report().await else {
+                let _ = event_tx.send(TuiEvent::Info(
+                    "No completed run report is available yet.".into(),
+                ));
+                return;
+            };
+            let mut lines = vec![
+                format!("Run timeline: {}", report.run_id),
+                format!("Started: {}", report.started_at_ms),
+                format!(
+                    "Finished: {}",
+                    report
+                        .finished_at_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                ),
+                format!(
+                    "Outcome: {}",
+                    report
+                        .outcome
+                        .map(|r| format!("{r:?}"))
+                        .unwrap_or_else(|| "n/a".to_string())
+                ),
+                "Events:".to_string(),
+            ];
+            for ev in report.events.iter().take(50) {
+                let mut fields = ev
+                    .fields
+                    .iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "run_id" | "model" | "provider"))
+                    .take(3)
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>();
+                fields.sort();
+                let suffix = if fields.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", fields.join(", "))
+                };
+                lines.push(format!("  - {} {}{}", ev.ts_ms, ev.kind, suffix));
+            }
+            let _ = event_tx.send(TuiEvent::Info(lines.join("\n")));
         }
         TuiAction::FollowUp(text) => {
             let Some(agent) = agent_cell.read().await.clone() else {

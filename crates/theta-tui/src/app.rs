@@ -69,6 +69,8 @@ pub enum TuiAction {
     StartCodexOAuth,
     /// Request live session info (token counts, context window, etc.).
     ShowSessionInfo,
+    /// Show latest compact run timeline report.
+    ShowRunTimeline,
     /// Manually compact context now (even if under the auto-compaction threshold).
     CompactContext,
 }
@@ -95,6 +97,10 @@ pub enum TuiEvent {
     TurnStart,
     TurnEnd {
         stop_reason: String,
+    },
+    TurnDecision {
+        reason: String,
+        details: String,
     },
     AgentEnd,
     ContextCompacted {
@@ -776,6 +782,8 @@ impl App {
                     "  /thinking <lvl> Set thinking level (off, low, medium, high)",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
+                    "  /status         Show live runtime status snapshot",
+                    "  /timeline       Show compact timeline from latest run report",
                     "  /compact        Manually compact context to fit in context window",
                     "  /fork           Fork the current session",
                     "  /new            Start a new unsaved session",
@@ -839,6 +847,41 @@ impl App {
             }
             "session" | "s" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessionInfo);
+            }
+            "status" => {
+                let detail = if self.status.detail.trim().is_empty() {
+                    "(none)".to_string()
+                } else {
+                    self.status.detail.clone()
+                };
+                let current_tool = self.current_tool.as_deref().unwrap_or("(none)");
+                let snapshot = format!(
+                    "Runtime status:\nState: {}\nDetail: {}\nTurn: {}\nStreaming: {}\nCurrent tool: {}\nTools in turn: {}\nRetries in turn: {}\nSteer queue: {}\nFollow-up queue: {}\nLast turn decision: {}\nLast end reason: {}",
+                    self.status.agent_state,
+                    detail,
+                    self.turn_index,
+                    self.streaming,
+                    current_tool,
+                    self.tools_in_turn,
+                    self.retries_in_turn,
+                    self.steer_queue_count,
+                    self.follow_up_queue_count,
+                    if self.status.last_turn_decision.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        self.status.last_turn_decision.clone()
+                    },
+                    self.status.last_end_reason,
+                );
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: snapshot,
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
+            "timeline" => {
+                let _ = self.action_tx.send(TuiAction::ShowRunTimeline);
             }
             "compact" | "comp" => {
                 self.chat.add_message(ChatMessage {
@@ -1080,7 +1123,7 @@ impl App {
                     self.chat.update_last(&text, ChatRole::Assistant, true);
                 }
                 if self.current_tool.is_none() {
-                    self.status.set_agent_state("streaming (responding)");
+                    self.status.set_agent_state("ModelCall");
                 }
                 self.status.set_detail("assistant responding");
             }
@@ -1098,7 +1141,7 @@ impl App {
             }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
-                self.status.set_agent_state(&format!("tool: {name}"));
+                self.status.set_agent_state("ToolExec");
                 self.status.set_detail(&format!("{name} running..."));
                 self.tools_in_turn += 1;
                 self.chat.add_message(ChatMessage {
@@ -1180,7 +1223,7 @@ impl App {
                 self.retries_in_turn = 0;
                 self.turn_intent = "chat".to_string();
                 self.status.set_turn_index(self.turn_index);
-                self.status.set_agent_state("streaming (starting)");
+                self.status.set_agent_state("ModelCall");
                 self.status.set_detail("");
             }
             TuiEvent::TurnEnd { stop_reason } => {
@@ -1207,17 +1250,28 @@ impl App {
                         is_streaming: false,
                     });
                 }
+                self.status.last_end_reason = stop_reason.clone();
+                let normalized = stop_reason.to_lowercase();
+                if normalized.contains("blocked") || normalized.contains("rejected") {
+                    self.status.set_agent_state("Blocked");
+                } else if normalized.contains("error") || normalized.contains("failure") {
+                    self.status.set_agent_state("Failed");
+                } else {
+                    self.status.set_agent_state("Completed");
+                }
+                let detail = if stop_reason == "error" {
+                    "failed".to_string()
+                } else if stop_reason.eq_ignore_ascii_case("completed") {
+                    "complete".to_string()
+                } else {
+                    stop_reason
+                };
                 self.status
-                    .set_agent_state(&format!("idle (stopped: {stop_reason})"));
-                self.status.set_detail(&format!(
-                    "turn #{}: {}",
-                    self.turn_index,
-                    if stop_reason == "error" {
-                        "failed"
-                    } else {
-                        "complete"
-                    }
-                ));
+                    .set_detail(&format!("turn #{}: {detail}", self.turn_index));
+            }
+            TuiEvent::TurnDecision { reason, details } => {
+                self.status.last_turn_decision = reason;
+                self.status.set_detail(&truncate_status_text(&details, 100));
             }
             TuiEvent::ContextCompacted {
                 trimmed_count,
@@ -1237,8 +1291,9 @@ impl App {
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
                 self.retries_in_turn = self.retries_in_turn.max(attempt);
+                self.status.set_agent_state("Retrying");
                 self.status
-                    .set_agent_state(&format!("retrying (attempt {attempt}) in {delay_ms}ms..."));
+                    .set_detail(&format!("attempt {attempt} in {delay_ms}ms"));
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!(
@@ -1271,8 +1326,13 @@ impl App {
                 self.chat.invalidate_render_cache();
                 self.streaming = false;
                 self.current_tool = None;
-                self.status.set_agent_state("idle");
-                self.status.set_detail("");
+                if self.status.agent_state != "Completed"
+                    && self.status.agent_state != "Blocked"
+                    && self.status.agent_state != "Failed"
+                {
+                    self.status.set_agent_state("Completed");
+                    self.status.set_detail("");
+                }
             }
             TuiEvent::ClearChat => {
                 self.chat.clear_messages();

@@ -48,6 +48,12 @@ pub struct ThetaConfig {
     /// Agent loop controls.
     #[serde(default)]
     pub agent: AgentSettings,
+    /// Named runtime hardening profile.
+    #[serde(default)]
+    pub profile: RuntimeProfileSetting,
+    /// Explicit per-project/runtime overrides applied on top of profile defaults.
+    #[serde(default)]
+    pub profile_overrides: ProfileOverrides,
 
     /// Skills to auto-invoke at session start (e.g. ["caveman ultra"]).
     #[serde(default)]
@@ -142,14 +148,67 @@ pub struct AgentSettings {
     /// Maximum same-signature tool-call repeats in one turn before aborting.
     #[serde(default = "default_max_same_tool_call_repeats")]
     pub max_same_tool_call_repeats: u32,
+    /// Warn if tool stalls this long.
+    #[serde(default = "default_tool_stall_warning_ms")]
+    pub tool_stall_warning_ms: u64,
+    /// Hard timeout for one tool call.
+    #[serde(default = "default_tool_timeout_ms")]
+    pub tool_timeout_ms: u64,
+    /// Optional fallback model IDs in preference order.
+    #[serde(default)]
+    pub provider_fallback_chain: Vec<String>,
+    /// Circuit breaker failure threshold.
+    #[serde(default = "default_provider_failure_threshold")]
+    pub provider_failure_threshold: u32,
+    /// Circuit breaker open cooldown.
+    #[serde(default = "default_provider_open_cooldown_ms")]
+    pub provider_open_cooldown_ms: u64,
 }
 
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
             max_same_tool_call_repeats: default_max_same_tool_call_repeats(),
+            tool_stall_warning_ms: default_tool_stall_warning_ms(),
+            tool_timeout_ms: default_tool_timeout_ms(),
+            provider_fallback_chain: Vec::new(),
+            provider_failure_threshold: default_provider_failure_threshold(),
+            provider_open_cooldown_ms: default_provider_open_cooldown_ms(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProfileSetting {
+    Dev,
+    #[default]
+    Safe,
+    Prod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileOverrides {
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    #[serde(default)]
+    pub base_delay_ms: Option<u64>,
+    #[serde(default)]
+    pub provider_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub tool_stall_warning_ms: Option<u64>,
+    #[serde(default)]
+    pub tool_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub provider_fallback_chain: Option<Vec<String>>,
+    #[serde(default)]
+    pub provider_failure_threshold: Option<u32>,
+    #[serde(default)]
+    pub provider_open_cooldown_ms: Option<u64>,
+    #[serde(default)]
+    pub max_same_tool_call_repeats: Option<u32>,
+    #[serde(default)]
+    pub command_policy_strict: Option<bool>,
 }
 
 impl Default for RetrySettings {
@@ -181,6 +240,18 @@ fn default_timeout_ms() -> u64 {
 }
 fn default_max_same_tool_call_repeats() -> u32 {
     6
+}
+fn default_tool_stall_warning_ms() -> u64 {
+    8_000
+}
+fn default_tool_timeout_ms() -> u64 {
+    60_000
+}
+fn default_provider_failure_threshold() -> u32 {
+    3
+}
+fn default_provider_open_cooldown_ms() -> u64 {
+    30_000
 }
 
 /// Provider auth tokens loaded from ~/.theta/auth.json or env vars.
@@ -463,8 +534,126 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             CompactionStrategySetting::Llm => theta_agent_core::CompactionStrategy::Llm,
         },
     };
+    let runtime_profile = match tc.profile {
+        RuntimeProfileSetting::Dev => theta_agent_core::RuntimeProfile::Dev,
+        RuntimeProfileSetting::Safe => theta_agent_core::RuntimeProfile::Safe,
+        RuntimeProfileSetting::Prod => theta_agent_core::RuntimeProfile::Prod,
+    };
+
+    #[derive(Clone)]
+    struct ProfileBase {
+        max_retries: u32,
+        base_delay_ms: u64,
+        provider_timeout_ms: u64,
+        tool_stall_warning_ms: u64,
+        tool_timeout_ms: u64,
+        provider_fallback_chain: Vec<String>,
+        provider_failure_threshold: u32,
+        provider_open_cooldown_ms: u64,
+        max_same_tool_call_repeats: u32,
+        command_policy_strict: bool,
+    }
+
+    let mut base = match tc.profile {
+        RuntimeProfileSetting::Dev => ProfileBase {
+            max_retries: 1,
+            base_delay_ms: 250,
+            provider_timeout_ms: 90_000,
+            tool_stall_warning_ms: 15_000,
+            tool_timeout_ms: 180_000,
+            provider_fallback_chain: vec![],
+            provider_failure_threshold: 6,
+            provider_open_cooldown_ms: 5_000,
+            max_same_tool_call_repeats: 10,
+            command_policy_strict: false,
+        },
+        RuntimeProfileSetting::Safe => ProfileBase {
+            max_retries: 2,
+            base_delay_ms: 1_000,
+            provider_timeout_ms: 120_000,
+            tool_stall_warning_ms: 8_000,
+            tool_timeout_ms: 60_000,
+            provider_fallback_chain: vec![],
+            provider_failure_threshold: 3,
+            provider_open_cooldown_ms: 30_000,
+            max_same_tool_call_repeats: 6,
+            command_policy_strict: true,
+        },
+        RuntimeProfileSetting::Prod => ProfileBase {
+            max_retries: 4,
+            base_delay_ms: 1_500,
+            provider_timeout_ms: 120_000,
+            tool_stall_warning_ms: 5_000,
+            tool_timeout_ms: 45_000,
+            provider_fallback_chain: vec![],
+            provider_failure_threshold: 2,
+            provider_open_cooldown_ms: 60_000,
+            max_same_tool_call_repeats: 6,
+            command_policy_strict: true,
+        },
+    };
+
+    // Backward-compatibility: existing top-level settings remain active for safe profile.
+    if matches!(tc.profile, RuntimeProfileSetting::Safe) {
+        base.max_retries = tc.retry.max_retries;
+        base.base_delay_ms = tc.retry.base_delay_ms;
+        base.provider_timeout_ms = tc.provider.timeout_ms;
+        base.tool_stall_warning_ms = tc.agent.tool_stall_warning_ms;
+        base.tool_timeout_ms = tc.agent.tool_timeout_ms;
+        base.provider_fallback_chain = tc.agent.provider_fallback_chain.clone();
+        base.provider_failure_threshold = tc.agent.provider_failure_threshold;
+        base.provider_open_cooldown_ms = tc.agent.provider_open_cooldown_ms;
+        base.max_same_tool_call_repeats = tc.agent.max_same_tool_call_repeats;
+    }
+
+    if let Some(v) = tc.profile_overrides.max_retries {
+        base.max_retries = v;
+    }
+    if let Some(v) = tc.profile_overrides.base_delay_ms {
+        base.base_delay_ms = v;
+    }
+    if let Some(v) = tc.profile_overrides.provider_timeout_ms {
+        base.provider_timeout_ms = v;
+    }
+    if let Some(v) = tc.profile_overrides.tool_stall_warning_ms {
+        base.tool_stall_warning_ms = v;
+    }
+    if let Some(v) = tc.profile_overrides.tool_timeout_ms {
+        base.tool_timeout_ms = v;
+    }
+    if let Some(v) = &tc.profile_overrides.provider_fallback_chain {
+        base.provider_fallback_chain = v.clone();
+    }
+    if let Some(v) = tc.profile_overrides.provider_failure_threshold {
+        base.provider_failure_threshold = v;
+    }
+    if let Some(v) = tc.profile_overrides.provider_open_cooldown_ms {
+        base.provider_open_cooldown_ms = v;
+    }
+    if let Some(v) = tc.profile_overrides.max_same_tool_call_repeats {
+        base.max_same_tool_call_repeats = v;
+    }
+    if let Some(v) = tc.profile_overrides.command_policy_strict {
+        base.command_policy_strict = v;
+    }
+
+    // Validation
+    if base.tool_timeout_ms < 1_000 {
+        tracing::warn!("tool_timeout_ms too low; clamping to 1000ms");
+        base.tool_timeout_ms = 1_000;
+    }
+    if base.provider_timeout_ms < 5_000 {
+        tracing::warn!("provider_timeout_ms too low; clamping to 5000ms");
+        base.provider_timeout_ms = 5_000;
+    }
+    if base.provider_failure_threshold == 0 {
+        tracing::warn!("provider_failure_threshold=0 is invalid; clamping to 1");
+        base.provider_failure_threshold = 1;
+    }
+
     theta_agent_core::AgentLoopConfig {
-        max_same_tool_call_repeats: Some(tc.agent.max_same_tool_call_repeats),
+        runtime_profile,
+        max_same_tool_call_repeats: Some(base.max_same_tool_call_repeats),
         compaction: theta_agent_core::CompactionConfig {
             enabled: tc.compaction.enabled,
             reserve_tokens: tc.compaction.reserve_tokens,
@@ -472,10 +661,20 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             summary_max_tokens: tc.compaction.summary_max_tokens,
         },
         retry: theta_agent_core::RetryConfig {
-            max_retries: tc.retry.max_retries,
-            base_delay_ms: tc.retry.base_delay_ms,
+            max_retries: base.max_retries,
+            base_delay_ms: base.base_delay_ms,
         },
-        provider_timeout_ms: Some(tc.provider.timeout_ms),
+        provider_timeout_ms: Some(base.provider_timeout_ms),
+        tool_watchdog: theta_agent_core::ToolWatchdogConfig {
+            stall_warning_ms: base.tool_stall_warning_ms,
+            hard_timeout_ms: base.tool_timeout_ms,
+        },
+        provider_fallback_chain: base.provider_fallback_chain,
+        provider_circuit_breaker: theta_agent_core::CircuitBreakerConfig {
+            failure_threshold: base.provider_failure_threshold,
+            open_cooldown_ms: base.provider_open_cooldown_ms,
+        },
+        command_policy_strict: base.command_policy_strict,
         ..Default::default()
     }
 }
@@ -699,5 +898,48 @@ mod tests {
             .expect("replacement auth should load");
         assert_eq!(saved.get_token("openai-codex"), Some("manual-token".into()));
         assert!(saved.oauth_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_profile_dev_defaults_are_applied() {
+        let cfg = ThetaConfig {
+            profile: RuntimeProfileSetting::Dev,
+            ..Default::default()
+        };
+        let ac = to_agent_config(&cfg);
+        assert_eq!(ac.retry.max_retries, 1);
+        assert_eq!(ac.retry.base_delay_ms, 250);
+        assert!(!ac.command_policy_strict);
+        assert_eq!(ac.tool_watchdog.hard_timeout_ms, 180_000);
+    }
+
+    #[test]
+    fn test_profile_prod_defaults_are_applied() {
+        let cfg = ThetaConfig {
+            profile: RuntimeProfileSetting::Prod,
+            ..Default::default()
+        };
+        let ac = to_agent_config(&cfg);
+        assert_eq!(ac.retry.max_retries, 4);
+        assert!(ac.command_policy_strict);
+        assert_eq!(ac.provider_circuit_breaker.failure_threshold, 2);
+    }
+
+    #[test]
+    fn test_profile_overrides_take_precedence() {
+        let cfg = ThetaConfig {
+            profile: RuntimeProfileSetting::Prod,
+            profile_overrides: ProfileOverrides {
+                max_retries: Some(7),
+                command_policy_strict: Some(false),
+                tool_timeout_ms: Some(2_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ac = to_agent_config(&cfg);
+        assert_eq!(ac.retry.max_retries, 7);
+        assert!(!ac.command_policy_strict);
+        assert_eq!(ac.tool_watchdog.hard_timeout_ms, 2_000);
     }
 }

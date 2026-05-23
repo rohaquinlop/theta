@@ -49,3 +49,46 @@ pub enum ThetaError {
     #[error("Provider stream error: code={code}, message={message}")]
     ProviderStreamError { code: String, message: String },
 }
+
+/// Classification for provider reliability behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    Transient,
+    Permanent,
+}
+
+impl ThetaError {
+    /// Classify provider errors for retry/circuit-breaker handling.
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Http(e) => {
+                if e.is_timeout() || e.is_connect() || e.is_request() {
+                    ErrorClass::Transient
+                } else {
+                    ErrorClass::Permanent
+                }
+            }
+            Self::Stream(_) | Self::StreamEndedEarly => ErrorClass::Transient,
+            Self::ApiError { status, .. } => {
+                if *status == 429 || (500..=599).contains(status) {
+                    ErrorClass::Transient
+                } else {
+                    ErrorClass::Permanent
+                }
+            }
+            Self::Aborted => ErrorClass::Transient,
+            Self::ProviderStreamError { .. }
+            | Self::Json(_)
+            | Self::MissingApiKey { .. }
+            | Self::ModelNotFound { .. } => ErrorClass::Permanent,
+        }
+    }
+
+    /// Optional backoff hint from provider response.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::ApiError { retry_after_ms, .. } => *retry_after_ms,
+            _ => None,
+        }
+    }
+}

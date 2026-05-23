@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use theta_ai::Message;
+use theta_ai::{ContentBlock, Message};
 
 /// Result type for session operations.
 pub type SessionResult<T> = Result<T, SessionError>;
@@ -60,6 +60,12 @@ pub struct SessionMeta {
     pub message_count: usize,
     #[serde(default)]
     pub token_count: u32,
+    #[serde(default)]
+    pub in_progress: bool,
+    #[serde(default)]
+    pub active_run_id: Option<String>,
+    #[serde(default)]
+    pub active_turn_id: Option<String>,
 }
 
 /// Index of all sessions in a project.
@@ -188,6 +194,9 @@ impl SessionManager {
             last_active_at: now,
             message_count: 0,
             token_count: 0,
+            in_progress: false,
+            active_run_id: None,
+            active_turn_id: None,
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -255,7 +264,28 @@ impl SessionManager {
             .ok_or_else(|| SessionError::NotFound {
                 path: "no sessions found".to_string(),
             })?;
-        self.open(PathBuf::from(&latest.path).as_path()).await
+        let mut session = self.open(PathBuf::from(&latest.path).as_path()).await?;
+        if latest.in_progress {
+            let repair = Message::Assistant {
+                content: vec![theta_ai::ContentBlock::text(
+                    "Previous run was interrupted before turn completion. Session resumed with explicit runtime-constraint termination.",
+                )],
+                api: None,
+                provider: None,
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: now_ms(),
+            };
+            self.append_entry(&mut session, &repair).await?;
+            self.mark_run_completed(
+                &latest.id,
+                Some("BlockedRuntimeConstraint: interrupted run on resume"),
+            )
+            .await?;
+        }
+        Ok(session)
     }
 
     /// Fork a session: copy the JSONL file and create a new session with a fresh ID.
@@ -288,6 +318,9 @@ impl SessionManager {
             last_active_at: now,
             message_count: session.messages.len(),
             token_count: session.messages.iter().map(Message::token_count).sum(),
+            in_progress: false,
+            active_run_id: None,
+            active_turn_id: None,
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -393,6 +426,41 @@ impl SessionManager {
         let index = self.load_index().await?;
         Ok(index.sessions.clone())
     }
+
+    /// Mark a session run as in-progress.
+    pub async fn mark_run_in_progress(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        turn_id: &str,
+    ) -> SessionResult<()> {
+        let mut index = self.load_index().await?;
+        if let Some(meta) = index.sessions.iter_mut().find(|m| m.id == session_id) {
+            meta.in_progress = true;
+            meta.active_run_id = Some(run_id.to_string());
+            meta.active_turn_id = Some(turn_id.to_string());
+            meta.last_active_at = now_ms();
+            self.save_index(&index).await?;
+        }
+        Ok(())
+    }
+
+    /// Mark a session run as completed.
+    pub async fn mark_run_completed(
+        &self,
+        session_id: &str,
+        _end_reason: Option<&str>,
+    ) -> SessionResult<()> {
+        let mut index = self.load_index().await?;
+        if let Some(meta) = index.sessions.iter_mut().find(|m| m.id == session_id) {
+            meta.in_progress = false;
+            meta.active_run_id = None;
+            meta.active_turn_id = None;
+            meta.last_active_at = now_ms();
+            self.save_index(&index).await?;
+        }
+        Ok(())
+    }
 }
 
 fn message_fingerprint(message: &Message) -> String {
@@ -415,17 +483,40 @@ async fn parse_session_file(path: &Path) -> SessionResult<Vec<Message>> {
     let file = std::fs::File::open(path).map_err(SessionError::Read)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
+    let mut corrupted_lines = 0usize;
 
     for (line_num, line_result) in reader.lines().enumerate() {
         let line = line_result.map_err(SessionError::Read)?;
         if line.trim().is_empty() {
             continue;
         }
-        let msg: Message = serde_json::from_str(&line).map_err(|e| SessionError::Parse {
-            line: line_num + 1,
-            error: e.to_string(),
-        })?;
-        messages.push(msg);
+        match serde_json::from_str::<Message>(&line) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => {
+                corrupted_lines += 1;
+                tracing::warn!(
+                    line = line_num + 1,
+                    error = %e,
+                    "skipping corrupted session line"
+                );
+            }
+        }
+    }
+
+    if corrupted_lines > 0 {
+        messages.push(Message::Assistant {
+            content: vec![ContentBlock::text(format!(
+                "Session repair: skipped {corrupted_lines} corrupted JSONL entr{} during load.",
+                if corrupted_lines == 1 { "y" } else { "ies" }
+            ))],
+            api: None,
+            provider: None,
+            model: None,
+            usage: None,
+            stop_reason: None,
+            error_message: None,
+            timestamp: now_ms(),
+        });
     }
 
     Ok(messages)
@@ -581,6 +672,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_open_skips_corrupted_lines_and_appends_repair_message() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+        let session = mgr.create(None).await.unwrap();
+        let mixed = concat!(
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"timestamp\":1}\n",
+            "{not-valid-json}\n"
+        );
+        std::fs::write(&session.file_path, mixed).unwrap();
+        let reopened = mgr.open(&session.file_path).await.unwrap();
+        assert_eq!(reopened.messages.len(), 2);
+        assert!(matches!(reopened.messages[0], Message::User { .. }));
+        assert!(matches!(reopened.messages[1], Message::Assistant { .. }));
+    }
+
+    #[tokio::test]
     async fn test_fork() {
         let tmp = TempDir::new().unwrap();
         let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
@@ -607,6 +714,38 @@ mod tests {
         assert_eq!(
             resumed.meta.as_ref().unwrap().id,
             session_b.meta.as_ref().unwrap().id
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_repairs_in_progress_run() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+
+        let session = mgr.create(None).await.unwrap();
+        let sid = session.meta.as_ref().unwrap().id.clone();
+        mgr.mark_run_in_progress(&sid, "run-1", "turn-1")
+            .await
+            .unwrap();
+
+        let resumed = mgr.resume().await.unwrap();
+        let has_repair = resumed.messages.iter().any(|m| {
+            matches!(
+                m,
+                Message::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("interrupted before turn completion")))
+            )
+        });
+        assert!(
+            has_repair,
+            "resume should append explicit interruption repair"
+        );
+
+        let list = mgr.list().await.unwrap();
+        let meta = list.iter().find(|m| m.id == sid).unwrap();
+        assert!(
+            !meta.in_progress,
+            "resume repair should clear in-progress flag"
         );
     }
 

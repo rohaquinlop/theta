@@ -5,8 +5,10 @@
 //! - Inner loop: handles LLM call + tool execution cycle
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -15,8 +17,8 @@ use tracing;
 use futures::StreamExt;
 use theta_ai::event::EventAccumulator;
 use theta_ai::{
-    AssistantMessageEvent, ContentBlock, Context, LlmProvider, Message, StopReason, StreamOptions,
-    ThinkingLevel,
+    AssistantMessageEvent, ContentBlock, Context, ErrorClass, LlmProvider, Message, Model,
+    StopReason, StreamOptions, ThinkingLevel,
 };
 
 use crate::error::AgentError;
@@ -24,7 +26,29 @@ use crate::events::{AgentEvent, TurnDecisionReason};
 use crate::hooks::Hooks;
 use crate::state::AgentState;
 use crate::tools;
-use crate::types::{AgentIntent, AgentLoopConfig, CompactionStrategy, ToolCall};
+use crate::types::{
+    AgentIntent, AgentLoopConfig, CompactionStrategy, RunReport, SafetyDecisionKind, ToolCall,
+    TurnEndReason, TurnMode,
+};
+use crate::{command_policy, command_policy::SafetyDecision};
+
+#[derive(Debug, Clone)]
+struct BreakerState {
+    consecutive_failures: u32,
+    opened_at: Option<Instant>,
+}
+
+impl BreakerState {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            opened_at: None,
+        }
+    }
+}
+
+static CIRCUIT_BREAKERS: LazyLock<Mutex<HashMap<String, BreakerState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Drain all messages from a shared queue and add them to state.
 fn drain_queue(queue: &Arc<Mutex<Vec<(Message, u64)>>>, state: &mut AgentState) -> bool {
@@ -67,6 +91,26 @@ pub async fn run_prompt_loop(
     follow_up_queue: Arc<Mutex<Vec<(Message, u64)>>>,
 ) -> Result<(), AgentError> {
     let _ = event_tx.send(AgentEvent::AgentStart);
+    let run_id = format!("run-{}", now_ms());
+    state.current_run_id = Some(run_id.clone());
+    state.current_run_report = Some(RunReport {
+        run_id: run_id.clone(),
+        started_at_ms: now_ms(),
+        finished_at_ms: None,
+        outcome: None,
+        events: Vec::new(),
+    });
+    state.push_run_event(
+        "agent_start",
+        [
+            ("run_id".to_string(), run_id.clone()),
+            ("model".to_string(), state.model.id.clone()),
+            (
+                "provider".to_string(),
+                format!("{:?}", state.model.provider),
+            ),
+        ],
+    );
 
     let result = run_outer_loop(
         state,
@@ -83,6 +127,35 @@ pub async fn run_prompt_loop(
 
     let aborted = matches!(result, Err(AgentError::Aborted));
     let _ = event_tx.send(AgentEvent::AgentEnd { aborted });
+    if let Some(mut report) = state.current_run_report.take() {
+        report.finished_at_ms = Some(now_ms());
+        report.outcome = if aborted {
+            Some(TurnEndReason::AbortedByUser)
+        } else {
+            state.last_turn_end_reason
+        };
+        report.events.push(crate::types::RunReportEvent {
+            ts_ms: now_ms(),
+            kind: "agent_end".to_string(),
+            fields: std::collections::BTreeMap::from([
+                ("run_id".to_string(), report.run_id.clone()),
+                ("model".to_string(), state.model.id.clone()),
+                (
+                    "provider".to_string(),
+                    format!("{:?}", state.model.provider),
+                ),
+                ("aborted".to_string(), aborted.to_string()),
+                (
+                    "outcome".to_string(),
+                    format!("{:?}", report.outcome.unwrap_or(TurnEndReason::Completed)),
+                ),
+            ]),
+        });
+        state.last_run_report = Some(report);
+    }
+    state.current_run_id = None;
+    state.current_turn_id = None;
+    state.executed_tool_call_ids_in_turn.clear();
 
     result
 }
@@ -156,6 +229,31 @@ async fn run_single_turn(
     steering_queue: &Arc<Mutex<Vec<(Message, u64)>>>,
 ) -> Result<(), AgentError> {
     let _ = event_tx.send(AgentEvent::TurnStart { turn_index });
+    let turn_id = format!("turn-{}-{turn_index}", now_ms());
+    state.current_turn_id = Some(turn_id.clone());
+    state.executed_tool_call_ids_in_turn.clear();
+    state.push_run_event(
+        "turn_start",
+        [
+            ("turn".to_string(), turn_index.to_string()),
+            ("turn_id".to_string(), turn_id),
+        ],
+    );
+    let (turn_mode, mode_source) = resolve_turn_mode(state);
+    state.last_turn_mode = Some(turn_mode);
+    let _ = event_tx.send(AgentEvent::TurnModeResolved {
+        turn_index,
+        mode: turn_mode,
+        source: mode_source.to_string(),
+    });
+    state.push_run_event(
+        "turn_mode_resolved",
+        [
+            ("turn".to_string(), turn_index.to_string()),
+            ("mode".to_string(), format!("{turn_mode:?}")),
+            ("source".to_string(), mode_source.to_string()),
+        ],
+    );
 
     // Inject any prepare-next-turn messages.
     let prepend = hooks.prepare_next_turn(state).await;
@@ -170,6 +268,7 @@ async fn run_single_turn(
     let mut executed_tools_in_turn = false;
     let mut repeated_tool_signature_counts: HashMap<String, u32> = HashMap::new();
     let max_same_tool_signature_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
+    let mut terminated: Option<(TurnEndReason, String, u32)> = None;
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
@@ -190,9 +289,21 @@ async fn run_single_turn(
                 turn: turn_index,
                 round: tool_round,
             });
+            state.push_run_event(
+                "turn_decision",
+                [
+                    ("turn".to_string(), turn_index.to_string()),
+                    ("round".to_string(), tool_round.to_string()),
+                    ("reason".to_string(), "MaxRounds".to_string()),
+                ],
+            );
+            terminated = Some((
+                TurnEndReason::MaxToolRounds,
+                format!("reached max tool rounds ({max_rounds})"),
+                tool_round,
+            ));
             break;
         }
-        let intent = infer_intent(latest_user_text(state).as_deref().unwrap_or_default());
 
         // Build the LLM context from current state, with compaction.
         let (context, compaction_stats, replay_stats) =
@@ -211,6 +322,7 @@ async fn run_single_turn(
                 dropped_assistant_messages: stats.dropped_assistant_messages,
                 synthesized_tool_results: stats.synthesized_tool_results,
                 normalized_tool_call_ids: stats.normalized_tool_call_ids,
+                deduped_tool_results: stats.deduped_tool_results,
             });
         }
 
@@ -327,11 +439,16 @@ async fn run_single_turn(
                         assistant_text_opt(&state.messages[state.messages.len() - 1])
                             .unwrap_or_default();
 
-                    if intent == AgentIntent::PlanOnly || intent == AgentIntent::Clarify {
+                    if matches!(turn_mode, TurnMode::PlanOnly | TurnMode::Clarify) {
+                        terminated = Some((
+                            TurnEndReason::Completed,
+                            "mode-complete".to_string(),
+                            tool_round,
+                        ));
                         break;
                     }
 
-                    if intent == AgentIntent::Execute
+                    if turn_mode == TurnMode::Execute
                         && !executed_tools_in_turn
                         && (consecutive_noop_rounds < 1
                             || looks_like_execution_promise(&assistant_text))
@@ -344,6 +461,14 @@ async fn run_single_turn(
                             turn: turn_index,
                             round: tool_round,
                         });
+                        state.push_run_event(
+                            "turn_decision",
+                            [
+                                ("turn".to_string(), turn_index.to_string()),
+                                ("round".to_string(), tool_round.to_string()),
+                                ("reason".to_string(), "NoopRetry".to_string()),
+                            ],
+                        );
                         state.messages.push(Message::User {
                             content: vec![ContentBlock::text(VALIDATION_RETRY_PROMPT)],
                             timestamp: now_ms(),
@@ -351,19 +476,30 @@ async fn run_single_turn(
                         tool_round += 1;
                         continue;
                     }
-                    if intent == AgentIntent::Execute
+                    if turn_mode == TurnMode::Execute
                         && !executed_tools_in_turn
-                        && classify_action_blocker(&assistant_text)
+                        && classify_action_blocker(&assistant_text).is_some()
                     {
+                        let reason = classify_action_blocker(&assistant_text)
+                            .unwrap_or(TurnEndReason::BlockedRuntimeConstraint);
                         let _ = event_tx.send(AgentEvent::TurnDecision {
                             reason: TurnDecisionReason::BlockedNoop,
                             details: "execute intent stopped due to explicit blocker".to_string(),
                             turn: turn_index,
                             round: tool_round,
                         });
+                        state.push_run_event(
+                            "turn_decision",
+                            [
+                                ("turn".to_string(), turn_index.to_string()),
+                                ("round".to_string(), tool_round.to_string()),
+                                ("reason".to_string(), "BlockedNoop".to_string()),
+                            ],
+                        );
+                        terminated = Some((reason, assistant_text, tool_round));
                     }
 
-                    if intent == AgentIntent::Inspect && !executed_tools_in_turn {
+                    if turn_mode == TurnMode::Inspect && !executed_tools_in_turn {
                         consecutive_noop_rounds += 1;
                         if consecutive_noop_rounds <= 1 {
                             state.messages.push(Message::User {
@@ -376,7 +512,7 @@ async fn run_single_turn(
                             continue;
                         }
                     }
-                    if intent == AgentIntent::AnalyzeOnly && !executed_tools_in_turn {
+                    if turn_mode == TurnMode::AnalyzeOnly && !executed_tools_in_turn {
                         consecutive_noop_rounds += 1;
                         if consecutive_noop_rounds <= 1 {
                             let _ = event_tx.send(AgentEvent::TurnDecision {
@@ -387,6 +523,14 @@ async fn run_single_turn(
                                 turn: turn_index,
                                 round: tool_round,
                             });
+                            state.push_run_event(
+                                "turn_decision",
+                                [
+                                    ("turn".to_string(), turn_index.to_string()),
+                                    ("round".to_string(), tool_round.to_string()),
+                                    ("reason".to_string(), "NoopRetry".to_string()),
+                                ],
+                            );
                             state.messages.push(Message::User {
                                 content: vec![ContentBlock::text(ANALYZE_RETRY_PROMPT)],
                                 timestamp: now_ms(),
@@ -394,6 +538,13 @@ async fn run_single_turn(
                             tool_round += 1;
                             continue;
                         }
+                    }
+                    if terminated.is_none() {
+                        terminated = Some((
+                            TurnEndReason::Completed,
+                            "completed".to_string(),
+                            tool_round,
+                        ));
                     }
                     break;
                 }
@@ -422,17 +573,64 @@ async fn run_single_turn(
                     }
                 }
 
-                if intent == AgentIntent::AnalyzeOnly {
+                if matches!(turn_mode, TurnMode::AnalyzeOnly | TurnMode::Inspect) {
                     let mut allowed = Vec::new();
+                    let latest_user_text = latest_user_text(state).unwrap_or_default();
                     for tc in &tool_calls {
-                        if is_read_only_tool_call(tc) {
+                        let SafetyDecision { decision, details } =
+                            command_policy::evaluate_tool_call(
+                                turn_mode,
+                                tc,
+                                config.command_policy_strict,
+                            );
+                        if decision == SafetyDecisionKind::Allowed
+                            && let Some(class) = command_policy::required_user_authorization(tc)
+                            && !user_authorizes_action_class(&latest_user_text, class)
+                        {
+                            let details = format!(
+                                "{class:?} blocked: user did not explicitly request this action in latest message"
+                            );
+                            let _ = event_tx.send(AgentEvent::SafetyDecision {
+                                decision: SafetyDecisionKind::Rejected,
+                                mode: turn_mode,
+                                tool_name: tc.name.clone(),
+                                details: details.clone(),
+                            });
+                            let _ = event_tx.send(AgentEvent::TurnDecision {
+                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
+                                details,
+                                turn: turn_index,
+                                round: tool_round,
+                            });
+                        } else if decision == SafetyDecisionKind::Allowed {
+                            let _ = event_tx.send(AgentEvent::SafetyDecision {
+                                decision,
+                                mode: turn_mode,
+                                tool_name: tc.name.clone(),
+                                details,
+                            });
+                            state.push_run_event(
+                                "safety_decision",
+                                [
+                                    ("turn".to_string(), turn_index.to_string()),
+                                    ("round".to_string(), tool_round.to_string()),
+                                    ("tool_name".to_string(), tc.name.clone()),
+                                    ("decision".to_string(), "Allowed".to_string()),
+                                ],
+                            );
                             allowed.push(tc.clone());
                         } else {
+                            let _ = event_tx.send(AgentEvent::SafetyDecision {
+                                decision,
+                                mode: turn_mode,
+                                tool_name: tc.name.clone(),
+                                details: details.clone(),
+                            });
                             let _ = event_tx.send(AgentEvent::TurnDecision {
                                 reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
                                 details: format!(
-                                    "blocked mutating tool call '{}' during analyze-only turn",
-                                    tc.name
+                                    "blocked mutating tool call '{}' during {turn_mode:?} turn",
+                                    tc.name,
                                 ),
                                 turn: turn_index,
                                 round: tool_round,
@@ -440,6 +638,11 @@ async fn run_single_turn(
                         }
                     }
                     if allowed.is_empty() {
+                        terminated = Some((
+                            TurnEndReason::SafetyRejected,
+                            format!("all tool calls rejected by {turn_mode:?} policy"),
+                            tool_round,
+                        ));
                         break;
                     }
                     tools::execute_tool_calls(
@@ -448,18 +651,91 @@ async fn run_single_turn(
                         abort_token.clone(),
                         event_tx,
                         hooks,
+                        &config.tool_watchdog,
                     )
                     .await?;
+                    state.push_run_event(
+                        "tool_batch_executed",
+                        [
+                            ("turn".to_string(), turn_index.to_string()),
+                            ("round".to_string(), tool_round.to_string()),
+                            ("tool_count".to_string(), allowed.len().to_string()),
+                        ],
+                    );
                     executed_tools_in_turn = true;
                 } else {
+                    let mut allowed = Vec::new();
+                    let latest_user_text = latest_user_text(state).unwrap_or_default();
+                    for tc in &tool_calls {
+                        let SafetyDecision { decision, details } =
+                            command_policy::evaluate_tool_call(
+                                turn_mode,
+                                tc,
+                                config.command_policy_strict,
+                            );
+                        let _ = event_tx.send(AgentEvent::SafetyDecision {
+                            decision,
+                            mode: turn_mode,
+                            tool_name: tc.name.clone(),
+                            details: details.clone(),
+                        });
+                        state.push_run_event(
+                            "safety_decision",
+                            [
+                                ("turn".to_string(), turn_index.to_string()),
+                                ("round".to_string(), tool_round.to_string()),
+                                ("tool_name".to_string(), tc.name.clone()),
+                                ("decision".to_string(), format!("{decision:?}")),
+                            ],
+                        );
+                        if decision == SafetyDecisionKind::Allowed
+                            && let Some(class) = command_policy::required_user_authorization(tc)
+                            && !user_authorizes_action_class(&latest_user_text, class)
+                        {
+                            let details = format!(
+                                "{class:?} blocked: user did not explicitly request this action in latest message"
+                            );
+                            let _ = event_tx.send(AgentEvent::SafetyDecision {
+                                decision: SafetyDecisionKind::Rejected,
+                                mode: turn_mode,
+                                tool_name: tc.name.clone(),
+                                details: details.clone(),
+                            });
+                            let _ = event_tx.send(AgentEvent::TurnDecision {
+                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
+                                details,
+                                turn: turn_index,
+                                round: tool_round,
+                            });
+                        } else if decision == SafetyDecisionKind::Allowed {
+                            allowed.push(tc.clone());
+                        }
+                    }
+                    if allowed.is_empty() {
+                        terminated = Some((
+                            TurnEndReason::SafetyRejected,
+                            "all tool calls rejected by policy".to_string(),
+                            tool_round,
+                        ));
+                        break;
+                    }
                     tools::execute_tool_calls(
                         state,
-                        &tool_calls,
+                        &allowed,
                         abort_token.clone(),
                         event_tx,
                         hooks,
+                        &config.tool_watchdog,
                     )
                     .await?;
+                    state.push_run_event(
+                        "tool_batch_executed",
+                        [
+                            ("turn".to_string(), turn_index.to_string()),
+                            ("round".to_string(), tool_round.to_string()),
+                            ("tool_count".to_string(), allowed.len().to_string()),
+                        ],
+                    );
                     executed_tools_in_turn = true;
                 }
 
@@ -475,14 +751,65 @@ async fn run_single_turn(
                     continue;
                 }
                 // Otherwise propagate the abort.
+                state.last_turn_end_reason = Some(TurnEndReason::AbortedByUser);
+                let _ = event_tx.send(AgentEvent::TurnTerminated {
+                    reason: TurnEndReason::AbortedByUser,
+                    details: "aborted by user".to_string(),
+                    turn: turn_index,
+                    round: tool_round,
+                });
+                state.push_run_event(
+                    "turn_terminated",
+                    [
+                        ("turn".to_string(), turn_index.to_string()),
+                        ("round".to_string(), tool_round.to_string()),
+                        ("reason".to_string(), "AbortedByUser".to_string()),
+                    ],
+                );
                 return Err(AgentError::Aborted);
             }
             Err(e) => {
                 state.is_streaming = false;
+                state.last_turn_end_reason = Some(TurnEndReason::ProviderFailure);
+                let _ = event_tx.send(AgentEvent::TurnTerminated {
+                    reason: TurnEndReason::ProviderFailure,
+                    details: e.to_string(),
+                    turn: turn_index,
+                    round: tool_round,
+                });
+                state.push_run_event(
+                    "turn_terminated",
+                    [
+                        ("turn".to_string(), turn_index.to_string()),
+                        ("round".to_string(), tool_round.to_string()),
+                        ("reason".to_string(), "ProviderFailure".to_string()),
+                    ],
+                );
                 return Err(e);
             }
         }
     }
+
+    let (reason, details, round) = terminated.unwrap_or((
+        TurnEndReason::Completed,
+        "completed".to_string(),
+        tool_round,
+    ));
+    state.last_turn_end_reason = Some(reason);
+    let _ = event_tx.send(AgentEvent::TurnTerminated {
+        reason,
+        details,
+        turn: turn_index,
+        round,
+    });
+    state.push_run_event(
+        "turn_terminated",
+        [
+            ("turn".to_string(), turn_index.to_string()),
+            ("round".to_string(), round.to_string()),
+            ("reason".to_string(), format!("{reason:?}")),
+        ],
+    );
 
     Ok(())
 }
@@ -490,7 +817,7 @@ async fn run_single_turn(
 const VALIDATION_RETRY_PROMPT: &str = "This is an execution request. Call the relevant tools now. If blocked, state the blocker clearly and stop.";
 const ANALYZE_RETRY_PROMPT: &str = "This is an analysis request. Use read-only tools now (read/grep/find/ls or read-only bash) and report findings.";
 
-fn classify_action_blocker(text: &str) -> bool {
+fn classify_action_blocker(text: &str) -> Option<TurnEndReason> {
     let t = text.to_lowercase();
     let missing_info = [
         "need more detail",
@@ -524,7 +851,15 @@ fn classify_action_blocker(text: &str) -> bool {
     ]
     .iter()
     .any(|kw| t.contains(kw));
-    missing_info || permission || runtime
+    if missing_info {
+        Some(TurnEndReason::BlockedMissingInfo)
+    } else if permission {
+        Some(TurnEndReason::BlockedPermission)
+    } else if runtime {
+        Some(TurnEndReason::BlockedRuntimeConstraint)
+    } else {
+        None
+    }
 }
 
 fn tokenize_words(text: &str) -> Vec<String> {
@@ -547,80 +882,6 @@ fn contains_token_sequence(tokens: &[String], phrase_tokens: &[&str]) -> bool {
             .map(String::as_str)
             .eq(phrase_tokens.iter().copied())
     })
-}
-
-fn is_read_only_tool_call(tc: &ToolCall) -> bool {
-    if matches!(tc.name.as_str(), "read" | "ls" | "find" | "grep") {
-        return true;
-    }
-    if tc.name != "bash" {
-        return false;
-    }
-    let Some(cmd) = tc.arguments.get("command").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    is_read_only_bash_command(cmd)
-}
-
-fn is_read_only_bash_command(command: &str) -> bool {
-    for segment in split_shell_command_segments(command) {
-        let tokens = tokenize_shell_segment(segment);
-        if tokens.is_empty() {
-            continue;
-        }
-        if !is_read_only_tokenized_command(&tokens) {
-            return false;
-        }
-    }
-    true
-}
-
-fn is_read_only_tokenized_command(tokens: &[String]) -> bool {
-    let first = tokens[0].as_str();
-    match first {
-        "cat" | "head" | "tail" | "wc" | "ls" | "rg" | "grep" | "find" => true,
-        "sed" => !tokens.iter().any(|t| t == "-i" || t.starts_with("-i")),
-        "git" => {
-            let sub = tokens.get(1).map(String::as_str).unwrap_or_default();
-            matches!(
-                sub,
-                "status" | "diff" | "show" | "log" | "rev-parse" | "branch" | "remote" | "ls-files"
-            )
-        }
-        _ => false,
-    }
-}
-
-fn split_shell_command_segments(command: &str) -> Vec<&str> {
-    command
-        .split(&[';', '|', '&'][..])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-fn tokenize_shell_segment(segment: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut cur = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    for ch in segment.chars() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !cur.is_empty() {
-                    tokens.push(cur.clone());
-                    cur.clear();
-                }
-            }
-            _ => cur.push(ch),
-        }
-    }
-    if !cur.is_empty() {
-        tokens.push(cur);
-    }
-    tokens
 }
 
 fn assistant_text_opt(message: &Message) -> Option<String> {
@@ -663,6 +924,77 @@ fn latest_user_text(state: &AgentState) -> Option<String> {
         }
         _ => None,
     })
+}
+
+fn user_authorizes_action_class(text: &str, class: command_policy::AuthorizationClass) -> bool {
+    let t = text.to_lowercase();
+    let tokens = tokenize_words(&t);
+    match class {
+        command_policy::AuthorizationClass::Commit => {
+            if contains_token_sequence(&tokens, &["do", "not", "commit"])
+                || contains_token_sequence(&tokens, &["dont", "commit"])
+                || contains_token_sequence(&tokens, &["without", "commit"])
+            {
+                return false;
+            }
+            contains_token_sequence(&tokens, &["commit"])
+                || contains_token_sequence(&tokens, &["create", "commit"])
+                || contains_token_sequence(&tokens, &["make", "commit"])
+                || contains_token_sequence(&tokens, &["git", "commit"])
+        }
+        command_policy::AuthorizationClass::VcsMutation => {
+            if contains_token_sequence(&tokens, &["do", "not", "change", "branch"])
+                || contains_token_sequence(&tokens, &["do", "not", "push"])
+                || contains_token_sequence(&tokens, &["do", "not", "merge"])
+            {
+                return false;
+            }
+            contains_token_sequence(&tokens, &["git"])
+                || contains_token_sequence(&tokens, &["branch"])
+                || contains_token_sequence(&tokens, &["tag"])
+                || contains_token_sequence(&tokens, &["rebase"])
+                || contains_token_sequence(&tokens, &["merge"])
+                || contains_token_sequence(&tokens, &["push"])
+                || contains_token_sequence(&tokens, &["checkout"])
+                || contains_token_sequence(&tokens, &["switch"])
+                || contains_token_sequence(&tokens, &["cherry", "pick"])
+        }
+        command_policy::AuthorizationClass::DependencyMutation => {
+            if contains_token_sequence(&tokens, &["do", "not", "install"])
+                || contains_token_sequence(&tokens, &["without", "install"])
+            {
+                return false;
+            }
+            contains_token_sequence(&tokens, &["install"])
+                || contains_token_sequence(&tokens, &["dependency"])
+                || contains_token_sequence(&tokens, &["dependencies"])
+                || contains_token_sequence(&tokens, &["package"])
+                || contains_token_sequence(&tokens, &["packages"])
+                || contains_token_sequence(&tokens, &["add", "package"])
+                || contains_token_sequence(&tokens, &["add", "dependency"])
+        }
+        command_policy::AuthorizationClass::FileMutation => {
+            if contains_token_sequence(&tokens, &["do", "not", "modify"])
+                || contains_token_sequence(&tokens, &["do", "not", "change"])
+                || contains_token_sequence(&tokens, &["do", "not", "edit"])
+                || contains_token_sequence(&tokens, &["read", "only"])
+            {
+                return false;
+            }
+            contains_token_sequence(&tokens, &["implement"])
+                || contains_token_sequence(&tokens, &["fix"])
+                || contains_token_sequence(&tokens, &["patch"])
+                || contains_token_sequence(&tokens, &["edit"])
+                || contains_token_sequence(&tokens, &["modify"])
+                || contains_token_sequence(&tokens, &["change"])
+                || contains_token_sequence(&tokens, &["update"])
+                || contains_token_sequence(&tokens, &["refactor"])
+                || contains_token_sequence(&tokens, &["write"])
+                || contains_token_sequence(&tokens, &["create"])
+                || contains_token_sequence(&tokens, &["delete"])
+                || contains_token_sequence(&tokens, &["remove"])
+        }
+    }
 }
 
 fn looks_like_execution_request(text: &str) -> bool {
@@ -720,6 +1052,14 @@ fn infer_intent(text: &str) -> AgentIntent {
     if t.trim() == "do it" || t.trim() == "fix it" {
         return AgentIntent::Clarify;
     }
+    if t.contains("inspect")
+        || t.contains("check")
+        || t.contains("validate")
+        || t.contains("validation")
+        || t.contains("what changed")
+    {
+        return AgentIntent::Inspect;
+    }
     if t.contains("review")
         || t.contains("analyze")
         || t.contains("analyse")
@@ -730,13 +1070,53 @@ fn infer_intent(text: &str) -> AgentIntent {
     if t.contains("commit") || t.contains("push") || t.contains("apply patch") {
         return AgentIntent::Execute;
     }
-    if t.contains("inspect") || t.contains("check") || t.contains("what changed") {
-        return AgentIntent::Inspect;
-    }
     if looks_like_execution_request(&t) {
         return AgentIntent::Execute;
     }
     AgentIntent::Default
+}
+
+fn resolve_turn_mode(state: &AgentState) -> (TurnMode, &'static str) {
+    if let Some(mode) = state.turn_mode_override {
+        return (mode, "runtime_override");
+    }
+    if let Some(mode) = infer_turn_mode_hint(state) {
+        return (mode, "context_hint");
+    }
+    let text = latest_user_text(state).unwrap_or_default();
+    (TurnMode::from(infer_intent(&text)), "fallback_classifier")
+}
+
+fn infer_turn_mode_hint(state: &AgentState) -> Option<TurnMode> {
+    let latest_user = latest_user_text(state).unwrap_or_default().to_lowercase();
+    if let Some(mode) = parse_mode_hint(&latest_user) {
+        return Some(mode);
+    }
+    let system_text = state
+        .system_prompt
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    parse_mode_hint(&system_text)
+}
+
+fn parse_mode_hint(text: &str) -> Option<TurnMode> {
+    let pairs = [
+        ("mode:execute", TurnMode::Execute),
+        ("mode:inspect", TurnMode::Inspect),
+        ("mode:analyze", TurnMode::AnalyzeOnly),
+        ("mode:analyzeonly", TurnMode::AnalyzeOnly),
+        ("mode:plan", TurnMode::PlanOnly),
+        ("mode:clarify", TurnMode::Clarify),
+    ];
+    pairs
+        .iter()
+        .find_map(|(needle, mode)| text.contains(needle).then_some(*mode))
 }
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.
@@ -755,39 +1135,76 @@ async fn run_llm_stream(
     emit_events: bool,
 ) -> Result<(Message, Option<StopReason>, usize), AgentError> {
     let retry = &config.retry;
+    let fallback_models = resolve_fallback_models(state, config);
+    let mut stream = None;
+    let mut selected_model = state.model.clone();
+    let mut last_error: Option<theta_ai::ThetaError> = None;
 
-    // Retry loop for provider.stream().
-    let mut stream;
-    let mut attempt: u32 = 0;
-
-    loop {
-        match provider.stream(&state.model, context, options).await {
-            Ok(s) => {
-                stream = s;
-                break;
+    for (idx, candidate_model) in fallback_models.iter().enumerate() {
+        if idx > 0 && emit_events {
+            let _ = event_tx.send(AgentEvent::ProviderFallback {
+                from_model: selected_model.id.clone(),
+                to_model: candidate_model.id.clone(),
+                reason: last_error
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "fallback requested".to_string()),
+            });
+        }
+        selected_model = candidate_model.clone();
+        let key = format!("{:?}:{}", selected_model.provider, selected_model.id);
+        if let Some(retry_in_ms) = breaker_retry_in_ms(&key, config) {
+            if emit_events {
+                let _ = event_tx.send(AgentEvent::ProviderCircuitOpen { key, retry_in_ms });
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if !retry.is_retryable(&msg) || attempt >= retry.max_retries {
-                    return Err(AgentError::Llm(e));
+            continue;
+        }
+
+        let mut attempt: u32 = 0;
+        loop {
+            match provider.stream(&selected_model, context, options).await {
+                Ok(s) => {
+                    breaker_record_success(&key);
+                    stream = Some(s);
+                    break;
                 }
-                attempt += 1;
-                let delay_ms = retry
-                    .base_delay_ms
-                    .saturating_mul(2u64.pow(attempt.saturating_sub(1)));
-                if emit_events {
-                    let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                Err(e) => {
+                    last_error = Some(e);
+                    let err = last_error.as_ref().expect("set above");
+                    if !retry.is_retryable(err) || attempt >= retry.max_retries {
+                        breaker_record_failure(&key, err.class(), config);
+                        break;
+                    }
+                    attempt += 1;
+                    let delay_ms = err.retry_after_ms().unwrap_or_else(|| {
+                        retry
+                            .base_delay_ms
+                            .saturating_mul(2u64.pow(attempt.saturating_sub(1)))
+                    });
+                    if emit_events {
+                        let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                    }
+                    tracing::warn!(
+                        model = %selected_model.id,
+                        attempt = attempt,
+                        delay_ms = delay_ms,
+                        error = %err,
+                        "provider call failed, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
-                tracing::warn!(
-                    attempt = attempt,
-                    delay_ms = delay_ms,
-                    error = %msg,
-                    "provider call failed, retrying"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
         }
+        if stream.is_some() {
+            break;
+        }
     }
+
+    let Some(mut stream) = stream else {
+        return Err(AgentError::Llm(
+            last_error.unwrap_or(theta_ai::ThetaError::StreamEndedEarly),
+        ));
+    };
 
     let mut accumulator = EventAccumulator::new();
 
@@ -839,9 +1256,9 @@ async fn run_llm_stream(
     // Build the assistant message from accumulated events.
     let assistant_msg = Message::Assistant {
         content: accumulator.content_blocks(),
-        api: Some(state.model.api),
-        provider: Some(state.model.provider),
-        model: Some(state.model.id.clone()),
+        api: Some(selected_model.api),
+        provider: Some(selected_model.provider),
+        model: Some(selected_model.id.clone()),
         usage: accumulator.usage().cloned(),
         stop_reason: accumulator.stop_reason(),
         error_message: accumulator.error_message().map(|s| s.to_string()),
@@ -853,6 +1270,54 @@ async fn run_llm_stream(
         accumulator.stop_reason(),
         accumulator.unresolved_tool_call_count(),
     ))
+}
+
+fn resolve_fallback_models(state: &AgentState, config: &AgentLoopConfig) -> Vec<Model> {
+    let mut models = vec![state.model.clone()];
+    for model_id in &config.provider_fallback_chain {
+        if let Some(found) = state.available_models.iter().find(|m| &m.id == model_id) {
+            models.push(found.clone());
+        }
+    }
+    models
+}
+
+fn breaker_retry_in_ms(key: &str, config: &AgentLoopConfig) -> Option<u64> {
+    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
+    let state = guard
+        .entry(key.to_string())
+        .or_insert_with(BreakerState::new);
+    let opened_at = state.opened_at?;
+    let elapsed = opened_at.elapsed().as_millis() as u64;
+    if elapsed >= config.provider_circuit_breaker.open_cooldown_ms {
+        state.opened_at = None;
+        None
+    } else {
+        Some(config.provider_circuit_breaker.open_cooldown_ms - elapsed)
+    }
+}
+
+fn breaker_record_success(key: &str) {
+    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
+    let state = guard
+        .entry(key.to_string())
+        .or_insert_with(BreakerState::new);
+    state.consecutive_failures = 0;
+    state.opened_at = None;
+}
+
+fn breaker_record_failure(key: &str, class: ErrorClass, config: &AgentLoopConfig) {
+    if !matches!(class, ErrorClass::Transient) {
+        return;
+    }
+    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
+    let state = guard
+        .entry(key.to_string())
+        .or_insert_with(BreakerState::new);
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    if state.consecutive_failures >= config.provider_circuit_breaker.failure_threshold {
+        state.opened_at = Some(Instant::now());
+    }
 }
 
 /// Build the LLM Context from the current agent state, with optional
@@ -1098,6 +1563,12 @@ mod tests {
     }
 
     #[test]
+    fn infer_intent_treats_validation_review_as_inspection() {
+        let intent = infer_intent("Validate the current changes and review for inconsistencies.");
+        assert_eq!(intent, AgentIntent::Inspect);
+    }
+
+    #[test]
     fn token_sequence_matching_requires_boundaries() {
         let tokens = tokenize_words("providers openai_compat");
         assert!(!contains_token_sequence(&tokens, &["pr"]));
@@ -1110,26 +1581,110 @@ mod tests {
             name: "bash".into(),
             arguments: serde_json::json!({"command":"sed -n '1,20p' Cargo.toml && git show HEAD~1"}),
         };
-        assert!(is_read_only_tool_call(&tc));
+        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
+        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
     }
 
     #[test]
-    fn read_only_tool_call_rejects_mutating_git_commands() {
+    fn command_policy_allows_mode_mismatched_git_commands() {
         let tc = ToolCall {
             id: "1".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"git commit -m test"}),
         };
-        assert!(!is_read_only_tool_call(&tc));
+        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
+        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
     }
 
     #[test]
-    fn read_only_tool_call_rejects_sed_in_place() {
+    fn command_policy_allows_mode_mismatched_sed_in_place() {
         let tc = ToolCall {
             id: "1".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"sed -i '' 's/a/b/g' file.txt"}),
         };
-        assert!(!is_read_only_tool_call(&tc));
+        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
+        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
+    }
+
+    #[test]
+    fn parse_mode_hint_detects_known_hints() {
+        assert_eq!(
+            parse_mode_hint("please run mode:inspect now"),
+            Some(TurnMode::Inspect)
+        );
+        assert_eq!(
+            parse_mode_hint("system says mode:analyze"),
+            Some(TurnMode::AnalyzeOnly)
+        );
+        assert_eq!(parse_mode_hint("mode:plan"), Some(TurnMode::PlanOnly));
+        assert_eq!(parse_mode_hint("no hint"), None);
+    }
+
+    #[test]
+    fn user_authorizes_action_classes() {
+        assert!(user_authorizes_action_class(
+            "please commit these changes",
+            command_policy::AuthorizationClass::Commit
+        ));
+        assert!(!user_authorizes_action_class(
+            "review this diff only",
+            command_policy::AuthorizationClass::Commit
+        ));
+        assert!(user_authorizes_action_class(
+            "install dependencies and run tests",
+            command_policy::AuthorizationClass::DependencyMutation
+        ));
+        assert!(!user_authorizes_action_class(
+            "inspect the architecture",
+            command_policy::AuthorizationClass::FileMutation
+        ));
+        assert!(user_authorizes_action_class(
+            "fix and update the implementation",
+            command_policy::AuthorizationClass::FileMutation
+        ));
+    }
+
+    #[test]
+    fn user_authorization_prompt_matrix_ambiguous_cases() {
+        let cases = [
+            (
+                "check and fix if needed",
+                command_policy::AuthorizationClass::FileMutation,
+                true,
+            ),
+            (
+                "prepare a commit message but do not commit",
+                command_policy::AuthorizationClass::Commit,
+                false,
+            ),
+            (
+                "inspect and summarize only; do not modify files",
+                command_policy::AuthorizationClass::FileMutation,
+                false,
+            ),
+            (
+                "run install only if missing and then test",
+                command_policy::AuthorizationClass::DependencyMutation,
+                true,
+            ),
+            (
+                "review the diff and mention git branch status",
+                command_policy::AuthorizationClass::VcsMutation,
+                true,
+            ),
+            (
+                "analyze architecture and provide recommendations",
+                command_policy::AuthorizationClass::DependencyMutation,
+                false,
+            ),
+        ];
+        for (prompt, class, expected) in cases {
+            assert_eq!(
+                user_authorizes_action_class(prompt, class),
+                expected,
+                "prompt='{prompt}' class={class:?}"
+            );
+        }
     }
 }

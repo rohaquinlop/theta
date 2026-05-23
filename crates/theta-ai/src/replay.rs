@@ -11,6 +11,7 @@ pub struct ReplaySanitizationStats {
     pub dropped_assistant_messages: u32,
     pub synthesized_tool_results: u32,
     pub normalized_tool_call_ids: u32,
+    pub deduped_tool_results: u32,
 }
 
 impl ReplaySanitizationStats {
@@ -18,6 +19,7 @@ impl ReplaySanitizationStats {
         self.dropped_assistant_messages > 0
             || self.synthesized_tool_results > 0
             || self.normalized_tool_call_ids > 0
+            || self.deduped_tool_results > 0
     }
 }
 
@@ -214,8 +216,11 @@ pub fn sanitize_messages_for_replay(
                     .iter()
                     .any(|(id, _, _)| id == tool_call_id)
                 {
-                    existing_results.insert(tool_call_id.clone());
-                    out.push(msg);
+                    if existing_results.insert(tool_call_id.clone()) {
+                        out.push(msg);
+                    } else {
+                        stats.deduped_tool_results += 1;
+                    }
                 }
             }
             Message::User { .. } => {
@@ -313,5 +318,50 @@ mod tests {
             !out.iter().any(|m| matches!(m, Message::ToolResult { .. })),
             "orphan tool result should be dropped when parent assistant tool call is removed"
         );
+    }
+
+    #[test]
+    fn dedupes_duplicate_tool_results_for_same_pending_call() {
+        let model = openai_model();
+        let messages = vec![
+            Message::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                }],
+                api: Some(Api::OpenAiCompletions),
+                provider: Some(Provider::OpenAI),
+                model: Some("gpt-5.5".into()),
+                usage: None,
+                stop_reason: Some(StopReason::ToolUse),
+                error_message: None,
+                timestamp: 1,
+            },
+            Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentBlock::text("done-1")],
+                details: None,
+                is_error: false,
+                timestamp: 2,
+            },
+            Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentBlock::text("done-2")],
+                details: None,
+                is_error: false,
+                timestamp: 3,
+            },
+        ];
+
+        let (out, stats) = sanitize_messages_for_replay(&messages, &model);
+        let tool_results = out
+            .iter()
+            .filter(|m| matches!(m, Message::ToolResult { .. }))
+            .count();
+        assert_eq!(tool_results, 1);
+        assert_eq!(stats.deduped_tool_results, 1);
     }
 }

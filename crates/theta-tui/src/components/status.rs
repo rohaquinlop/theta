@@ -18,6 +18,8 @@ pub struct StatusBar {
     pub thinking: String,
     pub agent_state: String,
     pub detail: String,
+    pub last_end_reason: String,
+    pub last_turn_decision: String,
     pub turn_index: u32,
     pub show_diagnostics: bool,
     /// Context token percentage (0-100) from last API call.
@@ -53,6 +55,8 @@ impl StatusBar {
             thinking: String::new(),
             agent_state: String::new(),
             detail: String::new(),
+            last_end_reason: String::new(),
+            last_turn_decision: String::new(),
             turn_index: 0,
             show_diagnostics: false,
             ctx_pct: 0,
@@ -107,6 +111,7 @@ impl Component for StatusBar {
         // Build the agent state badge (right-aligned).
         let state_color = if self.agent_state.starts_with("error")
             || self.agent_state.starts_with("tool error")
+            || self.agent_state == "Failed"
         {
             self.theme.error
         } else if self.agent_state.starts_with("streaming")
@@ -114,6 +119,10 @@ impl Component for StatusBar {
             || self.agent_state.starts_with("tool")
             || self.agent_state.starts_with("compacting")
             || self.agent_state.starts_with("retrying")
+            || self.agent_state == "ModelCall"
+            || self.agent_state == "ToolExec"
+            || self.agent_state == "Retrying"
+            || self.agent_state == "Blocked"
         {
             self.theme.warning
         } else {
@@ -391,14 +400,20 @@ fn join_parts(parts: &[String]) -> String {
 }
 
 fn mode_from_state(state: &str) -> &str {
-    if state.starts_with("retrying") {
+    if state == "Retrying" || state.starts_with("retrying") {
         "retry"
-    } else if state.starts_with("tool") {
+    } else if state == "ToolExec" || state.starts_with("tool") {
         "tool"
     } else if state.starts_with("thinking") {
         "thinking"
-    } else if state.starts_with("streaming") {
+    } else if state == "ModelCall" || state.starts_with("streaming") {
         "stream"
+    } else if state == "Blocked" {
+        "blocked"
+    } else if state == "Completed" {
+        "done"
+    } else if state == "Failed" {
+        "failed"
     } else if state.starts_with("compacting") {
         "compact"
     } else if state.starts_with("error") {

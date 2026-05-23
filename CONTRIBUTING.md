@@ -17,6 +17,7 @@ Keep Theta small and terminal-first.
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
+cargo test -p theta-agent-core --test policy_scenario_matrix
 ```
 
 Stage only files you changed. Do not commit generated or unrelated files.

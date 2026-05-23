@@ -153,9 +153,15 @@ async fn prompt(
     handle
         .await?
         .map_err(|e| anyhow::anyhow!("agent error: {e}"))?;
+    let run_report = agent
+        .last_run_report()
+        .await
+        .map(serde_json::to_value)
+        .transpose()?;
     Ok(serde_json::json!({
         "text": output,
         "tool_errors": tool_errors,
+        "run_report": run_report,
     }))
 }
 

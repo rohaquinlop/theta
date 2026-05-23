@@ -2,7 +2,7 @@
 
 use theta_ai::Message;
 
-use crate::types::ToolResult;
+use crate::types::{SafetyDecisionKind, ToolResult, TurnEndReason, TurnMode};
 
 /// Events emitted by the agent during execution.
 /// Consumers (TUI, RPC, etc.) subscribe to these.
@@ -16,9 +16,22 @@ pub enum AgentEvent {
 
     /// A turn (one LLM call + tool execution) is beginning.
     TurnStart { turn_index: u32 },
+    /// Turn mode was resolved deterministically at turn start.
+    TurnModeResolved {
+        turn_index: u32,
+        mode: TurnMode,
+        source: String,
+    },
 
     /// A turn has completed.
     TurnEnd { turn_index: u32 },
+    /// Canonical terminal reason for a turn.
+    TurnTerminated {
+        reason: TurnEndReason,
+        details: String,
+        turn: u32,
+        round: u32,
+    },
 
     /// An assistant message is beginning to stream.
     MessageStart,
@@ -81,6 +94,7 @@ pub enum AgentEvent {
         dropped_assistant_messages: u32,
         synthesized_tool_results: u32,
         normalized_tool_call_ids: u32,
+        deduped_tool_results: u32,
     },
     /// Structured turn decision emitted by the runtime loop.
     TurnDecision {
@@ -88,6 +102,27 @@ pub enum AgentEvent {
         details: String,
         turn: u32,
         round: u32,
+    },
+    /// Command/tool safety policy decision.
+    SafetyDecision {
+        decision: SafetyDecisionKind,
+        mode: TurnMode,
+        tool_name: String,
+        details: String,
+    },
+    /// Tool watchdog detected no progress for configured interval.
+    ToolWatchdogWarning {
+        tool_call_id: String,
+        tool_name: String,
+        stalled_ms: u64,
+    },
+    /// Circuit breaker prevented provider/model call.
+    ProviderCircuitOpen { key: String, retry_in_ms: u64 },
+    /// Fallback model/provider selected after failure.
+    ProviderFallback {
+        from_model: String,
+        to_model: String,
+        reason: String,
     },
 }
 

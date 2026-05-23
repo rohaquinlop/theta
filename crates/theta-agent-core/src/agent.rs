@@ -18,7 +18,7 @@ use crate::events::AgentEvent;
 use crate::hooks::{Hooks, NoopHooks};
 use crate::loop_mod;
 use crate::state::AgentState;
-use crate::types::{AgentLoopConfig, AgentTool};
+use crate::types::{AgentLoopConfig, AgentTool, RunReport};
 
 /// The agent: holds all state and orchestrates LLM interaction.
 pub struct Agent {
@@ -66,8 +66,9 @@ impl Agent {
         provider: Arc<ProviderRegistry>,
         model_catalog: Arc<dyn ModelCatalog>,
     ) -> Self {
+        let available_models = model_catalog.list().into_iter().cloned().collect();
         Self {
-            state: RwLock::new(AgentState::new(model)),
+            state: RwLock::new(AgentState::new(model, available_models)),
             event_tx: broadcast::channel(8192).0,
             provider,
             model_catalog,
@@ -155,6 +156,12 @@ impl Agent {
         state.thinking_level = level;
     }
 
+    /// Set or clear an explicit runtime turn-mode override.
+    pub async fn set_turn_mode_override(&self, mode: Option<crate::types::TurnMode>) {
+        let mut state = self.state.write().await;
+        state.turn_mode_override = mode;
+    }
+
     /// Load past messages from a session (for continue/resume).
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
@@ -165,6 +172,7 @@ impl Agent {
                 dropped_assistant_messages: stats.dropped_assistant_messages,
                 synthesized_tool_results: stats.synthesized_tool_results,
                 normalized_tool_call_ids: stats.normalized_tool_call_ids,
+                deduped_tool_results: stats.deduped_tool_results,
             });
         }
     }
@@ -182,6 +190,11 @@ impl Agent {
             state.token_count(),
             state.last_real_input_tokens(),
         )
+    }
+
+    /// Last completed run report, if available.
+    pub async fn last_run_report(&self) -> Option<RunReport> {
+        self.state.read().await.last_run_report.clone()
     }
 
     /// Manual compaction: trim old messages without running a loop.

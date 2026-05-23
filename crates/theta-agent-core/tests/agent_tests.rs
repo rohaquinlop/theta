@@ -24,7 +24,7 @@ use theta_ai::{LlmProvider, ThetaError};
 /// A mock LLM provider that returns pre-configured event sequences.
 struct MockProvider {
     /// Events to emit per call. Each stream() call pops the first entry.
-    events: std::sync::Mutex<Vec<Vec<AssistantMessageEvent>>>,
+    events: std::sync::Mutex<Vec<Result<Vec<AssistantMessageEvent>, ThetaError>>>,
     /// Track call count.
     call_count: std::sync::atomic::AtomicU32,
     /// Optional: block until released (for testing concurrency).
@@ -33,6 +33,14 @@ struct MockProvider {
 
 impl MockProvider {
     fn new(responses: Vec<Vec<AssistantMessageEvent>>) -> Self {
+        Self {
+            events: std::sync::Mutex::new(responses.into_iter().map(Ok).collect()),
+            call_count: std::sync::atomic::AtomicU32::new(0),
+            block_until_released: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn new_with_results(responses: Vec<Result<Vec<AssistantMessageEvent>, ThetaError>>) -> Self {
         Self {
             events: std::sync::Mutex::new(responses),
             call_count: std::sync::atomic::AtomicU32::new(0),
@@ -73,16 +81,18 @@ impl LlmProvider for MockProvider {
         let response = {
             let mut events = self.events.lock().unwrap();
             if events.is_empty() {
-                vec![AssistantMessageEvent::Done {
+                Ok(vec![AssistantMessageEvent::Done {
                     stop_reason: StopReason::Stop,
                     usage: None,
-                }]
+                }])
             } else {
                 events.remove(0)
             }
         };
-
-        Ok(Box::pin(futures::stream::iter(response)))
+        match response {
+            Ok(events) => Ok(Box::pin(futures::stream::iter(events))),
+            Err(e) => Err(e),
+        }
     }
 
     async fn stream_simple<'a>(
@@ -183,19 +193,31 @@ fn test_model() -> Model {
     }
 }
 
+fn test_model_with_id(id: &str) -> Model {
+    let mut m = test_model();
+    m.id = id.to_string();
+    m.name = id.to_string();
+    m
+}
+
 struct TestModelCatalog {
-    model: Model,
+    models: Vec<Model>,
 }
 
 impl ModelCatalog for TestModelCatalog {
-    fn find(&self, _provider: ProviderKind, _model_id: &str) -> Option<&Model> {
-        Some(&self.model)
+    fn find(&self, provider: ProviderKind, model_id: &str) -> Option<&Model> {
+        self.models
+            .iter()
+            .find(|m| m.provider == provider && m.id == model_id)
     }
     fn list(&self) -> Vec<&Model> {
-        vec![&self.model]
+        self.models.iter().collect()
     }
-    fn list_by_provider(&self, _provider: ProviderKind) -> Vec<&Model> {
-        vec![&self.model]
+    fn list_by_provider(&self, provider: ProviderKind) -> Vec<&Model> {
+        self.models
+            .iter()
+            .filter(|m| m.provider == provider)
+            .collect()
     }
 }
 
@@ -220,7 +242,7 @@ async fn test_agent_text_response() {
     ]]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -277,7 +299,7 @@ async fn test_agent_tool_loop() {
 
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -333,7 +355,7 @@ async fn test_agent_retries_empty_assistant_turn() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -400,7 +422,7 @@ async fn test_agent_retries_when_execution_promised_without_tool_calls() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let mut config = AgentLoopConfig::default();
@@ -482,7 +504,7 @@ async fn test_agent_allows_long_progressive_tool_runs_without_round_cap() {
     let mock = MockProvider::new(responses);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -560,7 +582,7 @@ async fn test_agent_stops_repeated_identical_tool_call_loop() {
     let mock = MockProvider::new(responses);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Arc::new(Agent::new(model, registry, catalog));
@@ -617,6 +639,78 @@ async fn test_agent_stops_repeated_identical_tool_call_loop() {
 }
 
 #[tokio::test]
+async fn test_duplicate_tool_call_id_in_turn_is_deduped() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "dup_call".into(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("dup_call", r#"{"input":"first"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "dup_call".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "dup_call".into(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("dup_call", r#"{"input":"second"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "dup_call".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("done"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+
+    agent
+        .prompt(vec![ContentBlock::text("implement this")])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    let dup_results = state
+        .messages
+        .iter()
+        .filter(
+            |m| matches!(m, Message::ToolResult { tool_call_id, .. } if tool_call_id == "dup_call"),
+        )
+        .count();
+    assert_eq!(
+        dup_results, 1,
+        "duplicate tool_call_id should execute once per turn"
+    );
+}
+
+#[tokio::test]
 async fn test_action_turn_retries_without_promise_when_no_tools_and_no_blocker() {
     let model = test_model();
     let mock = MockProvider::new(vec![
@@ -651,7 +745,7 @@ async fn test_action_turn_retries_without_promise_when_no_tools_and_no_blocker()
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -699,7 +793,7 @@ async fn test_action_turn_with_explicit_blocker_does_not_retry() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -756,7 +850,7 @@ async fn test_inspection_turn_retries_and_executes_read_only_tool() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -821,7 +915,7 @@ async fn test_commit_turn_retries_and_executes_git_bash_tool() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -883,7 +977,7 @@ async fn test_analyze_only_turn_retries_and_executes_read_only_tool() {
     ]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -926,7 +1020,7 @@ async fn test_agent_abort() {
 
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Arc::new(Agent::new(model, registry, catalog));
@@ -962,7 +1056,7 @@ async fn test_agent_already_running() {
 
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Arc::new(Agent::new(model, registry, catalog));
@@ -1010,7 +1104,7 @@ async fn test_agent_follow_up() {
 
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Arc::new(Agent::new(model, registry, catalog));
@@ -1057,7 +1151,7 @@ async fn test_agent_event_subscription() {
     ]]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -1114,7 +1208,7 @@ async fn test_agent_state_transcript() {
     ]]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -1174,7 +1268,7 @@ async fn test_agent_steer() {
 
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Arc::new(Agent::new(model, registry, catalog));
@@ -1232,7 +1326,7 @@ async fn test_manual_compaction_trims_messages() {
     ]]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -1286,7 +1380,7 @@ async fn test_context_stats_returns_token_counts() {
     ]]);
     let registry = make_registry(mock);
     let catalog = Arc::new(TestModelCatalog {
-        model: model.clone(),
+        models: vec![model.clone()],
     });
 
     let agent = Agent::new(model, registry, catalog);
@@ -1298,4 +1392,220 @@ async fn test_context_stats_returns_token_counts() {
     let (msg_count, token_count, _real) = agent.context_stats().await;
     assert_eq!(msg_count, 2);
     assert!(token_count > 0, "token count should be positive");
+}
+
+#[tokio::test]
+async fn test_run_report_events_include_standard_fields() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_std_1".into(),
+                name: "mock".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("call_std_1", r#"{"input":"x"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_std_1".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("done"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "mock",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+
+    agent
+        .prompt(vec![ContentBlock::text("implement this")])
+        .await
+        .unwrap();
+
+    let report = agent
+        .last_run_report()
+        .await
+        .expect("run report should exist");
+    assert!(!report.events.is_empty());
+    for ev in &report.events {
+        assert!(
+            ev.fields.contains_key("run_id"),
+            "missing run_id for {}",
+            ev.kind
+        );
+        assert!(
+            ev.fields.contains_key("model"),
+            "missing model for {}",
+            ev.kind
+        );
+        assert!(
+            ev.fields.contains_key("provider"),
+            "missing provider for {}",
+            ev.kind
+        );
+    }
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|ev| ev.kind == "tool_execution_end")
+    );
+}
+
+#[tokio::test]
+async fn test_provider_fallback_chain_uses_next_model() {
+    let primary = test_model_with_id("primary-model");
+    let fallback = test_model_with_id("fallback-model");
+    let mock = MockProvider::new_with_results(vec![
+        Err(ThetaError::ApiError {
+            status: 503,
+            message: "temporary outage".to_string(),
+            retry_after_ms: None,
+        }),
+        Ok(vec![
+            AssistantMessageEvent::text_delta("Recovered on fallback."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]),
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![primary.clone(), fallback.clone()],
+    });
+
+    let mut agent = Agent::new(primary, registry, catalog);
+    let mut cfg = AgentLoopConfig::default();
+    cfg.retry.max_retries = 0;
+    cfg.provider_fallback_chain = vec![fallback.id.clone()];
+    agent.set_config(cfg);
+
+    let mut rx = agent.subscribe();
+    agent
+        .prompt(vec![ContentBlock::text("please execute")])
+        .await
+        .unwrap();
+
+    let mut saw_fallback_event = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ProviderFallback { .. }) {
+            saw_fallback_event = true;
+        }
+    }
+    assert!(
+        saw_fallback_event,
+        "expected explicit provider fallback event"
+    );
+
+    let state = agent.state().await;
+    let used_fallback = state.messages.iter().any(|m| {
+        matches!(
+            m,
+            Message::Assistant {
+                model: Some(model_id),
+                ..
+            } if model_id == &fallback.id
+        )
+    });
+    assert!(
+        used_fallback,
+        "assistant message should record fallback model"
+    );
+}
+
+#[tokio::test]
+async fn test_circuit_breaker_opens_and_emits_event() {
+    let model = test_model_with_id("circuit-model");
+    let mock = MockProvider::new_with_results(vec![
+        Err(ThetaError::ApiError {
+            status: 503,
+            message: "transient-1".to_string(),
+            retry_after_ms: None,
+        }),
+        Err(ThetaError::ApiError {
+            status: 503,
+            message: "transient-2".to_string(),
+            retry_after_ms: None,
+        }),
+        Err(ThetaError::ApiError {
+            status: 503,
+            message: "transient-3".to_string(),
+            retry_after_ms: None,
+        }),
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+    let mut agent = Agent::new(model, registry, catalog);
+    let mut cfg = AgentLoopConfig::default();
+    cfg.retry.max_retries = 0;
+    cfg.provider_circuit_breaker.failure_threshold = 1;
+    cfg.provider_circuit_breaker.open_cooldown_ms = 60_000;
+    agent.set_config(cfg);
+
+    let _ = agent.prompt(vec![ContentBlock::text("attempt one")]).await;
+    let mut rx = agent.subscribe();
+    let _ = agent.prompt(vec![ContentBlock::text("attempt two")]).await;
+
+    let mut saw_circuit_open = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ProviderCircuitOpen { .. }) {
+            saw_circuit_open = true;
+        }
+    }
+    assert!(
+        saw_circuit_open,
+        "expected circuit-open event after repeated transient failures"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_mode_resolver_uses_runtime_override_source() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![vec![
+        AssistantMessageEvent::text_delta("ok"),
+        AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+    let agent = Agent::new(model, registry, catalog);
+    agent.set_turn_mode_override(Some(TurnMode::Inspect)).await;
+
+    let mut rx = agent.subscribe();
+    agent
+        .prompt(vec![ContentBlock::text("implement this")])
+        .await
+        .unwrap();
+
+    let mut saw_override_source = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::TurnModeResolved { source, .. } = event
+            && source == "runtime_override"
+        {
+            saw_override_source = true;
+        }
+    }
+    assert!(saw_override_source, "expected runtime_override mode source");
 }
