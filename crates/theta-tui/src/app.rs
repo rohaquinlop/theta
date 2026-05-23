@@ -212,7 +212,7 @@ pub struct App {
     /// Send structured actions back to the interactive handler.
     pub action_tx: mpsc::UnboundedSender<TuiAction>,
     /// Receive TUI events from the agent.
-    pub event_rx: mpsc::Receiver<TuiEvent>,
+    pub event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     #[allow(dead_code)]
     theme: Theme,
     theme_idx: usize,
@@ -278,7 +278,7 @@ impl App {
         models: Vec<ModelEntry>,
         commands: Vec<CommandEntry>,
         working_dir: std::path::PathBuf,
-        event_rx: mpsc::Receiver<TuiEvent>,
+        event_rx: mpsc::UnboundedReceiver<TuiEvent>,
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
     ) -> Self {
@@ -354,7 +354,7 @@ impl App {
         let mut reader = EventStream::new();
         // Keep the UI responsive and animate status spinner even when no new
         // chat text arrives.
-        let mut redraw_tick = tokio::time::interval(Duration::from_millis(80));
+        let mut redraw_tick = tokio::time::interval(Duration::from_millis(33));
         redraw_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut needs_render = true;
 
@@ -377,9 +377,9 @@ impl App {
                 Some(event) = self.event_rx.recv() => {
                     self.handle_agent_event(event);
                     needs_render = true;
-                    // Drain remaining events in the same loop turn to avoid
-                    // channel backlog under high event throughput.
-                    for _ in 0..63 {
+                    // Drain a small batch per frame. This keeps high-volume
+                    // text streams responsive without starving terminal draws.
+                    for _ in 0..15 {
                         match self.event_rx.try_recv() {
                             Ok(next) => {
                                 self.handle_agent_event(next);
@@ -1293,14 +1293,11 @@ impl App {
                 self.retries_in_turn = self.retries_in_turn.max(attempt);
                 self.status.set_agent_state("Retrying");
                 self.status
-                    .set_detail(&format!("attempt {attempt} in {delay_ms}ms"));
+                    .set_detail(&format!("provider retry {attempt} in {delay_ms}ms"));
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!(
-                        "Retrying {} ({}/1): {}",
-                        self.turn_intent,
-                        attempt,
-                        retry_reason_hint(&self.turn_intent)
+                        "Retrying provider request (attempt {attempt}, waiting {delay_ms}ms)"
                     ),
                     tool_name: None,
                     is_streaming: false,
@@ -1483,16 +1480,6 @@ fn infer_intent_from_error(msg: &str) -> &'static str {
         "action"
     } else {
         "chat"
-    }
-}
-
-fn retry_reason_hint(intent: &str) -> &'static str {
-    match intent {
-        "inspection" => "no inspection tool call",
-        "git" => "no git tool call",
-        "validation" => "validation command not run",
-        "action" => "no action tool call",
-        _ => "missing tool call",
     }
 }
 

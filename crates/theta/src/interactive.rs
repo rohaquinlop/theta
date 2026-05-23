@@ -88,7 +88,7 @@ pub async fn run_tui(
 
     // Create channels between TUI and agent bridge.
     let (event_tx_raw, mut event_rx_raw) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = mpsc::channel(1024);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (message_tx, mut message_rx) = mpsc::unbounded_channel::<String>();
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
@@ -256,7 +256,7 @@ pub async fn run_tui(
                 crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
             if let Err(e) = agent.prompt(blocks).await {
                 tracing::error!("agent prompt failed: {e}");
-                let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));
+                let _ = msg_event_tx.send(TuiEvent::Error(format_error_chain(&e)));
                 let _ = session_mgr
                     .mark_run_completed(&sid, Some("ProviderFailure"))
                     .await;
@@ -400,7 +400,7 @@ pub async fn run_tui(
         app.send_initial_message(msg);
     }
 
-    // Bounded backpressure bridge: preserve non-progress events; coalesce progress events.
+    // Lossless bridge: preserve semantic events; coalesce noisy progress events.
     tokio::spawn(async move {
         let mut pending_progress: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -414,25 +414,23 @@ pub async fn run_tui(
                 evt @ (TuiEvent::TurnStart | TuiEvent::TurnEnd { .. } | TuiEvent::AgentEnd) => {
                     if !pending_progress.is_empty() {
                         for (name, message) in pending_progress.drain() {
-                            let _ = event_tx.try_send(TuiEvent::ToolProgress { name, message });
+                            let _ = event_tx.send(TuiEvent::ToolProgress { name, message });
                         }
                     }
-                    let _ = event_tx.send(evt).await;
+                    let _ = event_tx.send(evt);
                 }
                 evt => {
                     if !pending_progress.is_empty() {
                         let pending = pending_progress.len();
                         for (name, message) in pending_progress.drain() {
-                            let _ = event_tx.try_send(TuiEvent::ToolProgress { name, message });
+                            let _ = event_tx.send(TuiEvent::ToolProgress { name, message });
                         }
                         tracing::debug!(
                             pending_count = pending,
                             "forwarded coalesced tui tool progress"
                         );
                     }
-                    if event_tx.try_send(evt).is_err() {
-                        tracing::debug!("dropping tui event due to full bounded queue");
-                    }
+                    let _ = event_tx.send(evt);
                 }
             }
         }
@@ -1492,6 +1490,17 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(err) = source {
+        out.push_str("\ncaused by: ");
+        out.push_str(&err.to_string());
+        source = err.source();
+    }
+    out
 }
 
 fn expand_skill_message(message: &str, skills: &[crate::skills::Skill]) -> String {
