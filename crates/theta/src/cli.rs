@@ -23,7 +23,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub model: Option<String>,
 
-    /// Thinking level (off, low, medium, high).
+    /// Thinking level (off, minimal, low, medium, high, xhigh).
     #[arg(short = 't', long, global = true)]
     pub thinking: Option<String>,
 

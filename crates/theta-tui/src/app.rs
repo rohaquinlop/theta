@@ -18,6 +18,7 @@ use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
 use crate::components::status::StatusBar;
+use crate::components::thinking_selector::ThinkingSelector;
 use crate::components::tree_selector::{TreeFilter, TreeSelector};
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
@@ -70,6 +71,8 @@ pub enum TuiAction {
     ShowSessionInfo,
     /// Show latest compact run timeline report.
     ShowRunTimeline,
+    /// Request valid thinking levels for the current model.
+    ShowThinkingSelector,
     /// Manually compact context now (even if under the auto-compaction threshold).
     CompactContext,
 }
@@ -79,6 +82,8 @@ pub enum TuiAction {
 pub enum TuiEvent {
     TextDelta(String),
     ThinkingDelta(String),
+    ThinkingStart,
+    ThinkingEnd,
     ToolCallPrepared {
         name: String,
         id: String,
@@ -166,6 +171,11 @@ pub enum TuiEvent {
         tokens: u32,
         pct: u32,
     },
+    /// Valid thinking levels for the current model.
+    ThinkingLevels {
+        levels: Vec<String>,
+        current: String,
+    },
 }
 
 /// Structured status-bar data from extensions (Rhai scripts).
@@ -210,6 +220,7 @@ pub struct App {
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
     tree_selector: TreeSelector,
+    thinking_selector: ThinkingSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
@@ -322,6 +333,7 @@ impl App {
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
             tree_selector: TreeSelector::new(theme.clone()),
+            thinking_selector: ThinkingSelector::new(theme.clone()),
             commands,
             skill_commands,
             keybindings: default_bindings(),
@@ -420,6 +432,10 @@ impl App {
         }
         self.tree_selector.render(area, frame);
         if self.tree_selector.visible {
+            return;
+        }
+        self.thinking_selector.render(area, frame);
+        if self.thinking_selector.visible {
             return;
         }
 
@@ -553,6 +569,38 @@ impl App {
                     }
                     crossterm::event::KeyCode::Char(c) => {
                         self.model_selector.push_query(c);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Thinking selector mode — handle keys exclusively.
+        if self.thinking_selector.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.thinking_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(level) = self.thinking_selector.selected_level() {
+                            self.status.thinking = level.to_string();
+                            let _ = self.action_tx.send(TuiAction::SetThinking(level.to_string()));
+                            self.chat.add_message(ChatMessage {
+                                role: ChatRole::System,
+                                text: format!("Thinking level set to {level}"),
+                                tool_name: None,
+                                is_streaming: false,
+                            });
+                        }
+                        self.thinking_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.thinking_selector.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.thinking_selector.select_down();
                     }
                     _ => {}
                 }
@@ -791,7 +839,7 @@ impl App {
                 let help_text = [
                     "Slash commands:",
                     "  /model          Open model picker (available models)",
-                    "  /thinking <lvl> Set thinking level (off, low, medium, high)",
+                    "  /thinking [lvl] Open selector or set thinking level (off/minimal/low/medium/high/xhigh)",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
                     "  /status         Show live runtime status snapshot",
@@ -837,12 +885,19 @@ impl App {
             }
             "thinking" => {
                 if arg.is_empty() {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Usage: /thinking <off|low|medium|high>".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
+                    // No arg — open the modal selector.
+                    if self.thinking_selector.has_levels() {
+                        self.thinking_selector.visible = true;
+                    } else {
+                        // Ask the handler for valid levels.
+                        let _ = self.action_tx.send(TuiAction::ShowThinkingSelector);
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::System,
+                            text: "Loading thinking levels...".into(),
+                            tool_name: None,
+                            is_streaming: false,
+                        });
+                    }
                 } else {
                     let _ = self.action_tx.send(TuiAction::SetThinking(arg.to_string()));
                     self.status.thinking = arg.to_string();
@@ -1140,15 +1195,26 @@ impl App {
                 self.status.set_detail("assistant responding");
             }
             TuiEvent::ThinkingDelta(text) => {
-                let summary = text.lines().next().unwrap_or("").trim();
                 self.status.set_agent_state("thinking");
                 if self.show_thinking {
                     self.chat.update_last(&text, ChatRole::Thinking, true);
-                }
-                if summary.is_empty() {
-                    self.status.set_detail("");
+                    let summary = text.lines().next().unwrap_or("").trim();
+                    if !summary.is_empty() {
+                        self.status.set_detail(&truncate_status_text(summary, 80));
+                    }
                 } else {
-                    self.status.set_detail(&truncate_status_text(summary, 80));
+                    self.status.set_detail("thinking...");
+                }
+            }
+            TuiEvent::ThinkingStart => {
+                self.status.set_agent_state("thinking");
+                if self.show_thinking {
+                    self.chat.update_last("", ChatRole::Thinking, true);
+                }
+            }
+            TuiEvent::ThinkingEnd => {
+                if self.show_thinking {
+                    self.chat.finish_last(ChatRole::Thinking);
                 }
             }
             TuiEvent::ToolCallPrepared { name, .. } => {
@@ -1476,6 +1542,32 @@ impl App {
             TuiEvent::ContextTokens { tokens, pct } => {
                 self.status.context_tokens = tokens;
                 self.status.ctx_pct = pct;
+            }
+            TuiEvent::ThinkingLevels { levels, current } => {
+                let entries = levels
+                    .into_iter()
+                    .map(|id| {
+                        let label = match id.as_str() {
+                            "off" => "Disabled".to_string(),
+                            "minimal" => "Minimal".to_string(),
+                            "low" => "Low".to_string(),
+                            "medium" => "Medium".to_string(),
+                            "high" => "High".to_string(),
+                            "xhigh" => "X-High (Max)".to_string(),
+                            _ => id.clone(),
+                        };
+                        crate::components::thinking_selector::ThinkingLevelEntry {
+                            id,
+                            label,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let show_selector = self.thinking_selector.visible;
+                self.thinking_selector.show(entries, Some(&current));
+                // If selector was already visible, keep it visible after update.
+                if !show_selector {
+                    self.thinking_selector.hide();
+                }
             }
         }
     }

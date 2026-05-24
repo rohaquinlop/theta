@@ -167,6 +167,14 @@ pub async fn run_tui(
             persisted.tool_progress_hz.max(1),
         );
 
+        // Send initial valid thinking levels for the model.
+        let levels = compute_valid_thinking_levels(&model);
+        let tl = thinking_level_to_string(parse_thinking_level(thinking));
+        let _ = event_tx_raw.send(TuiEvent::ThinkingLevels {
+            levels,
+            current: tl,
+        });
+
         // Poll extension status rows — wait on notify from hook evaluations.
         // Reads the current agent from agent_cell so it works across agent
         // replacements (e.g. after login).
@@ -306,7 +314,7 @@ pub async fn run_tui(
         },
         CommandEntry {
             name: "thinking".into(),
-            description: "Set thinking level (off/low/medium/high)".into(),
+            description: "Set thinking level (off/minimal/low/medium/high/xhigh)".into(),
         },
         CommandEntry {
             name: "clear".into(),
@@ -450,7 +458,57 @@ async fn create_agent(
         agent.set_hooks(hooks);
     }
 
+    // Apply thinking level from settings.
+    let tl = parse_thinking_level(thinking);
+    agent.set_thinking_level(tl).await;
+
     Ok(agent)
+}
+
+/// Parse a thinking level string into a ThinkingLevel enum.
+fn parse_thinking_level(level: &str) -> theta_ai::ThinkingLevel {
+    match level.to_lowercase().as_str() {
+        "off" => theta_ai::ThinkingLevel::Off,
+        "minimal" => theta_ai::ThinkingLevel::Minimal,
+        "low" => theta_ai::ThinkingLevel::Low,
+        "medium" => theta_ai::ThinkingLevel::Medium,
+        "high" => theta_ai::ThinkingLevel::High,
+        "xhigh" => theta_ai::ThinkingLevel::XHigh,
+        _ => theta_ai::ThinkingLevel::Off,
+    }
+}
+
+/// Compute the list of valid thinking level strings for a model.
+fn compute_valid_thinking_levels(model: &theta_ai::Model) -> Vec<String> {
+    let all_levels = [
+        ("off", theta_ai::ThinkingLevel::Off),
+        ("minimal", theta_ai::ThinkingLevel::Minimal),
+        ("low", theta_ai::ThinkingLevel::Low),
+        ("medium", theta_ai::ThinkingLevel::Medium),
+        ("high", theta_ai::ThinkingLevel::High),
+        ("xhigh", theta_ai::ThinkingLevel::XHigh),
+    ];
+    all_levels
+        .into_iter()
+        .filter(|(_, level)| {
+            // Off is always valid; other levels need a mapping.
+            *level == theta_ai::ThinkingLevel::Off
+                || model.thinking_param(*level).is_some()
+        })
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Convert a ThinkingLevel to its string representation.
+fn thinking_level_to_string(level: theta_ai::ThinkingLevel) -> String {
+    match level {
+        theta_ai::ThinkingLevel::Off => "off".to_string(),
+        theta_ai::ThinkingLevel::Minimal => "minimal".to_string(),
+        theta_ai::ThinkingLevel::Low => "low".to_string(),
+        theta_ai::ThinkingLevel::Medium => "medium".to_string(),
+        theta_ai::ThinkingLevel::High => "high".to_string(),
+        theta_ai::ThinkingLevel::XHigh => "xhigh".to_string(),
+    }
 }
 
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
@@ -478,6 +536,12 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::ThinkingDelta { thinking }) => {
                     saw_thinking_delta = true;
                     let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
+                }
+                Ok(AgentEvent::ThinkingStart) => {
+                    let _ = event_tx.send(TuiEvent::ThinkingStart);
+                }
+                Ok(AgentEvent::ThinkingEnd) => {
+                    let _ = event_tx.send(TuiEvent::ThinkingEnd);
                 }
                 Ok(AgentEvent::ToolCallStart { id, name }) => {
                     // Forward LLM-side tool call preparation so the TUI can show
@@ -854,6 +918,7 @@ async fn handle_tui_action(
                 };
 
                 agent.set_api_key(m.provider, key);
+                let levels = compute_valid_thinking_levels(&m);
                 agent.set_model(m).await;
                 let blocks = build_system_prompt(working_dir, &model_id, None, None).await;
                 agent.set_system_prompt(blocks).await;
@@ -862,6 +927,13 @@ async fn handle_tui_action(
                 )));
                 let _ = event_tx.send(TuiEvent::ModelSwitched {
                     model: model_id.to_string(),
+                });
+                let state = agent.state().await;
+                let current_str = thinking_level_to_string(state.thinking_level);
+                drop(state);
+                let _ = event_tx.send(TuiEvent::ThinkingLevels {
+                    levels,
+                    current: current_str,
                 });
                 // Persist model preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
@@ -878,12 +950,14 @@ async fn handle_tui_action(
             };
             let tl = match level.to_lowercase().as_str() {
                 "off" => theta_ai::ThinkingLevel::Off,
+                "minimal" => theta_ai::ThinkingLevel::Minimal,
                 "low" => theta_ai::ThinkingLevel::Low,
                 "medium" => theta_ai::ThinkingLevel::Medium,
                 "high" => theta_ai::ThinkingLevel::High,
+                "xhigh" => theta_ai::ThinkingLevel::XHigh,
                 _ => {
                     let _ = event_tx.send(TuiEvent::Error(format!(
-                        "Invalid thinking level: {level}. Use off/low/medium/high"
+                        "Invalid thinking level: {level}. Use off/minimal/low/medium/high/xhigh"
                     )));
                     return;
                 }
@@ -893,6 +967,19 @@ async fn handle_tui_action(
             let mut s = crate::settings::load_settings().await;
             s.last_thinking = Some(level.to_string());
             crate::settings::save_settings(&s).await.ok();
+        }
+        TuiAction::ShowThinkingSelector => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+            let state = agent.state().await;
+            let levels = compute_valid_thinking_levels(&state.model);
+            let current_str = thinking_level_to_string(state.thinking_level);
+            let _ = event_tx.send(TuiEvent::ThinkingLevels {
+                levels,
+                current: current_str,
+            });
         }
         TuiAction::ForkSession => {
             if agent_cell.read().await.is_none() {

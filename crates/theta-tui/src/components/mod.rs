@@ -10,11 +10,13 @@ pub mod login_flow;
 pub mod model_selector;
 pub mod session_picker;
 pub mod status;
+pub mod thinking_selector;
 pub mod tree_selector;
 
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use model_selector::{ModelEntry, ModelSelector};
 pub use session_picker::{SessionInfo, SessionPicker};
+pub use thinking_selector::ThinkingSelector;
 
 /// A command or skill entry for autocomplete.
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub enum Action {
     ForkSession,
     ShowHelp,
     ShowModelSelector,
+    ShowThinkingSelector,
     CycleTheme,
     ShowTree,
     CopySelection(String),
