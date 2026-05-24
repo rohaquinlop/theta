@@ -254,7 +254,6 @@ async fn run_single_turn(
             ("source".to_string(), mode_source.to_string()),
         ],
     );
-
     // Inject any prepare-next-turn messages.
     let prepend = hooks.prepare_next_turn(state).await;
     for msg in prepend {
@@ -575,7 +574,6 @@ async fn run_single_turn(
 
                 if matches!(turn_mode, TurnMode::AnalyzeOnly | TurnMode::Inspect) {
                     let mut allowed = Vec::new();
-                    let latest_user_text = latest_user_text(state).unwrap_or_default();
                     for tc in &tool_calls {
                         let SafetyDecision { decision, details } =
                             command_policy::evaluate_tool_call(
@@ -583,26 +581,7 @@ async fn run_single_turn(
                                 tc,
                                 config.command_policy_strict,
                             );
-                        if decision == SafetyDecisionKind::Allowed
-                            && let Some(class) = command_policy::required_user_authorization(tc)
-                            && !user_authorizes_action_class(&latest_user_text, class)
-                        {
-                            let details = format!(
-                                "{class:?} blocked: user did not explicitly request this action in latest message"
-                            );
-                            let _ = event_tx.send(AgentEvent::SafetyDecision {
-                                decision: SafetyDecisionKind::Rejected,
-                                mode: turn_mode,
-                                tool_name: tc.name.clone(),
-                                details: details.clone(),
-                            });
-                            let _ = event_tx.send(AgentEvent::TurnDecision {
-                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
-                                details,
-                                turn: turn_index,
-                                round: tool_round,
-                            });
-                        } else if decision == SafetyDecisionKind::Allowed {
+                        if decision == SafetyDecisionKind::Allowed {
                             let _ = event_tx.send(AgentEvent::SafetyDecision {
                                 decision,
                                 mode: turn_mode,
@@ -665,7 +644,6 @@ async fn run_single_turn(
                     executed_tools_in_turn = true;
                 } else {
                     let mut allowed = Vec::new();
-                    let latest_user_text = latest_user_text(state).unwrap_or_default();
                     for tc in &tool_calls {
                         let SafetyDecision { decision, details } =
                             command_policy::evaluate_tool_call(
@@ -688,26 +666,7 @@ async fn run_single_turn(
                                 ("decision".to_string(), format!("{decision:?}")),
                             ],
                         );
-                        if decision == SafetyDecisionKind::Allowed
-                            && let Some(class) = command_policy::required_user_authorization(tc)
-                            && !user_authorizes_action_class(&latest_user_text, class)
-                        {
-                            let details = format!(
-                                "{class:?} blocked: user did not explicitly request this action in latest message"
-                            );
-                            let _ = event_tx.send(AgentEvent::SafetyDecision {
-                                decision: SafetyDecisionKind::Rejected,
-                                mode: turn_mode,
-                                tool_name: tc.name.clone(),
-                                details: details.clone(),
-                            });
-                            let _ = event_tx.send(AgentEvent::TurnDecision {
-                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
-                                details,
-                                turn: turn_index,
-                                round: tool_round,
-                            });
-                        } else if decision == SafetyDecisionKind::Allowed {
+                        if decision == SafetyDecisionKind::Allowed {
                             allowed.push(tc.clone());
                         }
                     }
@@ -927,77 +886,6 @@ fn latest_user_text(state: &AgentState) -> Option<String> {
     })
 }
 
-fn user_authorizes_action_class(text: &str, class: command_policy::AuthorizationClass) -> bool {
-    let t = text.to_lowercase();
-    let tokens = tokenize_words(&t);
-    match class {
-        command_policy::AuthorizationClass::Commit => {
-            if contains_token_sequence(&tokens, &["do", "not", "commit"])
-                || contains_token_sequence(&tokens, &["dont", "commit"])
-                || contains_token_sequence(&tokens, &["without", "commit"])
-            {
-                return false;
-            }
-            contains_token_sequence(&tokens, &["commit"])
-                || contains_token_sequence(&tokens, &["create", "commit"])
-                || contains_token_sequence(&tokens, &["make", "commit"])
-                || contains_token_sequence(&tokens, &["git", "commit"])
-        }
-        command_policy::AuthorizationClass::VcsMutation => {
-            if contains_token_sequence(&tokens, &["do", "not", "change", "branch"])
-                || contains_token_sequence(&tokens, &["do", "not", "push"])
-                || contains_token_sequence(&tokens, &["do", "not", "merge"])
-            {
-                return false;
-            }
-            contains_token_sequence(&tokens, &["git"])
-                || contains_token_sequence(&tokens, &["branch"])
-                || contains_token_sequence(&tokens, &["tag"])
-                || contains_token_sequence(&tokens, &["rebase"])
-                || contains_token_sequence(&tokens, &["merge"])
-                || contains_token_sequence(&tokens, &["push"])
-                || contains_token_sequence(&tokens, &["checkout"])
-                || contains_token_sequence(&tokens, &["switch"])
-                || contains_token_sequence(&tokens, &["cherry", "pick"])
-        }
-        command_policy::AuthorizationClass::DependencyMutation => {
-            if contains_token_sequence(&tokens, &["do", "not", "install"])
-                || contains_token_sequence(&tokens, &["without", "install"])
-            {
-                return false;
-            }
-            contains_token_sequence(&tokens, &["install"])
-                || contains_token_sequence(&tokens, &["dependency"])
-                || contains_token_sequence(&tokens, &["dependencies"])
-                || contains_token_sequence(&tokens, &["package"])
-                || contains_token_sequence(&tokens, &["packages"])
-                || contains_token_sequence(&tokens, &["add", "package"])
-                || contains_token_sequence(&tokens, &["add", "dependency"])
-        }
-        command_policy::AuthorizationClass::FileMutation => {
-            if contains_token_sequence(&tokens, &["do", "not", "modify"])
-                || contains_token_sequence(&tokens, &["do", "not", "change"])
-                || contains_token_sequence(&tokens, &["do", "not", "edit"])
-                || contains_token_sequence(&tokens, &["read", "only"])
-            {
-                return false;
-            }
-            contains_token_sequence(&tokens, &["implement"])
-                || contains_token_sequence(&tokens, &["fix"])
-                || contains_token_sequence(&tokens, &["patch"])
-                || contains_token_sequence(&tokens, &["edit"])
-                || contains_token_sequence(&tokens, &["modify"])
-                || contains_token_sequence(&tokens, &["change"])
-                || contains_token_sequence(&tokens, &["update"])
-                || contains_token_sequence(&tokens, &["refactor"])
-                || contains_token_sequence(&tokens, &["write"])
-                || contains_token_sequence(&tokens, &["create"])
-                || contains_token_sequence(&tokens, &["delete"])
-                || contains_token_sequence(&tokens, &["remove"])
-        }
-    }
-}
-
 fn looks_like_execution_request(text: &str) -> bool {
     let t = text.to_lowercase();
     let tokens = tokenize_words(&t);
@@ -1014,6 +902,9 @@ fn looks_like_execution_request(text: &str) -> bool {
         &["refactor"],
         &["commit"],
         &["push"],
+        &["install"],
+        &["add", "dependency"],
+        &["add", "dependencies"],
         &["run", "git"],
         &["run", "it"],
         &["do", "it"],
@@ -1059,6 +950,9 @@ fn infer_intent(text: &str) -> AgentIntent {
         || t.contains("validation")
         || t.contains("what changed")
     {
+        if looks_like_execution_request(&t) {
+            return AgentIntent::Execute;
+        }
         return AgentIntent::Inspect;
     }
     if t.contains("review")
@@ -1066,6 +960,9 @@ fn infer_intent(text: &str) -> AgentIntent {
         || t.contains("analyse")
         || t.contains("architecture")
     {
+        if looks_like_execution_request(&t) {
+            return AgentIntent::Execute;
+        }
         return AgentIntent::AnalyzeOnly;
     }
     if t.contains("commit") || t.contains("push") || t.contains("apply patch") {
@@ -1598,25 +1495,25 @@ mod tests {
     }
 
     #[test]
-    fn command_policy_allows_mode_mismatched_git_commands() {
+    fn command_policy_rejects_mode_mismatched_git_commands() {
         let tc = ToolCall {
             id: "1".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"git commit -m test"}),
         };
         let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
+        assert_eq!(decision.decision, SafetyDecisionKind::Rejected);
     }
 
     #[test]
-    fn command_policy_allows_mode_mismatched_sed_in_place() {
+    fn command_policy_rejects_mode_mismatched_sed_in_place() {
         let tc = ToolCall {
             id: "1".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"sed -i '' 's/a/b/g' file.txt"}),
         };
         let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
+        assert_eq!(decision.decision, SafetyDecisionKind::Rejected);
     }
 
     #[test]
@@ -1633,70 +1530,4 @@ mod tests {
         assert_eq!(parse_mode_hint("no hint"), None);
     }
 
-    #[test]
-    fn user_authorizes_action_classes() {
-        assert!(user_authorizes_action_class(
-            "please commit these changes",
-            command_policy::AuthorizationClass::Commit
-        ));
-        assert!(!user_authorizes_action_class(
-            "review this diff only",
-            command_policy::AuthorizationClass::Commit
-        ));
-        assert!(user_authorizes_action_class(
-            "install dependencies and run tests",
-            command_policy::AuthorizationClass::DependencyMutation
-        ));
-        assert!(!user_authorizes_action_class(
-            "inspect the architecture",
-            command_policy::AuthorizationClass::FileMutation
-        ));
-        assert!(user_authorizes_action_class(
-            "fix and update the implementation",
-            command_policy::AuthorizationClass::FileMutation
-        ));
-    }
-
-    #[test]
-    fn user_authorization_prompt_matrix_ambiguous_cases() {
-        let cases = [
-            (
-                "check and fix if needed",
-                command_policy::AuthorizationClass::FileMutation,
-                true,
-            ),
-            (
-                "prepare a commit message but do not commit",
-                command_policy::AuthorizationClass::Commit,
-                false,
-            ),
-            (
-                "inspect and summarize only; do not modify files",
-                command_policy::AuthorizationClass::FileMutation,
-                false,
-            ),
-            (
-                "run install only if missing and then test",
-                command_policy::AuthorizationClass::DependencyMutation,
-                true,
-            ),
-            (
-                "review the diff and mention git branch status",
-                command_policy::AuthorizationClass::VcsMutation,
-                true,
-            ),
-            (
-                "analyze architecture and provide recommendations",
-                command_policy::AuthorizationClass::DependencyMutation,
-                false,
-            ),
-        ];
-        for (prompt, class, expected) in cases {
-            assert_eq!(
-                user_authorizes_action_class(prompt, class),
-                expected,
-                "prompt='{prompt}' class={class:?}"
-            );
-        }
-    }
 }
