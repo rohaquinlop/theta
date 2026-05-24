@@ -812,27 +812,55 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
 }
 
 /// Parse a usage object from the stream.
+///
+/// Handles two response formats:
+/// - DeepSeek: `usage.prompt_cache_hit_tokens` / `usage.prompt_cache_miss_tokens` (top-level)
+/// - OpenAI / OpenCode: `usage.prompt_tokens_details.cached_tokens` / `.cache_creation_tokens`
 fn parse_usage(usage: &Value) -> Usage {
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+
+    // Try DeepSeek top-level fields first, then fall back to OpenAI nested format.
+    let cache_hit = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(|t| t.as_u64())
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|t| t.as_u64())
+        })
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cache_read_tokens"))
+                .and_then(|t| t.as_u64())
+        })
+        .unwrap_or(0) as u32;
+
+    let cache_miss_or_write = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(|t| t.as_u64())
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cache_creation_tokens"))
+                .and_then(|t| t.as_u64())
+        })
+        .unwrap_or(0) as u32;
+
     Usage {
-        input_tokens: usage
-            .get("prompt_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        output_tokens: usage
-            .get("completion_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        cache_write_tokens: usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cache_creation_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        cache_read_tokens: usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cache_read_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        cost: None, // calculated later
+        input_tokens,
+        output_tokens,
+        cache_write_tokens: cache_miss_or_write,
+        cache_read_tokens: cache_hit,
+        cost: None,
     }
 }
 
