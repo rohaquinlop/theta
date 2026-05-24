@@ -23,6 +23,12 @@ struct CommandSegment {
 }
 
 pub fn evaluate_tool_call(mode: TurnMode, tc: &ToolCall, strict: bool) -> SafetyDecision {
+    if is_mode_blocked_mutation(mode, tc) {
+        return SafetyDecision {
+            decision: SafetyDecisionKind::Rejected,
+            details: format!("mutating tool '{}' blocked in {mode:?} mode", tc.name),
+        };
+    }
     match tc.name.as_str() {
         "bash" => evaluate_bash(tc, strict),
         _ => SafetyDecision {
@@ -30,6 +36,13 @@ pub fn evaluate_tool_call(mode: TurnMode, tc: &ToolCall, strict: bool) -> Safety
             details: format!("tool '{}' allowed in {mode:?} mode", tc.name),
         },
     }
+}
+
+fn is_mode_blocked_mutation(mode: TurnMode, tc: &ToolCall) -> bool {
+    matches!(
+        mode,
+        TurnMode::Inspect | TurnMode::AnalyzeOnly | TurnMode::PlanOnly | TurnMode::Clarify
+    ) && required_user_authorization(tc).is_some()
 }
 
 pub fn required_user_authorization(tc: &ToolCall) -> Option<AuthorizationClass> {
@@ -343,13 +356,11 @@ mod tests {
     }
 
     #[test]
-    fn bash_allows_normal_agent_commands_in_all_modes() {
+    fn bash_mode_gating_blocks_mutations_outside_execute() {
         for command in [
             "cd /Users/rhafid/opensource-projects/theta && git status",
             "git diff crates/theta/src/interactive.rs 2>/dev/null",
             "git diff crates/theta/src/interactive.rs 2>&1",
-            "sed -i 's/a/b/' f.txt",
-            "git commit -m test",
             "cargo test",
             "cargo clippy -- -D warnings",
             "cargo fmt --check",
@@ -358,7 +369,6 @@ mod tests {
             "npm run lint",
             "make check",
             "custom-inspector --json",
-            "echo hi > out.txt",
         ] {
             for mode in [TurnMode::AnalyzeOnly, TurnMode::Inspect, TurnMode::Execute] {
                 let d = evaluate_tool_call(mode, &bash_call(command), true);
@@ -369,10 +379,25 @@ mod tests {
                 );
             }
         }
+
+        for mode in [TurnMode::AnalyzeOnly, TurnMode::Inspect, TurnMode::PlanOnly] {
+            let d = evaluate_tool_call(mode, &bash_call("git commit -m test"), true);
+            assert_eq!(d.decision, SafetyDecisionKind::Rejected);
+            let d = evaluate_tool_call(mode, &bash_call("sed -i 's/a/b/' f.txt"), true);
+            assert_eq!(d.decision, SafetyDecisionKind::Rejected);
+        }
+        let d = evaluate_tool_call(TurnMode::Clarify, &bash_call("git commit -m test"), true);
+        assert_eq!(d.decision, SafetyDecisionKind::Rejected);
+        let d = evaluate_tool_call(TurnMode::Clarify, &bash_call("sed -i 's/a/b/' f.txt"), true);
+        assert_eq!(d.decision, SafetyDecisionKind::Rejected);
+        for command in ["git commit -m test", "sed -i 's/a/b/' f.txt", "echo hi > out.txt"] {
+            let d = evaluate_tool_call(TurnMode::Execute, &bash_call(command), true);
+            assert_eq!(d.decision, SafetyDecisionKind::Allowed);
+        }
     }
 
     #[test]
-    fn non_bash_tools_are_not_mode_gated() {
+    fn non_bash_tools_gate_mutating_operations_by_mode() {
         for name in ["read", "ls", "find", "grep", "write", "edit", "mock"] {
             let tc = ToolCall {
                 id: "w1".to_string(),
@@ -380,7 +405,12 @@ mod tests {
                 arguments: json!({"path":"a","content":"b"}),
             };
             let d = evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-            assert_eq!(d.decision, SafetyDecisionKind::Allowed);
+            let expected = if matches!(name, "write" | "edit") {
+                SafetyDecisionKind::Rejected
+            } else {
+                SafetyDecisionKind::Allowed
+            };
+            assert_eq!(d.decision, expected);
         }
     }
 
