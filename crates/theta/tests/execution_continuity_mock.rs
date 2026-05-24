@@ -114,9 +114,8 @@ impl LlmProvider for PromptSensitiveMockProvider {
                 })
                 .unwrap_or_default();
 
-            let has_execute_guardrail = system.contains("do the work in this turn");
-            let has_function_calling_guardrail =
-                system.contains("Invoke tools using function-calling");
+            let has_execute_guardrail = system.contains("the full");
+            let has_function_calling_guardrail = system.contains("function-calling");
 
             if has_execute_guardrail && has_function_calling_guardrail && !context.tools.is_empty()
             {

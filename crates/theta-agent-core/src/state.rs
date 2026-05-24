@@ -6,7 +6,7 @@ use std::sync::Arc;
 use theta_ai::{ContentBlock, Message, Model, ThinkingLevel};
 
 use crate::types::AgentTool;
-use crate::types::{RunReport, RunReportEvent, TurnEndReason, TurnMode};
+use crate::types::{RunReport, RunReportEvent, TurnEndReason};
 
 /// The mutable state of an agent run.
 #[derive(Clone)]
@@ -30,10 +30,6 @@ pub struct AgentState {
     pub thinking_level: ThinkingLevel,
     /// Available models from catalog for fallback resolution.
     pub available_models: Vec<Model>,
-    /// Last resolved turn mode.
-    pub last_turn_mode: Option<TurnMode>,
-    /// Explicit runtime turn-mode override (highest-priority resolver input).
-    pub turn_mode_override: Option<TurnMode>,
     /// Last explicit turn terminal reason.
     pub last_turn_end_reason: Option<TurnEndReason>,
     /// In-progress report for current run.
@@ -58,8 +54,6 @@ impl AgentState {
             is_streaming: false,
             thinking_level: ThinkingLevel::Off,
             available_models,
-            last_turn_mode: None,
-            turn_mode_override: None,
             last_turn_end_reason: None,
             current_run_report: None,
             last_run_report: None,
@@ -84,9 +78,6 @@ impl AgentState {
             }
             map.insert("model".to_string(), self.model.id.clone());
             map.insert("provider".to_string(), format!("{:?}", self.model.provider));
-            if let Some(mode) = self.last_turn_mode {
-                map.insert("mode".to_string(), format!("{mode:?}"));
-            }
             for (k, v) in fields {
                 map.insert(k.clone(), redact_field(&k, &v));
             }

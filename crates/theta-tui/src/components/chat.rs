@@ -56,6 +56,9 @@ pub struct Chat {
     cached_inner_width: Option<usize>,
     cached_wrapped_lines: Vec<Line<'static>>,
     cached_visible_line_texts: Vec<String>,
+    /// For each message in self.messages, the (start, end) range into
+    /// cached_wrapped_lines / cached_visible_line_texts.
+    cached_msg_ranges: Vec<(usize, usize)>,
     cached_message_count: usize,
     cache_dirty: bool,
 }
@@ -94,6 +97,7 @@ impl Chat {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.active_tool_message_idx.clear();
+        self.cached_msg_ranges.clear();
         self.cached_message_count = 0;
         self.cache_dirty = true;
     }
@@ -114,6 +118,7 @@ impl Chat {
             cached_inner_width: None,
             cached_wrapped_lines: Vec::new(),
             cached_visible_line_texts: Vec::new(),
+            cached_msg_ranges: Vec::new(),
             cached_message_count: 0,
             cache_dirty: true,
         }
@@ -146,7 +151,16 @@ impl Chat {
         {
             last.text.push_str(text);
             last.is_streaming = is_streaming;
-            self.cache_dirty = true;
+            // Incremental: re-format only the last message in-place in the cache.
+            // Avoids full rebuild on every token delta.
+            if let Some(inner_width) = self.cached_inner_width
+                && inner_width > 0
+                && self.cached_msg_ranges.len() == self.messages.len()
+            {
+                self.replace_msg_in_cache(self.messages.len() - 1, inner_width);
+            } else {
+                self.cache_dirty = true;
+            }
             return;
         }
         self.messages.push(ChatMessage {
@@ -170,7 +184,15 @@ impl Chat {
             if !is_streaming {
                 self.active_tool_message_idx.remove(name);
             }
-            self.cache_dirty = true;
+            // Incremental: re-format only this message in-place in the cache.
+            if let Some(inner_width) = self.cached_inner_width
+                && inner_width > 0
+                && self.cached_msg_ranges.len() == self.messages.len()
+            {
+                self.replace_msg_in_cache(idx, inner_width);
+            } else {
+                self.cache_dirty = true;
+            }
             return;
         }
 
@@ -196,7 +218,14 @@ impl Chat {
             msg.text = text.to_string();
             msg.is_streaming = false;
             self.active_tool_message_idx.remove(name);
-            self.cache_dirty = true;
+            if let Some(inner_width) = self.cached_inner_width
+                && inner_width > 0
+                && self.cached_msg_ranges.len() == self.messages.len()
+            {
+                self.replace_msg_in_cache(idx, inner_width);
+            } else {
+                self.cache_dirty = true;
+            }
             return;
         }
 
@@ -555,11 +584,14 @@ impl Chat {
                 self.cached_visible_line_texts.push(String::new());
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
+            let start_line = self.cached_wrapped_lines.len();
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_wrapped_lines.push(line);
             }
+            let end_line = self.cached_wrapped_lines.len();
+            self.cached_msg_ranges.push((start_line, end_line));
             self.cached_message_count = self.messages.len();
             self.cache_dirty = false;
             tracing::debug!(
@@ -572,6 +604,7 @@ impl Chat {
         self.cached_inner_width = Some(inner_width);
         self.cached_wrapped_lines.clear();
         self.cached_visible_line_texts.clear();
+        self.cached_msg_ranges.clear();
         if inner_width == 0 {
             self.cache_dirty = false;
             return;
@@ -582,14 +615,18 @@ impl Chat {
             if let Some(prev) = prev_role.clone()
                 && should_insert_gap(prev, msg.role.clone())
             {
+                let _line_idx = self.cached_wrapped_lines.len();
                 self.cached_visible_line_texts.push(String::new());
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
+            let start_line = self.cached_wrapped_lines.len();
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_wrapped_lines.push(line);
             }
+            let end_line = self.cached_wrapped_lines.len();
+            self.cached_msg_ranges.push((start_line, end_line));
             prev_role = Some(msg.role.clone());
         }
         self.cached_message_count = self.messages.len();
@@ -599,6 +636,56 @@ impl Chat {
             wrapped_lines = self.cached_wrapped_lines.len(),
             "chat cache rebuild"
         );
+    }
+
+    /// Re-format and re-wrap a specific message in the cached lines,
+    /// replacing its previous range in-place. Avoids full rebuild on every
+    /// streaming token delta.
+    fn replace_msg_in_cache(&mut self, msg_idx: usize, inner_width: usize) {
+        let Some((start, end)) = self.cached_msg_ranges.get(msg_idx).copied() else {
+            self.cache_dirty = true;
+            return;
+        };
+        let len = end.saturating_sub(start);
+        if len > 0 && start < self.cached_wrapped_lines.len() {
+            self.cached_wrapped_lines
+                .drain(start..end.min(self.cached_wrapped_lines.len()));
+            self.cached_visible_line_texts
+                .drain(start..end.min(self.cached_visible_line_texts.len()));
+        }
+        let msg = &self.messages[msg_idx];
+        let lines = self.format_message(msg, inner_width);
+        let new_lines: Vec<Line<'static>> = wrap_styled_lines(&lines, inner_width);
+        let new_texts: Vec<String> = new_lines.iter().map(line_text).collect();
+        let new_count = new_lines.len();
+        // Splice new lines at the same position
+        let insert_pos = start.min(self.cached_wrapped_lines.len());
+        for (i, line) in new_lines.into_iter().enumerate() {
+            let pos = insert_pos + i;
+            if pos < self.cached_wrapped_lines.len() {
+                self.cached_wrapped_lines[pos] = line;
+            } else {
+                self.cached_wrapped_lines.push(line);
+            }
+        }
+        for (i, text) in new_texts.into_iter().enumerate() {
+            let pos = insert_pos + i;
+            if pos < self.cached_visible_line_texts.len() {
+                self.cached_visible_line_texts[pos] = text;
+            } else {
+                self.cached_visible_line_texts.push(text);
+            }
+        }
+        // Update the range for this message
+        self.cached_msg_ranges[msg_idx] = (insert_pos, insert_pos + new_count);
+        // Shift all subsequent message ranges by the delta
+        let delta = new_count as isize - len as isize;
+        if delta != 0 {
+            for range in self.cached_msg_ranges.iter_mut().skip(msg_idx + 1) {
+                range.0 = (range.0 as isize + delta) as usize;
+                range.1 = (range.1 as isize + delta) as usize;
+            }
+        }
     }
 
     fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {

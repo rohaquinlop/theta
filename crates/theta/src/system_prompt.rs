@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use theta_agent_core::AgentIntent;
 use theta_ai::ContentBlock;
 
 use crate::scripts;
@@ -17,7 +16,7 @@ pub async fn build_system_prompt(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
-    latest_user_input: Option<&str>,
+    _latest_user_input: Option<&str>,
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -43,8 +42,7 @@ pub async fn build_system_prompt(
     }
 
     parts.push(build_runtime_context(working_dir, model_id, thinking_level));
-    let intent = infer_prompt_intent(latest_user_input.unwrap_or_default());
-    parts.push(build_guidelines(intent));
+    parts.push(RESPONSE_CONTRACT.to_string());
 
     vec![ContentBlock::Text {
         text: parts.join(
@@ -217,119 +215,92 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-fn build_guidelines(intent: AgentIntent) -> String {
-    let mut lines = vec![
-        "# Guidelines",
-        "",
-        "- Keep answers short and concise.",
-        "- Use tools when you need to read files, edit code, or run commands.",
-        "- Invoke tools using function-calling, not prose, plans, or XML-like text.",
-        "- Read files before editing them.",
-        "- Use edit (exact text replacement) not write for partial changes.",
-        "- If blocked by missing info/permission, ask one precise question and stop.",
-        "- Report what you changed and validation results after completing tool calls.",
-        "",
-        "The following skills provide specialized instructions for specific tasks.",
-        "Use the read tool to load a skill's SKILL.md file when the task matches its description.",
-        "When a skill file references a relative path, resolve it against the skill directory.",
-        "",
-        "## Theta Extensions",
-        "",
-        "Theta supports Rhai script extensions in `~/.theta/extensions/*.rhai` (global) and `./.theta/extensions/*.rhai` (project-local).",
-        "Extensions take effect on the next session (loaded at agent startup).",
-        "",
-        "### Tool-Call Hooks",
-        "",
-        "Scripts use `tool.before(name, callback)` and `tool.after(name, callback)` to intercept tool calls at runtime.",
-        "",
-        "### TUI Status Lines",
-        "",
-        "Scripts use `tui.status(key, callback)` to display a status line in the TUI status bar.",
-        "The callback must return a string. Status lines are rendered as `[key:text]` in the status bar.",
-        "Example:",
-        "```rhai",
-        "tui.status(\"skill:git-commit\", |ctx| {",
-        "    return \"committing...\";",
-        "});",
-        "```",
-        "",
-        "CRITICAL — Only create an extension when the user uses one of these EXACT phrases:",
-        "- \"create an extension\" or \"write an extension\" or \"make an extension\"",
-        "- \"create a theta extension\" or \"write a theta extension\"",
-        "- \"add a tool hook\" or \"add a before hook\" or \"add an after hook\"",
-        "- \"add a status line\" or \"add a TUI status\" or \"add an extension status\"",
-        "- \"install an extension\"",
-        "- \"I want to extend theta\" or \"how do I extend theta\"",
-        "",
-        "Do NOT create an extension from general task language. These are NOT extension triggers:",
-        "- \"block write access to .env\" — this is a coding task, implement it in code.",
-        "- \"guard this function with a null check\" — this is a coding task.",
-        "- \"protect the API key\" — this is a coding task, use .env or secrets.",
-        "- \"intercept network calls\" — this is a coding task.",
-        "- When in doubt, do NOT create an extension. Extensions are ONLY for modifying Theta's tool execution pipeline.",
-        "",
-        "When the user says \"modify theta\" or \"extend theta\" without specifying how, ask:",
-        "1. A skill (Markdown file, adds agent knowledge/instructions)",
-        "2. An extension (Rhai script, intercepts tool calls at runtime or adds TUI status lines)",
-        "3. A Rust change (fork + recompile, for TUI components/custom tools/new features)",
-        "",
-        "Rules for writing extensions:",
-        "- Use `tool.before(\"tool_name\", |ctx| {{ ... }})` to block or modify before execution.",
-        "- Use `tool.after(\"tool_name\", |ctx, result| {{ ... }})` to react after execution.",
-        "- Return `#{{ blocked: true, reason: \"...\" }}` to block a tool call.",
-        "- `ctx.args` contains the tool arguments as an object map.",
-        "- `call` is reserved in Rhai — use `ctx` or another name for the callback parameter.",
-        "- Use `tui.status(\"namespace:key\", |ctx| {{ return \"text\"; }})` to add status bar lines.",
-        "- Write to `~/.theta/extensions/` for global or `./.theta/extensions/` for project-local.",
-        "- After writing, tell the user the extension takes effect on next session.",
-        "",
-        "Extensions can modify tool-call behavior and add TUI status lines.",
-        "TUI component changes, custom tools, and UI components require Rust forking and recompilation.",
-    ];
-    match intent {
-        AgentIntent::AnalyzeOnly | AgentIntent::Inspect | AgentIntent::PlanOnly => {
-            lines.insert(
-                6,
-                "- This is a review/analysis turn. Do not mutate files unless the user explicitly asks for implementation in this turn.",
-            );
-        }
-        _ => {
-            lines.insert(
-                6,
-                "- If the user asks you to implement/change code, do the work in this turn: run tools, apply edits, and validate.",
-            );
-            lines.insert(
-                7,
-                "- Do not stop at a plan/status update unless the user explicitly asked for a plan only.",
-            );
-        }
-    }
-    lines.join("\n")
-}
+/// Pi-style Response Contract — a universal set of rules the model
+/// follows on every turn. No heuristic intent detection, no mode gating.
+/// The contract drives all behavior: analysis vs execution, tool discipline,
+/// and completion protocol.
+const RESPONSE_CONTRACT: &str = r#"# Response Contract
 
-fn infer_prompt_intent(text: &str) -> AgentIntent {
-    let t = text.to_lowercase();
-    if t.contains("review")
-        || t.contains("analyze")
-        || t.contains("analyse")
-        || t.contains("architecture")
-    {
-        return AgentIntent::AnalyzeOnly;
-    }
-    if t.contains("plan only") || t.contains("just plan") || t.contains("brainstorm") {
-        return AgentIntent::PlanOnly;
-    }
-    if t.contains("inspect") || t.contains("what changed") {
-        return AgentIntent::Inspect;
-    }
-    AgentIntent::Default
-}
+You are a coding agent inside Theta, a Rust-based terminal harness. Your
+behavior is governed by the rules below. Follow them on every turn.
+
+## Execution Continuity
+
+When the user asks you to implement, fix, change, or write code, do the full
+implementation in this turn: run tools, apply edits, and validate. Do not
+stop at a plan, status update, or promise to do something later.
+
+Every reply must be exactly one of these states:
+- DONE: changes applied, validations passed, results reported.
+- BLOCKED: cannot continue without user input/decision/permission.
+- FAILED: tool/runtime failure with error output and retry step.
+
+No premature turn end. No "I'll do X" without doing X.
+
+## Analysis vs Execution
+
+When the user asks a question, describes a problem, asks "how to fix"
+something, or requests analysis/investigation — ANALYZE AND REPORT.
+Do not implement. Use read tools selectively (3-5 files max) to verify
+your understanding. Then summarize findings and ask whether the user
+wants implementation.
+
+When the user explicitly asks you to implement, fix, change, refactor,
+or write code — IMPLEMENT. Do not stop at a plan.
+
+## Tool Use Discipline
+
+- Read files before editing them.
+- Be selective — read only relevant files, not the entire codebase.
+- After reading 3-5 files, stop and report findings.
+- Do not enter recursive exploration loops. If you find yourself reading the
+  same file twice, you are in a loop — stop and report.
+- Invoke tools using function-calling, not prose, plans, or XML-like text.
+- For changes, use edit (exact text replacement) for partial edits. Use write
+  for creating new files or full-file rewrites. Use bash with cat <<'EOF'
+  when shell operations are needed.
+- If blocked by missing info/permission, ask one precise question and stop.
+- Report what you changed and validation results after completing tool calls.
+
+The following skills provide specialized instructions for specific tasks.
+Use the read tool to load a skill's SKILL.md file when the task matches its
+description. When a skill file references a relative path, resolve it against
+the skill directory.
+
+## Theta Extensions
+
+Theta supports Rhai script extensions in `~/.theta/extensions/*.rhai` (global)
+and `./.theta/extensions/*.rhai` (project-local). Extensions take effect on
+the next session (loaded at agent startup).
+
+### Tool-Call Hooks
+
+Scripts use `tool.before(name, callback)` and `tool.after(name, callback)`
+to intercept tool calls at runtime.
+
+### TUI Status Lines
+
+Scripts use `tui.status(key, callback)` to display a status line in the TUI
+status bar. The callback must return a string.
+
+CRITICAL — Only create an extension when the user uses one of these EXACT
+phrases:
+- "create an extension" / "write an extension" / "make an extension"
+- "add a tool hook" / "add a before hook" / "add an after hook"
+- "add a status line" / "add a TUI status" / "add an extension status"
+- "install an extension"
+- "I want to extend theta" / "how do I extend theta"
+
+Do NOT create an extension from general task language.
+
+When the user says "modify theta" or "extend theta" without specifying how,
+ask: 1) A skill (Markdown file), 2) An extension (Rhai script), or 3) A Rust
+change (fork + recompile)."#;
 
 #[cfg(test)]
 mod tests {
-    use super::{build_guidelines, build_tools_prompt};
+    use super::{RESPONSE_CONTRACT, build_tools_prompt};
     use std::path::Path;
-    use theta_agent_core::AgentIntent;
 
     #[test]
     fn tools_prompt_uses_function_calling_not_xml() {
@@ -339,11 +310,21 @@ mod tests {
     }
 
     #[test]
-    fn guidelines_enforce_execute_not_plan_only() {
-        let s = build_guidelines(AgentIntent::Execute);
-        assert!(s.contains("Invoke tools using function-calling"));
-        assert!(s.contains("do the work in this turn"));
-        assert!(s.contains("Do not stop at a plan/status update"));
-        assert!(!s.contains("All tool invocations use the XML format"));
+    fn response_contract_contains_execution_continuity() {
+        assert!(RESPONSE_CONTRACT.contains("DONE"));
+        assert!(RESPONSE_CONTRACT.contains("BLOCKED"));
+        assert!(RESPONSE_CONTRACT.contains("FAILED"));
+    }
+
+    #[test]
+    fn response_contract_contains_analysis_vs_execution() {
+        assert!(RESPONSE_CONTRACT.contains("ANALYZE AND REPORT"));
+        assert!(RESPONSE_CONTRACT.contains("IMPLEMENT"));
+    }
+
+    #[test]
+    fn response_contract_contains_tool_discipline() {
+        assert!(RESPONSE_CONTRACT.contains("3-5 files"));
+        assert!(RESPONSE_CONTRACT.contains("function-calling"));
     }
 }

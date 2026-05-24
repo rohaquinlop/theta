@@ -80,6 +80,10 @@ pub enum TuiAction {
 pub enum TuiEvent {
     TextDelta(String),
     ThinkingDelta(String),
+    ToolCallPrepared {
+        name: String,
+        id: String,
+    },
     ToolStart {
         name: String,
         id: String,
@@ -375,16 +379,18 @@ impl App {
                     }
                 }
                 Some(event) = self.event_rx.recv() => {
+                    // Drain ALL pending events then render once. This is
+                    // essential because term.draw() takes 5-16ms and blocks
+                    // the event loop. Rendering per-event would create a
+                    // backlog of hundreds of unprocessed events.
+                    //
+                    // The 30-event drain from before was fine — the real
+                    // "BUM!" was caused by the lossless bridge coalescing
+                    // ToolProgress events, which is already fixed.
                     self.handle_agent_event(event);
-                    needs_render = true;
-                    // Drain a small batch per frame. This keeps high-volume
-                    // text streams responsive without starving terminal draws.
-                    for _ in 0..15 {
+                    loop {
                         match self.event_rx.try_recv() {
-                            Ok(next) => {
-                                self.handle_agent_event(next);
-                                needs_render = true;
-                            }
+                            Ok(next) => self.handle_agent_event(next),
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                                 self.running = false;
@@ -392,10 +398,20 @@ impl App {
                             }
                         }
                     }
+                    self.render_frame(term);
+                    needs_render = false;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Render a single frame to the terminal.
+    fn render_frame(
+        &mut self,
+        term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    ) {
+        let _ = term.draw(|frame| self.draw(frame));
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -1139,6 +1155,9 @@ impl App {
                     self.status.set_detail(&truncate_status_text(summary, 80));
                 }
             }
+            TuiEvent::ToolCallPrepared { name, .. } => {
+                self.status.set_detail(&format!("preparing {name}"));
+            }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("ToolExec");
@@ -1201,7 +1220,7 @@ impl App {
                         );
                     }
                 } else {
-                    self.status.set_agent_state("streaming (post-tool)");
+                    self.status.set_agent_state("Completed");
                     self.status.set_detail(&format!("{name} done"));
                     if self.tool_verbosity == ToolVerbosity::Full {
                         let suffix = if summary.is_empty() {

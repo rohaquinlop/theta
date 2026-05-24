@@ -2,7 +2,7 @@
 
 use theta_ai::Message;
 
-use crate::types::{SafetyDecisionKind, ToolResult, TurnEndReason, TurnMode};
+use crate::types::{SafetyDecisionKind, ToolResult, TurnEndReason};
 
 /// Events emitted by the agent during execution.
 /// Consumers (TUI, RPC, etc.) subscribe to these.
@@ -16,12 +16,6 @@ pub enum AgentEvent {
 
     /// A turn (one LLM call + tool execution) is beginning.
     TurnStart { turn_index: u32 },
-    /// Turn mode was resolved deterministically at turn start.
-    TurnModeResolved {
-        turn_index: u32,
-        mode: TurnMode,
-        source: String,
-    },
 
     /// A turn has completed.
     TurnEnd { turn_index: u32 },
@@ -106,7 +100,6 @@ pub enum AgentEvent {
     /// Command/tool safety policy decision.
     SafetyDecision {
         decision: SafetyDecisionKind,
-        mode: TurnMode,
         tool_name: String,
         details: String,
     },

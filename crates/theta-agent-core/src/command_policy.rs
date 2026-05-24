@@ -1,6 +1,11 @@
-//! Centralized command safety policy engine.
+//! Always-on command safety policy engine.
+//!
+//! Checks tool calls for destructive operations regardless of "mode".
+//! The system prompt guides the model on when to use tools; the command
+//! policy is the safety net that blocks truly dangerous operations
+//! (rm -rf, git push --force, destructive sed, etc.).
 
-use crate::types::{SafetyDecisionKind, ToolCall, TurnMode};
+use crate::types::{SafetyDecisionKind, ToolCall};
 
 #[derive(Debug, Clone)]
 pub struct SafetyDecision {
@@ -22,27 +27,20 @@ struct CommandSegment {
     argv: Vec<String>,
 }
 
-pub fn evaluate_tool_call(mode: TurnMode, tc: &ToolCall, strict: bool) -> SafetyDecision {
-    if is_mode_blocked_mutation(mode, tc) {
-        return SafetyDecision {
-            decision: SafetyDecisionKind::Rejected,
-            details: format!("mutating tool '{}' blocked in {mode:?} mode", tc.name),
-        };
-    }
+/// Evaluate a tool call for safety. Returns Allowed or Rejected.
+///
+/// The command policy is always-on — it does not depend on turn modes.
+/// The system prompt is responsible for guiding the model on *when* to
+/// use mutation tools vs read-only tools. The policy only blocks
+/// operations that are inherently dangerous regardless of context.
+pub fn evaluate_tool_call(tc: &ToolCall, strict: bool) -> SafetyDecision {
     match tc.name.as_str() {
         "bash" => evaluate_bash(tc, strict),
         _ => SafetyDecision {
             decision: SafetyDecisionKind::Allowed,
-            details: format!("tool '{}' allowed in {mode:?} mode", tc.name),
+            details: format!("tool '{}' allowed", tc.name),
         },
     }
-}
-
-fn is_mode_blocked_mutation(mode: TurnMode, tc: &ToolCall) -> bool {
-    matches!(
-        mode,
-        TurnMode::Inspect | TurnMode::AnalyzeOnly | TurnMode::PlanOnly | TurnMode::Clarify
-    ) && required_user_authorization(tc).is_some()
 }
 
 pub fn required_user_authorization(tc: &ToolCall) -> Option<AuthorizationClass> {
@@ -356,61 +354,55 @@ mod tests {
     }
 
     #[test]
-    fn bash_mode_gating_blocks_mutations_outside_execute() {
+    fn always_on_policy_allows_read_only_commands() {
+        // All bash commands go through the same always-on policy.
+        // Read-only commands pass; destructive ones are blocked by the
+        // authorization class check, not by mode.
         for command in [
             "cd /Users/rhafid/opensource-projects/theta && git status",
             "git diff crates/theta/src/interactive.rs 2>/dev/null",
-            "git diff crates/theta/src/interactive.rs 2>&1",
             "cargo test",
             "cargo clippy -- -D warnings",
             "cargo fmt --check",
-            "cargo fmt",
             "npm test",
-            "npm run lint",
             "make check",
-            "custom-inspector --json",
         ] {
-            for mode in [TurnMode::AnalyzeOnly, TurnMode::Inspect, TurnMode::Execute] {
-                let d = evaluate_tool_call(mode, &bash_call(command), true);
-                assert_eq!(
-                    d.decision,
-                    SafetyDecisionKind::Allowed,
-                    "{command} should be allowed in {mode:?}"
-                );
-            }
+            let d = evaluate_tool_call(&bash_call(command), true);
+            assert_eq!(
+                d.decision,
+                SafetyDecisionKind::Allowed,
+                "{command} should be allowed"
+            );
         }
+    }
 
-        for mode in [TurnMode::AnalyzeOnly, TurnMode::Inspect, TurnMode::PlanOnly] {
-            let d = evaluate_tool_call(mode, &bash_call("git commit -m test"), true);
-            assert_eq!(d.decision, SafetyDecisionKind::Rejected);
-            let d = evaluate_tool_call(mode, &bash_call("sed -i 's/a/b/' f.txt"), true);
-            assert_eq!(d.decision, SafetyDecisionKind::Rejected);
-        }
-        let d = evaluate_tool_call(TurnMode::Clarify, &bash_call("git commit -m test"), true);
-        assert_eq!(d.decision, SafetyDecisionKind::Rejected);
-        let d = evaluate_tool_call(TurnMode::Clarify, &bash_call("sed -i 's/a/b/' f.txt"), true);
-        assert_eq!(d.decision, SafetyDecisionKind::Rejected);
-        for command in ["git commit -m test", "sed -i 's/a/b/' f.txt", "echo hi > out.txt"] {
-            let d = evaluate_tool_call(TurnMode::Execute, &bash_call(command), true);
+    #[test]
+    fn always_on_policy_allows_bash_commands_not_catastrophic() {
+        // Non-catastrophic bash commands pass through the always-on
+        // command policy. The system prompt guides when to use them.
+        for command in [
+            "git commit -m test",
+            "git push origin main",
+            "sed -i 's/a/b/' f.txt",
+            "cargo add serde",
+            "npm install express",
+            "echo hi > out.txt",
+        ] {
+            let d = evaluate_tool_call(&bash_call(command), true);
             assert_eq!(d.decision, SafetyDecisionKind::Allowed);
         }
     }
 
     #[test]
-    fn non_bash_tools_gate_mutating_operations_by_mode() {
+    fn non_bash_tools_always_allowed() {
         for name in ["read", "ls", "find", "grep", "write", "edit", "mock"] {
             let tc = ToolCall {
                 id: "w1".to_string(),
                 name: name.to_string(),
                 arguments: json!({"path":"a","content":"b"}),
             };
-            let d = evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-            let expected = if matches!(name, "write" | "edit") {
-                SafetyDecisionKind::Rejected
-            } else {
-                SafetyDecisionKind::Allowed
-            };
-            assert_eq!(d.decision, expected);
+            let d = evaluate_tool_call(&tc, true);
+            assert_eq!(d.decision, SafetyDecisionKind::Allowed);
         }
     }
 
@@ -423,7 +415,7 @@ mod tests {
             "mkfs /dev/disk9",
             "shutdown now",
         ] {
-            let d = evaluate_tool_call(TurnMode::Execute, &bash_call(command), true);
+            let d = evaluate_tool_call(&bash_call(command), true);
             assert_eq!(
                 d.decision,
                 SafetyDecisionKind::Rejected,
@@ -434,13 +426,13 @@ mod tests {
 
     #[test]
     fn strict_mode_allows_non_catastrophic_recursive_delete() {
-        let d = evaluate_tool_call(TurnMode::Execute, &bash_call("rm -rf /tmp/foo"), true);
+        let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), true);
         assert_eq!(d.decision, SafetyDecisionKind::Allowed);
     }
 
     #[test]
-    fn execute_non_strict_allows_recursive_delete() {
-        let d = evaluate_tool_call(TurnMode::Execute, &bash_call("rm -rf /tmp/foo"), false);
+    fn non_strict_allows_recursive_delete() {
+        let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), false);
         assert_eq!(d.decision, SafetyDecisionKind::Allowed);
     }
 

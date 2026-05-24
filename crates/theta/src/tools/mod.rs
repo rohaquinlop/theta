@@ -1,13 +1,10 @@
 //! Built-in tools for the theta agent.
 //!
-//! Seven tools matching pi's set: read, write, edit, bash, grep, find, ls.
-//! Each implements `AgentTool` from `theta-agent-core`.
+//! Four core tools: read, edit, write, bash. The agent uses bash for grep,
+//! find, ls, sed, and other operations via shell commands (rg, find, ls, sed, etc.).
 
 mod bash;
 mod edit;
-mod find;
-mod grep;
-mod ls;
 mod read;
 mod write;
 
@@ -15,9 +12,6 @@ use std::path::PathBuf;
 
 pub use bash::BashTool;
 pub use edit::EditTool;
-pub use find::FindTool;
-pub use grep::GrepTool;
-pub use ls::LsTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -150,12 +144,9 @@ pub fn builtin_tools(
 ) -> Vec<std::sync::Arc<dyn theta_agent_core::types::AgentTool>> {
     vec![
         std::sync::Arc::new(ReadTool::new(ctx.clone())),
-        std::sync::Arc::new(WriteTool::new(ctx.clone())),
         std::sync::Arc::new(EditTool::new(ctx.clone())),
+        std::sync::Arc::new(WriteTool::new(ctx.clone())),
         std::sync::Arc::new(BashTool::new(ctx.clone())),
-        std::sync::Arc::new(GrepTool::new(ctx.clone())),
-        std::sync::Arc::new(FindTool::new(ctx.clone())),
-        std::sync::Arc::new(LsTool::new(ctx.clone())),
     ]
 }
 

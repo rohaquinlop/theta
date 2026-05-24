@@ -16,7 +16,6 @@ use theta_tui::components::CommandEntry;
 use theta_tui::components::{ModelEntry, SessionInfo, known_providers};
 use theta_tui::theme::Theme;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{self, MissedTickBehavior};
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
@@ -400,39 +399,13 @@ pub async fn run_tui(
         app.send_initial_message(msg);
     }
 
-    // Lossless bridge: preserve semantic events; coalesce noisy progress events.
+    // Forward all events directly — no coalescing. The TUI already
+    // rate-limits progress display via last_tool_progress_at. Coalescing
+    // progress here causes a "BUM!" effect where progress accumulates
+    // silently and flushes only on the next non-progress event.
     tokio::spawn(async move {
-        let mut pending_progress: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
         while let Some(event) = event_rx_raw.recv().await {
-            match event {
-                TuiEvent::ToolProgress { name, message } => {
-                    pending_progress.insert(name, message);
-                }
-                // Lifecycle events must never be dropped — blocking send ensures
-                // the spinner and streaming state never desync from the agent.
-                evt @ (TuiEvent::TurnStart | TuiEvent::TurnEnd { .. } | TuiEvent::AgentEnd) => {
-                    if !pending_progress.is_empty() {
-                        for (name, message) in pending_progress.drain() {
-                            let _ = event_tx.send(TuiEvent::ToolProgress { name, message });
-                        }
-                    }
-                    let _ = event_tx.send(evt);
-                }
-                evt => {
-                    if !pending_progress.is_empty() {
-                        let pending = pending_progress.len();
-                        for (name, message) in pending_progress.drain() {
-                            let _ = event_tx.send(TuiEvent::ToolProgress { name, message });
-                        }
-                        tracing::debug!(
-                            pending_count = pending,
-                            "forwarded coalesced tui tool progress"
-                        );
-                    }
-                    let _ = event_tx.send(evt);
-                }
-            }
+            let _ = event_tx.send(event);
         }
     });
 
@@ -480,212 +453,203 @@ async fn create_agent(
 }
 
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
-fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, hz: u64) {
+fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, _hz: u64) {
     tokio::spawn(async move {
         // Cache immutable config values.
         let reserve_tokens = agent.config().compaction.reserve_tokens;
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
-        let mut pending_tool_progress: HashMap<String, String> = HashMap::new();
         let mut saw_assistant_text_delta = false;
         let mut saw_thinking_delta = false;
         let mut latest_turn_end_reason = "completed".to_string();
-        let interval_ms = (1000 / hz.max(1)).max(1);
-        let mut progress_tick = time::interval(std::time::Duration::from_millis(interval_ms));
-        progress_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
-            tokio::select! {
-                _ = progress_tick.tick() => {
-                    if !pending_tool_progress.is_empty() {
-                        let pending = pending_tool_progress.len();
-                        let tick_start = std::time::Instant::now();
-                        for (id, message) in pending_tool_progress.drain() {
-                            let _ = event_tx.send(TuiEvent::ToolProgress {
-                                name: tool_names.get(&id).cloned().unwrap_or(id),
-                                message,
+            // Block until next event — no tokio::select! competing with a timer.
+            // A select! between events.recv() and a timer causes Lagged(n) errors
+            // when the timer branch is selected and the broadcast buffer fills up,
+            // dropping every event including TextDelta, ToolCallStart, etc.
+            let received = events.recv().await;
+            match received {
+                Ok(AgentEvent::MessageStart) => {
+                    saw_assistant_text_delta = false;
+                    saw_thinking_delta = false;
+                }
+                Ok(AgentEvent::TextDelta { text }) => {
+                    saw_assistant_text_delta = true;
+                    let _ = event_tx.send(TuiEvent::TextDelta(text));
+                }
+                Ok(AgentEvent::ThinkingDelta { thinking }) => {
+                    saw_thinking_delta = true;
+                    let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
+                }
+                Ok(AgentEvent::ToolCallStart { id, name }) => {
+                    // Forward LLM-side tool call preparation so the TUI can show
+                    // tools appearing during the response stream (before execution).
+                    let _ = event_tx.send(TuiEvent::ToolCallPrepared { name, id });
+                }
+                Ok(AgentEvent::ToolExecutionStart {
+                    tool_call_id: id,
+                    tool_name: name,
+                }) => {
+                    tool_names.insert(id.clone(), name.clone());
+                    let _ = event_tx.send(TuiEvent::ToolStart { name, id });
+                }
+                Ok(AgentEvent::ToolExecutionProgress {
+                    tool_call_id: id,
+                    output,
+                }) => {
+                    // Forward progress directly. The TUI rate-limits display
+                    // via last_tool_progress_at.
+                    let name = tool_names.get(&id).cloned().unwrap_or_else(|| id.clone());
+                    let _ = event_tx.send(TuiEvent::ToolProgress {
+                        name,
+                        message: output,
+                    });
+                }
+                Ok(AgentEvent::ToolExecutionEnd { result }) => {
+                    let summary = format_tool_summary(&result, 2200);
+                    tool_names.remove(&result.tool_call_id);
+                    let _ = event_tx.send(TuiEvent::ToolEnd {
+                        id: result.tool_call_id,
+                        name: result.tool_name,
+                        is_error: result.is_error,
+                        summary,
+                    });
+                }
+                Ok(AgentEvent::MessageEnd { message }) => {
+                    if let theta_ai::Message::Assistant { content, usage, .. } = &message {
+                        // Forward real token usage to TUI status bar.
+                        if let Some(u) = usage {
+                            let state = agent.state().await;
+                            let avail = state.model.context_window.saturating_sub(reserve_tokens);
+                            let pct = if avail > 0 {
+                                (u.input_tokens as f64 / avail as f64 * 100.0) as u32
+                            } else {
+                                0
+                            };
+                            let _ = event_tx.send(TuiEvent::ContextTokens {
+                                tokens: u.input_tokens,
+                                pct,
                             });
                         }
-                        tracing::debug!(
-                            pending_count = pending,
-                            elapsed_ms = tick_start.elapsed().as_millis(),
-                            "flushed coalesced tool progress events"
-                        );
+                        if !saw_assistant_text_delta {
+                            let final_text = content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !final_text.is_empty() {
+                                let _ = event_tx.send(TuiEvent::TextDelta(final_text));
+                            }
+                        }
+                        if !saw_thinking_delta {
+                            let final_thinking = content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    theta_ai::ContentBlock::Thinking { thinking, .. } => {
+                                        Some(thinking.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !final_thinking.is_empty() {
+                                let _ = event_tx.send(TuiEvent::ThinkingDelta(final_thinking));
+                            }
+                        }
+                    }
+                    saw_assistant_text_delta = false;
+                    saw_thinking_delta = false;
+                }
+                Ok(AgentEvent::TurnStart { .. }) => {
+                    let _ = event_tx.send(TuiEvent::TurnStart);
+                }
+                Ok(AgentEvent::TurnEnd { .. }) => {
+                    let _ = event_tx.send(TuiEvent::TurnEnd {
+                        stop_reason: latest_turn_end_reason.clone(),
+                    });
+                }
+                Ok(AgentEvent::TurnDecision {
+                    reason, details, ..
+                }) => {
+                    let _ = event_tx.send(TuiEvent::TurnDecision {
+                        reason: format!("{reason:?}"),
+                        details,
+                    });
+                }
+                Ok(AgentEvent::TurnTerminated {
+                    reason, details, ..
+                }) => {
+                    latest_turn_end_reason = format!("{reason:?}");
+                    if !matches!(reason, theta_agent_core::types::TurnEndReason::Completed) {
+                        let detail = details.trim();
+                        let message = if detail.is_empty() {
+                            format!("Turn ended: {reason:?}")
+                        } else {
+                            format!("Turn ended: {reason:?}\n{detail}")
+                        };
+                        let _ = event_tx.send(TuiEvent::Info(message));
                     }
                 }
-                received = events.recv() => match received {
-                    Ok(AgentEvent::MessageStart) => {
-                        saw_assistant_text_delta = false;
-                        saw_thinking_delta = false;
-                    }
-                    Ok(AgentEvent::TextDelta { text }) => {
-                        saw_assistant_text_delta = true;
-                        let _ = event_tx.send(TuiEvent::TextDelta(text));
-                    }
-                    Ok(AgentEvent::ThinkingDelta { thinking }) => {
-                        saw_thinking_delta = true;
-                        let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
-                    }
-                    Ok(AgentEvent::ToolCallStart { .. }) => {}
-                    Ok(AgentEvent::ToolExecutionStart {
-                        tool_call_id: id,
-                        tool_name: name,
-                    }) => {
-                        tool_names.insert(id.clone(), name.clone());
-                        let _ = event_tx.send(TuiEvent::ToolStart { name, id });
-                    }
-                    Ok(AgentEvent::ToolExecutionProgress {
-                        tool_call_id: id,
-                        output,
-                    }) => {
-                        pending_tool_progress.insert(id, output);
-                    }
-                    Ok(AgentEvent::ToolExecutionEnd { result }) => {
-                        if let Some(message) = pending_tool_progress.remove(&result.tool_call_id) {
-                            let _ = event_tx.send(TuiEvent::ToolProgress {
-                                name: tool_names
-                                    .get(&result.tool_call_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| result.tool_call_id.clone()),
-                                message,
-                            });
-                        }
-                        let summary = format_tool_summary(&result, 2200);
-                        tool_names.remove(&result.tool_call_id);
-                        let _ = event_tx.send(TuiEvent::ToolEnd {
-                            id: result.tool_call_id,
-                            name: result.tool_name,
-                            is_error: result.is_error,
-                            summary,
-                        });
-                    }
-                    Ok(AgentEvent::MessageEnd { message }) => {
-                        if let theta_ai::Message::Assistant { content, usage, .. } = &message {
-                            // Forward real token usage to TUI status bar.
-                            if let Some(u) = usage {
-                                let state = agent.state().await;
-                                let avail = state
-                                    .model
-                                    .context_window
-                                    .saturating_sub(reserve_tokens);
-                                let pct = if avail > 0 {
-                                    (u.input_tokens as f64 / avail as f64 * 100.0) as u32
-                                } else {
-                                    0
-                                };
-                                let _ = event_tx.send(TuiEvent::ContextTokens {
-                                    tokens: u.input_tokens,
-                                    pct,
-                                });
-                            }
-                            if !saw_assistant_text_delta {
-                                let final_text = content
-                                    .iter()
-                                    .filter_map(|b| match b {
-                                        theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                if !final_text.is_empty() {
-                                    let _ = event_tx.send(TuiEvent::TextDelta(final_text));
-                                }
-                            }
-                            if !saw_thinking_delta {
-                                let final_thinking = content
-                                    .iter()
-                                    .filter_map(|b| match b {
-                                        theta_ai::ContentBlock::Thinking { thinking, .. } => {
-                                            Some(thinking.as_str())
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                if !final_thinking.is_empty() {
-                                    let _ = event_tx.send(TuiEvent::ThinkingDelta(final_thinking));
-                                }
-                            }
-                        }
-                        saw_assistant_text_delta = false;
-                        saw_thinking_delta = false;
-                    }
-                    Ok(AgentEvent::TurnStart { .. }) => {
-                        let _ = event_tx.send(TuiEvent::TurnStart);
-                    }
-                    Ok(AgentEvent::TurnEnd { .. }) => {
-                        let _ = event_tx.send(TuiEvent::TurnEnd {
-                            stop_reason: latest_turn_end_reason.clone(),
-                        });
-                    }
-                    Ok(AgentEvent::TurnDecision { reason, details, .. }) => {
-                        let _ = event_tx.send(TuiEvent::TurnDecision {
-                            reason: format!("{reason:?}"),
-                            details,
-                        });
-                    }
-                    Ok(AgentEvent::TurnTerminated {
-                        reason, details, ..
-                    }) => {
-                        latest_turn_end_reason = format!("{reason:?}");
-                        if !matches!(reason, theta_agent_core::types::TurnEndReason::Completed) {
-                            let detail = details.trim();
-                            let message = if detail.is_empty() {
-                                format!("Turn ended: {reason:?}")
-                            } else {
-                                format!("Turn ended: {reason:?}\n{detail}")
-                            };
-                            let _ = event_tx.send(TuiEvent::Info(message));
-                        }
-                    }
-                    Ok(AgentEvent::SafetyDecision {
+                Ok(AgentEvent::SafetyDecision {
+                    decision,
+                    tool_name,
+                    details,
+                    ..
+                }) => {
+                    if matches!(
                         decision,
-                        tool_name,
-                        details,
-                        ..
-                    }) => {
-                        if matches!(
-                            decision,
-                            theta_agent_core::types::SafetyDecisionKind::Rejected
-                        ) {
-                            let _ = event_tx.send(TuiEvent::Info(format!(
-                                "Safety policy rejected {tool_name}: {details}"
-                            )));
-                        }
-                    }
-                    Ok(AgentEvent::AgentEnd { .. }) => {
-                        let _ = event_tx.send(TuiEvent::AgentEnd);
-                    }
-                    Ok(AgentEvent::ContextCompacted { trimmed_count, tokens_before, tokens_after }) => {
-                        let _ = event_tx.send(TuiEvent::ContextCompacted { trimmed_count, tokens_before, tokens_after });
-                    }
-                    Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
-                        let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
-                    }
-                    Ok(AgentEvent::ReplaySanitized {
-                        dropped_assistant_messages,
-                        synthesized_tool_results,
-                        normalized_tool_call_ids,
-                        deduped_tool_results,
-                    }) => {
+                        theta_agent_core::types::SafetyDecisionKind::Rejected
+                    ) {
                         let _ = event_tx.send(TuiEvent::Info(format!(
-                            "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}, deduped_tool_results={deduped_tool_results}"
+                            "Safety policy rejected {tool_name}: {details}"
                         )));
                     }
-                    Ok(AgentEvent::Error { message }) => {
-                        let _ = event_tx.send(TuiEvent::Error(message));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        let _ = event_tx.send(TuiEvent::Error(format!("lagged by {n} events")));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    _ => {}
                 }
+                Ok(AgentEvent::AgentEnd { .. }) => {
+                    let _ = event_tx.send(TuiEvent::AgentEnd);
+                }
+                Ok(AgentEvent::ContextCompacted {
+                    trimmed_count,
+                    tokens_before,
+                    tokens_after,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::ContextCompacted {
+                        trimmed_count,
+                        tokens_before,
+                        tokens_after,
+                    });
+                }
+                Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
+                    let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
+                }
+                Ok(AgentEvent::ReplaySanitized {
+                    dropped_assistant_messages,
+                    synthesized_tool_results,
+                    normalized_tool_call_ids,
+                    deduped_tool_results,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::Info(format!(
+                        "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}, deduped_tool_results={deduped_tool_results}"
+                    )));
+                }
+                Ok(AgentEvent::Error { message }) => {
+                    let _ = event_tx.send(TuiEvent::Error(message));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Log but don't forward to TUI — just continue.
+                    // The next recv() will return the most recent event.
+                    tracing::warn!("event bridge lagged by {n} events; continuing");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
             }
         }
     });
 }
-
-/// Block until an agent is available in the cell.
 async fn wait_for_agent(cell: &AgentCell) -> Arc<Agent> {
     loop {
         if let Some(agent) = cell.read().await.clone() {

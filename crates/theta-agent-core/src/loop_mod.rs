@@ -1,8 +1,12 @@
 //! Agent loop: the core turn execution engine.
 //!
-//! Implements the nested loop pattern:
-//! - Outer loop: handles follow-up turns (until shouldStopAfterTurn or queue empty)
-//! - Inner loop: handles LLM call + tool execution cycle
+//! Follows Pi's approach: the loop is dumb and universal — it calls the LLM,
+//! executes tools, feeds results back, and repeats until the model stops
+//! emitting tool calls. Intelligence lives in the system prompt, not in
+//! heuristic classifiers. Command-policy safety checks are always-on.
+//!
+//! Outer loop: follow-up turns (until shouldStopAfterTurn or queue empty).
+//! Inner loop: LLM call → tool execution → tool results → repeat.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -21,16 +25,13 @@ use theta_ai::{
     StopReason, StreamOptions, ThinkingLevel,
 };
 
+use crate::command_policy;
 use crate::error::AgentError;
 use crate::events::{AgentEvent, TurnDecisionReason};
 use crate::hooks::Hooks;
 use crate::state::AgentState;
 use crate::tools;
-use crate::types::{
-    AgentIntent, AgentLoopConfig, CompactionStrategy, RunReport, SafetyDecisionKind, ToolCall,
-    TurnEndReason, TurnMode,
-};
-use crate::{command_policy, command_policy::SafetyDecision};
+use crate::types::{AgentLoopConfig, CompactionStrategy, RunReport, ToolCall, TurnEndReason};
 
 #[derive(Debug, Clone)]
 struct BreakerState {
@@ -215,7 +216,13 @@ async fn run_outer_loop(
     Ok(())
 }
 
-/// Run a single turn of the agent loop (one LLM call, possible tool cycles).
+/// Run a single turn: LLM call → tool execution → repeat until no more tools.
+///
+/// The loop is intentionally dumb — it does not classify intent, infer modes,
+/// or selectively filter tools. All tool filtering is handled by the always-on
+/// command policy (which checks for destructive operations like `rm -rf`,
+/// `git push --force`, etc.) and by the system prompt (which guides the model
+/// on when to analyze vs implement).
 #[allow(clippy::too_many_arguments)]
 async fn run_single_turn(
     state: &mut AgentState,
@@ -239,21 +246,7 @@ async fn run_single_turn(
             ("turn_id".to_string(), turn_id),
         ],
     );
-    let (turn_mode, mode_source) = resolve_turn_mode(state);
-    state.last_turn_mode = Some(turn_mode);
-    let _ = event_tx.send(AgentEvent::TurnModeResolved {
-        turn_index,
-        mode: turn_mode,
-        source: mode_source.to_string(),
-    });
-    state.push_run_event(
-        "turn_mode_resolved",
-        [
-            ("turn".to_string(), turn_index.to_string()),
-            ("mode".to_string(), format!("{turn_mode:?}")),
-            ("source".to_string(), mode_source.to_string()),
-        ],
-    );
+
     // Inject any prepare-next-turn messages.
     let prepend = hooks.prepare_next_turn(state).await;
     for msg in prepend {
@@ -263,17 +256,12 @@ async fn run_single_turn(
     // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
     let mut empty_assistant_retries: u32 = 0;
-    let mut consecutive_noop_rounds: u32 = 0;
-    let mut executed_tools_in_turn = false;
     let mut repeated_tool_signature_counts: HashMap<String, u32> = HashMap::new();
     let max_same_tool_signature_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
-    let mut terminated: Option<(TurnEndReason, String, u32)> = None;
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
         drain_queue(steering_queue, state);
-
-        // Only check abort if no steering messages are pending.
         check_abort!(abort_token, steering_queue);
 
         if let Some(max_rounds) = config.max_tool_rounds
@@ -282,9 +270,7 @@ async fn run_single_turn(
             tracing::warn!("max tool rounds reached ({max_rounds})");
             let _ = event_tx.send(AgentEvent::TurnDecision {
                 reason: TurnDecisionReason::MaxRounds,
-                details: format!(
-                    "stopped after reaching max tool rounds ({max_rounds}); likely provider/tool-call loop"
-                ),
+                details: format!("stopped after reaching max tool rounds ({max_rounds})"),
                 turn: turn_index,
                 round: tool_round,
             });
@@ -296,19 +282,20 @@ async fn run_single_turn(
                     ("reason".to_string(), "MaxRounds".to_string()),
                 ],
             );
-            terminated = Some((
-                TurnEndReason::MaxToolRounds,
-                format!("reached max tool rounds ({max_rounds})"),
-                tool_round,
-            ));
-            break;
+            state.last_turn_end_reason = Some(TurnEndReason::MaxToolRounds);
+            let _ = event_tx.send(AgentEvent::TurnTerminated {
+                reason: TurnEndReason::MaxToolRounds,
+                details: format!("reached max tool rounds ({max_rounds})"),
+                turn: turn_index,
+                round: tool_round,
+            });
+            return Ok(());
         }
 
-        // Build the LLM context from current state, with compaction.
+        // Build context (with compaction).
         let (context, compaction_stats, replay_stats) =
             build_context(state, provider, config, event_tx).await;
 
-        // Emit compaction event if messages were trimmed.
         if let Some(stats) = compaction_stats {
             let _ = event_tx.send(AgentEvent::ContextCompacted {
                 trimmed_count: stats.trimmed_count,
@@ -329,15 +316,13 @@ async fn run_single_turn(
             turn = turn_index,
             round = tool_round,
             messages = context.messages.len(),
-            tools = context.tools.len(),
             "calling LLM",
         );
 
-        // Notify that we're starting a message.
+        // Call the LLM.
         let _ = event_tx.send(AgentEvent::MessageStart);
         state.is_streaming = true;
 
-        // Build stream options.
         let stream_options = StreamOptions {
             max_tokens: config.max_tokens,
             temperature: config.temperature,
@@ -347,7 +332,6 @@ async fn run_single_turn(
             ..Default::default()
         };
 
-        // Call the LLM provider and consume the stream.
         match run_llm_stream(
             state,
             provider,
@@ -372,7 +356,6 @@ async fn run_single_turn(
                 };
 
                 state.add_assistant_message(assistant_msg.clone());
-
                 let _ = event_tx.send(AgentEvent::MessageEnd {
                     message: assistant_msg,
                 });
@@ -381,6 +364,7 @@ async fn run_single_turn(
                     ToolCall::from_message(state.messages.last().expect("just pushed"));
                 let has_tool_calls = !tool_calls.is_empty();
 
+                // Empty response: retry up to twice, then stop.
                 if !assistant_has_text && !has_tool_calls {
                     if empty_assistant_retries < 2 {
                         empty_assistant_retries += 1;
@@ -396,20 +380,18 @@ async fn run_single_turn(
                         tool_round += 1;
                         continue;
                     }
-
                     let _ = event_tx.send(AgentEvent::Error {
                         message: "assistant produced no text and no tool calls after retries"
                             .to_string(),
                     });
                     break;
                 }
-
                 empty_assistant_retries = 0;
 
+                // Unresolved tool-call state: replay request.
                 let unresolved_tool_use = unresolved_tool_calls > 0
                     && !has_tool_calls
                     && stop_reason == Some(StopReason::ToolUse);
-
                 if unresolved_tool_use {
                     if assistant_has_text {
                         tracing::warn!(
@@ -419,7 +401,7 @@ async fn run_single_turn(
                     } else {
                         let _ = event_tx.send(AgentEvent::Error {
                             message: format!(
-                                "tool-call parsing incomplete: {unresolved_tool_calls} unresolved tool call(s); requesting tool-call replay"
+                                "tool-call parsing incomplete: {unresolved_tool_calls} unresolved tool call(s)"
                             ),
                         });
                         state.messages.push(Message::User {
@@ -433,121 +415,25 @@ async fn run_single_turn(
                     }
                 }
 
+                // No tool calls — turn is complete.
                 if !has_tool_calls {
-                    let assistant_text =
-                        assistant_text_opt(&state.messages[state.messages.len() - 1])
-                            .unwrap_or_default();
-
-                    if matches!(turn_mode, TurnMode::PlanOnly | TurnMode::Clarify) {
-                        terminated = Some((
-                            TurnEndReason::Completed,
-                            "mode-complete".to_string(),
-                            tool_round,
-                        ));
-                        break;
-                    }
-
-                    if turn_mode == TurnMode::Execute
-                        && !executed_tools_in_turn
-                        && (consecutive_noop_rounds < 1
-                            || looks_like_execution_promise(&assistant_text))
-                    {
-                        consecutive_noop_rounds += 1;
-                        let _ = event_tx.send(AgentEvent::TurnDecision {
-                            reason: TurnDecisionReason::NoopRetry,
-                            details: "execute intent produced no tool calls; retrying once"
-                                .to_string(),
-                            turn: turn_index,
-                            round: tool_round,
-                        });
-                        state.push_run_event(
-                            "turn_decision",
-                            [
-                                ("turn".to_string(), turn_index.to_string()),
-                                ("round".to_string(), tool_round.to_string()),
-                                ("reason".to_string(), "NoopRetry".to_string()),
-                            ],
-                        );
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::text(VALIDATION_RETRY_PROMPT)],
-                            timestamp: now_ms(),
-                        });
-                        tool_round += 1;
-                        continue;
-                    }
-                    if turn_mode == TurnMode::Execute
-                        && !executed_tools_in_turn
-                        && classify_action_blocker(&assistant_text).is_some()
-                    {
-                        let reason = classify_action_blocker(&assistant_text)
-                            .unwrap_or(TurnEndReason::BlockedRuntimeConstraint);
-                        let _ = event_tx.send(AgentEvent::TurnDecision {
-                            reason: TurnDecisionReason::BlockedNoop,
-                            details: "execute intent stopped due to explicit blocker".to_string(),
-                            turn: turn_index,
-                            round: tool_round,
-                        });
-                        state.push_run_event(
-                            "turn_decision",
-                            [
-                                ("turn".to_string(), turn_index.to_string()),
-                                ("round".to_string(), tool_round.to_string()),
-                                ("reason".to_string(), "BlockedNoop".to_string()),
-                            ],
-                        );
-                        terminated = Some((reason, assistant_text, tool_round));
-                    }
-
-                    if turn_mode == TurnMode::Inspect && !executed_tools_in_turn {
-                        consecutive_noop_rounds += 1;
-                        if consecutive_noop_rounds <= 1 {
-                            state.messages.push(Message::User {
-                                content: vec![ContentBlock::text(
-                                    "This is an inspection request. Use read-only tools now and report findings.",
-                                )],
-                                timestamp: now_ms(),
-                            });
-                            tool_round += 1;
-                            continue;
-                        }
-                    }
-                    if turn_mode == TurnMode::AnalyzeOnly && !executed_tools_in_turn {
-                        consecutive_noop_rounds += 1;
-                        if consecutive_noop_rounds <= 1 {
-                            let _ = event_tx.send(AgentEvent::TurnDecision {
-                                reason: TurnDecisionReason::NoopRetry,
-                                details:
-                                    "analyze-only intent produced no tool calls; retrying once"
-                                        .to_string(),
-                                turn: turn_index,
-                                round: tool_round,
-                            });
-                            state.push_run_event(
-                                "turn_decision",
-                                [
-                                    ("turn".to_string(), turn_index.to_string()),
-                                    ("round".to_string(), tool_round.to_string()),
-                                    ("reason".to_string(), "NoopRetry".to_string()),
-                                ],
-                            );
-                            state.messages.push(Message::User {
-                                content: vec![ContentBlock::text(ANALYZE_RETRY_PROMPT)],
-                                timestamp: now_ms(),
-                            });
-                            tool_round += 1;
-                            continue;
-                        }
-                    }
-                    if terminated.is_none() {
-                        terminated = Some((
-                            TurnEndReason::Completed,
-                            "completed".to_string(),
-                            tool_round,
-                        ));
-                    }
-                    break;
+                    state.last_turn_end_reason = Some(TurnEndReason::Completed);
+                    let _ = event_tx.send(AgentEvent::TurnTerminated {
+                        reason: TurnEndReason::Completed,
+                        details: "completed".to_string(),
+                        turn: turn_index,
+                        round: tool_round,
+                    });
+                    state.push_run_event(
+                        "turn_terminated",
+                        [
+                            ("turn".to_string(), turn_index.to_string()),
+                            ("round".to_string(), tool_round.to_string()),
+                            ("reason".to_string(), "Completed".to_string()),
+                        ],
+                    );
+                    return Ok(());
                 }
-                consecutive_noop_rounds = 0;
 
                 if stop_reason != Some(StopReason::ToolUse) {
                     let _ = event_tx.send(AgentEvent::Error {
@@ -555,6 +441,7 @@ async fn run_single_turn(
                     });
                 }
 
+                // Repeated tool signature detection.
                 for tc in &tool_calls {
                     let signature = format!("{}:{}", tc.name, tc.arguments);
                     let count = repeated_tool_signature_counts
@@ -568,148 +455,90 @@ async fn run_single_turn(
                                 signature, max_same_tool_signature_repeats
                             ),
                         });
+                        state.last_turn_end_reason = Some(TurnEndReason::Completed);
+                        let _ = event_tx.send(AgentEvent::TurnTerminated {
+                            reason: TurnEndReason::Completed,
+                            details: "stopped due to repeated tool calls".to_string(),
+                            turn: turn_index,
+                            round: tool_round,
+                        });
                         return Ok(());
                     }
                 }
 
-                if matches!(turn_mode, TurnMode::AnalyzeOnly | TurnMode::Inspect) {
-                    let mut allowed = Vec::new();
-                    for tc in &tool_calls {
-                        let SafetyDecision { decision, details } =
-                            command_policy::evaluate_tool_call(
-                                turn_mode,
-                                tc,
-                                config.command_policy_strict,
-                            );
-                        if decision == SafetyDecisionKind::Allowed {
-                            let _ = event_tx.send(AgentEvent::SafetyDecision {
-                                decision,
-                                mode: turn_mode,
-                                tool_name: tc.name.clone(),
-                                details,
-                            });
-                            state.push_run_event(
-                                "safety_decision",
-                                [
-                                    ("turn".to_string(), turn_index.to_string()),
-                                    ("round".to_string(), tool_round.to_string()),
-                                    ("tool_name".to_string(), tc.name.clone()),
-                                    ("decision".to_string(), "Allowed".to_string()),
-                                ],
-                            );
-                            allowed.push(tc.clone());
-                        } else {
-                            let _ = event_tx.send(AgentEvent::SafetyDecision {
-                                decision,
-                                mode: turn_mode,
-                                tool_name: tc.name.clone(),
-                                details: details.clone(),
-                            });
-                            let _ = event_tx.send(AgentEvent::TurnDecision {
-                                reason: TurnDecisionReason::AnalyzeOnlyRejectedTool,
-                                details: format!(
-                                    "blocked mutating tool call '{}' during {turn_mode:?} turn",
-                                    tc.name,
-                                ),
-                                turn: turn_index,
-                                round: tool_round,
-                            });
-                        }
-                    }
-                    if allowed.is_empty() {
-                        terminated = Some((
-                            TurnEndReason::SafetyRejected,
-                            format!("all tool calls rejected by {turn_mode:?} policy"),
-                            tool_round,
-                        ));
-                        break;
-                    }
-                    tools::execute_tool_calls(
-                        state,
-                        &allowed,
-                        abort_token.clone(),
-                        event_tx,
-                        hooks,
-                        &config.tool_watchdog,
-                    )
-                    .await?;
+                // Execute tools. Command policy runs as always-on safety net:
+                // it blocks destructive operations regardless of "mode".
+                // The system prompt is responsible for guiding the model on
+                // when to use mutation tools vs read-only tools.
+                let mut allowed = Vec::new();
+                for tc in &tool_calls {
+                    let decision =
+                        command_policy::evaluate_tool_call(tc, config.command_policy_strict);
+                    let _ = event_tx.send(AgentEvent::SafetyDecision {
+                        decision: decision.decision,
+                        tool_name: tc.name.clone(),
+                        details: decision.details.clone(),
+                    });
                     state.push_run_event(
-                        "tool_batch_executed",
+                        "safety_decision",
                         [
                             ("turn".to_string(), turn_index.to_string()),
                             ("round".to_string(), tool_round.to_string()),
-                            ("tool_count".to_string(), allowed.len().to_string()),
+                            ("tool_name".to_string(), tc.name.clone()),
+                            ("decision".to_string(), format!("{:?}", decision.decision)),
                         ],
                     );
-                    executed_tools_in_turn = true;
-                } else {
-                    let mut allowed = Vec::new();
-                    for tc in &tool_calls {
-                        let SafetyDecision { decision, details } =
-                            command_policy::evaluate_tool_call(
-                                turn_mode,
-                                tc,
-                                config.command_policy_strict,
-                            );
-                        let _ = event_tx.send(AgentEvent::SafetyDecision {
-                            decision,
-                            mode: turn_mode,
-                            tool_name: tc.name.clone(),
-                            details: details.clone(),
-                        });
-                        state.push_run_event(
-                            "safety_decision",
-                            [
-                                ("turn".to_string(), turn_index.to_string()),
-                                ("round".to_string(), tool_round.to_string()),
-                                ("tool_name".to_string(), tc.name.clone()),
-                                ("decision".to_string(), format!("{decision:?}")),
-                            ],
-                        );
-                        if decision == SafetyDecisionKind::Allowed {
-                            allowed.push(tc.clone());
-                        }
+                    if decision.decision == crate::types::SafetyDecisionKind::Allowed {
+                        allowed.push(tc.clone());
                     }
-                    if allowed.is_empty() {
-                        terminated = Some((
-                            TurnEndReason::SafetyRejected,
-                            "all tool calls rejected by policy".to_string(),
-                            tool_round,
-                        ));
-                        break;
-                    }
-                    tools::execute_tool_calls(
-                        state,
-                        &allowed,
-                        abort_token.clone(),
-                        event_tx,
-                        hooks,
-                        &config.tool_watchdog,
-                    )
-                    .await?;
-                    state.push_run_event(
-                        "tool_batch_executed",
-                        [
-                            ("turn".to_string(), turn_index.to_string()),
-                            ("round".to_string(), tool_round.to_string()),
-                            ("tool_count".to_string(), allowed.len().to_string()),
-                        ],
-                    );
-                    executed_tools_in_turn = true;
                 }
+
+                if allowed.is_empty() {
+                    state.last_turn_end_reason = Some(TurnEndReason::SafetyRejected);
+                    let _ = event_tx.send(AgentEvent::TurnTerminated {
+                        reason: TurnEndReason::SafetyRejected,
+                        details: "all tool calls rejected by command policy".to_string(),
+                        turn: turn_index,
+                        round: tool_round,
+                    });
+                    state.push_run_event(
+                        "turn_terminated",
+                        [
+                            ("turn".to_string(), turn_index.to_string()),
+                            ("round".to_string(), tool_round.to_string()),
+                            ("reason".to_string(), "SafetyRejected".to_string()),
+                        ],
+                    );
+                    return Ok(());
+                }
+
+                tools::execute_tool_calls(
+                    state,
+                    &allowed,
+                    abort_token.clone(),
+                    event_tx,
+                    hooks,
+                    &config.tool_watchdog,
+                )
+                .await?;
+                state.push_run_event(
+                    "tool_batch_executed",
+                    [
+                        ("turn".to_string(), turn_index.to_string()),
+                        ("round".to_string(), tool_round.to_string()),
+                        ("tool_count".to_string(), allowed.len().to_string()),
+                    ],
+                );
 
                 tool_round += 1;
             }
             Err(AgentError::Aborted) => {
                 state.is_streaming = false;
-                // If steering messages are queued, the abort was intentional
-                // to interrupt for steering. Reset the flag, drain, and continue.
                 if drain_queue(steering_queue, state) {
                     steering_abort.store(false, Ordering::SeqCst);
                     tracing::debug!("aborted for steering, continuing turn");
                     continue;
                 }
-                // Otherwise propagate the abort.
                 state.last_turn_end_reason = Some(TurnEndReason::AbortedByUser);
                 let _ = event_tx.send(AgentEvent::TurnTerminated {
                     reason: TurnEndReason::AbortedByUser,
@@ -750,271 +579,23 @@ async fn run_single_turn(
         }
     }
 
-    let (reason, details, round) = terminated.unwrap_or((
-        TurnEndReason::Completed,
-        "completed".to_string(),
-        tool_round,
-    ));
-    state.last_turn_end_reason = Some(reason);
+    state.last_turn_end_reason = Some(TurnEndReason::Completed);
     let _ = event_tx.send(AgentEvent::TurnTerminated {
-        reason,
-        details,
+        reason: TurnEndReason::Completed,
+        details: "completed".to_string(),
         turn: turn_index,
-        round,
+        round: tool_round,
     });
     state.push_run_event(
         "turn_terminated",
         [
             ("turn".to_string(), turn_index.to_string()),
-            ("round".to_string(), round.to_string()),
-            ("reason".to_string(), format!("{reason:?}")),
+            ("round".to_string(), tool_round.to_string()),
+            ("reason".to_string(), "Completed".to_string()),
         ],
     );
 
     Ok(())
-}
-
-const VALIDATION_RETRY_PROMPT: &str = "This is an execution request. Call the relevant tools now. If blocked, state the blocker clearly and stop.";
-const ANALYZE_RETRY_PROMPT: &str = "This is an analysis request. Use read-only tools now (read/grep/find/ls or read-only bash) and report findings.";
-
-fn classify_action_blocker(text: &str) -> Option<TurnEndReason> {
-    let t = text.to_lowercase();
-    let missing_info = [
-        "need more detail",
-        "what should i implement",
-        "provide the target",
-        "please provide",
-        "missing info",
-        "which file",
-    ]
-    .iter()
-    .any(|kw| t.contains(kw));
-    let permission = [
-        "permission denied",
-        "not permitted",
-        "need approval",
-        "requires approval",
-        "access denied",
-    ]
-    .iter()
-    .any(|kw| t.contains(kw));
-    let runtime = [
-        "no such file or directory",
-        "path not found",
-        "sandbox",
-        "token expired",
-        "authentication",
-        "network",
-        "timeout",
-        "cannot access",
-        "blocked",
-    ]
-    .iter()
-    .any(|kw| t.contains(kw));
-    if missing_info {
-        Some(TurnEndReason::BlockedMissingInfo)
-    } else if permission {
-        Some(TurnEndReason::BlockedPermission)
-    } else if runtime {
-        Some(TurnEndReason::BlockedRuntimeConstraint)
-    } else {
-        None
-    }
-}
-
-fn tokenize_words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
-fn contains_token_sequence(tokens: &[String], phrase_tokens: &[&str]) -> bool {
-    if phrase_tokens.is_empty() {
-        return false;
-    }
-    if phrase_tokens.len() == 1 {
-        return tokens.iter().any(|tok| tok == phrase_tokens[0]);
-    }
-    tokens.windows(phrase_tokens.len()).any(|window| {
-        window
-            .iter()
-            .map(String::as_str)
-            .eq(phrase_tokens.iter().copied())
-    })
-}
-
-fn assistant_text_opt(message: &Message) -> Option<String> {
-    match message {
-        Message::Assistant { content, .. } => {
-            let text = content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        _ => None,
-    }
-}
-
-fn latest_user_text(state: &AgentState) -> Option<String> {
-    state.messages.iter().rev().find_map(|msg| match msg {
-        Message::User { content, .. } => {
-            let text = content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        _ => None,
-    })
-}
-
-fn looks_like_execution_request(text: &str) -> bool {
-    let t = text.to_lowercase();
-    let tokens = tokenize_words(&t);
-    [
-        &["implement"][..],
-        &["fix"],
-        &["patch"],
-        &["edit"],
-        &["modify"],
-        &["update", "code"],
-        &["change", "code"],
-        &["add", "code"],
-        &["remove", "code"],
-        &["refactor"],
-        &["commit"],
-        &["push"],
-        &["install"],
-        &["add", "dependency"],
-        &["add", "dependencies"],
-        &["run", "git"],
-        &["run", "it"],
-        &["do", "it"],
-    ]
-    .iter()
-    .any(|seq| contains_token_sequence(&tokens, seq))
-}
-
-fn looks_like_execution_promise(text: &str) -> bool {
-    let t = text.to_lowercase();
-    [
-        "on it",
-        "i'll implement",
-        "i will implement",
-        "i'll patch",
-        "i will patch",
-        "starting code changes",
-    ]
-    .iter()
-    .any(|kw| t.contains(kw))
-}
-
-fn infer_intent(text: &str) -> AgentIntent {
-    let t = text.to_lowercase();
-    if t.trim().is_empty() {
-        return AgentIntent::Default;
-    }
-    if (t.contains("plan only")
-        || t.contains("just plan")
-        || t.contains("brainstorm")
-        || t.contains("do not implement")
-        || t.contains("don't implement"))
-        && !looks_like_execution_request(&t)
-    {
-        return AgentIntent::PlanOnly;
-    }
-    if t.trim() == "do it" || t.trim() == "fix it" {
-        return AgentIntent::Clarify;
-    }
-    if t.contains("inspect")
-        || t.contains("check")
-        || t.contains("validate")
-        || t.contains("validation")
-        || t.contains("what changed")
-    {
-        if looks_like_execution_request(&t) {
-            return AgentIntent::Execute;
-        }
-        return AgentIntent::Inspect;
-    }
-    if t.contains("review")
-        || t.contains("analyze")
-        || t.contains("analyse")
-        || t.contains("architecture")
-    {
-        if looks_like_execution_request(&t) {
-            return AgentIntent::Execute;
-        }
-        return AgentIntent::AnalyzeOnly;
-    }
-    if t.contains("commit") || t.contains("push") || t.contains("apply patch") {
-        return AgentIntent::Execute;
-    }
-    if looks_like_execution_request(&t) {
-        return AgentIntent::Execute;
-    }
-    AgentIntent::Default
-}
-
-fn resolve_turn_mode(state: &AgentState) -> (TurnMode, &'static str) {
-    if let Some(mode) = state.turn_mode_override {
-        return (mode, "runtime_override");
-    }
-    if let Some(mode) = infer_turn_mode_hint(state) {
-        return (mode, "context_hint");
-    }
-    let text = latest_user_text(state).unwrap_or_default();
-    (TurnMode::from(infer_intent(&text)), "fallback_classifier")
-}
-
-fn infer_turn_mode_hint(state: &AgentState) -> Option<TurnMode> {
-    let latest_user = latest_user_text(state).unwrap_or_default().to_lowercase();
-    if let Some(mode) = parse_mode_hint(&latest_user) {
-        return Some(mode);
-    }
-    let system_text = state
-        .system_prompt
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_lowercase();
-    parse_mode_hint(&system_text)
-}
-
-fn parse_mode_hint(text: &str) -> Option<TurnMode> {
-    let pairs = [
-        ("mode:execute", TurnMode::Execute),
-        ("mode:inspect", TurnMode::Inspect),
-        ("mode:analyze", TurnMode::AnalyzeOnly),
-        ("mode:analyzeonly", TurnMode::AnalyzeOnly),
-        ("mode:plan", TurnMode::PlanOnly),
-        ("mode:clarify", TurnMode::Clarify),
-    ];
-    pairs
-        .iter()
-        .find_map(|(needle, mode)| text.contains(needle).then_some(*mode))
 }
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.
@@ -1455,79 +1036,6 @@ fn format_agent_error_chain(error: &AgentError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn infer_intent_does_not_treat_provider_path_as_commit_ops() {
-        let intent = infer_intent(
-            "Use grep tool on crates/theta-ai/src/providers/openai_compat.rs and report lines",
-        );
-        assert_ne!(intent, AgentIntent::Execute);
-    }
-
-    #[test]
-    fn infer_intent_detects_analyze_only() {
-        let intent = infer_intent("Please review the architecture and analyze the current design.");
-        assert_eq!(intent, AgentIntent::AnalyzeOnly);
-    }
-
-    #[test]
-    fn infer_intent_treats_validation_review_as_inspection() {
-        let intent = infer_intent("Validate the current changes and review for inconsistencies.");
-        assert_eq!(intent, AgentIntent::Inspect);
-    }
-
-    #[test]
-    fn token_sequence_matching_requires_boundaries() {
-        let tokens = tokenize_words("providers openai_compat");
-        assert!(!contains_token_sequence(&tokens, &["pr"]));
-    }
-
-    #[test]
-    fn read_only_tool_call_detects_common_read_only_bash_commands() {
-        let tc = ToolCall {
-            id: "1".into(),
-            name: "bash".into(),
-            arguments: serde_json::json!({"command":"sed -n '1,20p' Cargo.toml && git show HEAD~1"}),
-        };
-        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-        assert_eq!(decision.decision, SafetyDecisionKind::Allowed);
-    }
-
-    #[test]
-    fn command_policy_rejects_mode_mismatched_git_commands() {
-        let tc = ToolCall {
-            id: "1".into(),
-            name: "bash".into(),
-            arguments: serde_json::json!({"command":"git commit -m test"}),
-        };
-        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-        assert_eq!(decision.decision, SafetyDecisionKind::Rejected);
-    }
-
-    #[test]
-    fn command_policy_rejects_mode_mismatched_sed_in_place() {
-        let tc = ToolCall {
-            id: "1".into(),
-            name: "bash".into(),
-            arguments: serde_json::json!({"command":"sed -i '' 's/a/b/g' file.txt"}),
-        };
-        let decision = crate::command_policy::evaluate_tool_call(TurnMode::AnalyzeOnly, &tc, true);
-        assert_eq!(decision.decision, SafetyDecisionKind::Rejected);
-    }
-
-    #[test]
-    fn parse_mode_hint_detects_known_hints() {
-        assert_eq!(
-            parse_mode_hint("please run mode:inspect now"),
-            Some(TurnMode::Inspect)
-        );
-        assert_eq!(
-            parse_mode_hint("system says mode:analyze"),
-            Some(TurnMode::AnalyzeOnly)
-        );
-        assert_eq!(parse_mode_hint("mode:plan"), Some(TurnMode::PlanOnly));
-        assert_eq!(parse_mode_hint("no hint"), None);
-    }
-
+    // No intent-classification tests. The loop follows Pi's approach:
+    // system prompt guides behavior, code does not infer intent.
 }

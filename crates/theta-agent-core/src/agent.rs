@@ -156,12 +156,6 @@ impl Agent {
         state.thinking_level = level;
     }
 
-    /// Set or clear an explicit runtime turn-mode override.
-    pub async fn set_turn_mode_override(&self, mode: Option<crate::types::TurnMode>) {
-        let mut state = self.state.write().await;
-        state.turn_mode_override = mode;
-    }
-
     /// Load past messages from a session (for continue/resume).
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
