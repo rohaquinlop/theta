@@ -1412,6 +1412,9 @@ impl App {
             TuiEvent::SessionCreated { id, model } => {
                 self.status.session_id = id;
                 self.status.model = model;
+                self.status.context_tokens = 0;
+                self.status.ctx_pct = 0;
+                self.status.turn_index = 0;
                 self.status.set_detail("session created");
             }
             TuiEvent::AgentEnd => {

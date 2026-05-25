@@ -19,7 +19,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::{build_system_prompt, build_system_prompt_with_skills};
+use crate::system_prompt::build_system_prompt_with_skills;
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -212,7 +212,6 @@ pub async fn run_tui(
     let msg_event_tx = event_tx_raw.clone();
     let msg_working_dir = working_dir.to_path_buf();
     let msg_session_id_cell = session_id_cell.clone();
-    let msg_model_id = model_id.to_string();
     let msg_skills = skills.clone();
     tokio::spawn(async move {
         // Wait for agent to be available (block until login completes).
@@ -225,7 +224,10 @@ pub async fn run_tui(
             // Lazy session creation on first real message — no session
             // file is left behind for login-only or no-message runs.
             if msg_session_id_cell.read().await.is_none() {
-                match session_mgr.create(Some(&msg_model_id)).await {
+                // Read current model from agent — not from closure-captured
+                // model_id which may be stale after a model switch.
+                let current_model_id = agent.state().await.model.id.clone();
+                match session_mgr.create(Some(&current_model_id)).await {
                     Ok(session) => {
                         let id = session
                             .meta
@@ -234,7 +236,7 @@ pub async fn run_tui(
                             .unwrap_or_default();
                         let _ = msg_event_tx.send(TuiEvent::SessionCreated {
                             id: id.clone(),
-                            model: msg_model_id.clone(),
+                            model: current_model_id,
                         });
                         *msg_session_id_cell.write().await = Some(id);
                     }
@@ -920,7 +922,17 @@ async fn handle_tui_action(
                 agent.set_api_key(m.provider, key);
                 let levels = compute_valid_thinking_levels(&m);
                 agent.set_model(m).await;
-                let blocks = build_system_prompt(working_dir, &model_id, None, None).await;
+                // Read thinking level before rebuilding prompt so runtime
+                // context shows the correct level and startup skills are re-applied.
+                let state = agent.state().await;
+                let current_thinking = thinking_level_to_string(state.thinking_level);
+                let blocks = build_system_prompt_with_skills(
+                    working_dir,
+                    &model_id,
+                    Some(&current_thinking),
+                    &config.startup_skills,
+                )
+                .await;
                 agent.set_system_prompt(blocks).await;
                 let _ = event_tx.send(TuiEvent::Info(format!(
                     "Switched to {model_id} ({provider})"
@@ -928,12 +940,9 @@ async fn handle_tui_action(
                 let _ = event_tx.send(TuiEvent::ModelSwitched {
                     model: model_id.to_string(),
                 });
-                let state = agent.state().await;
-                let current_str = thinking_level_to_string(state.thinking_level);
-                drop(state);
                 let _ = event_tx.send(TuiEvent::ThinkingLevels {
                     levels,
-                    current: current_str,
+                    current: current_thinking,
                 });
                 // Persist model preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
@@ -1091,13 +1100,20 @@ async fn handle_tui_action(
                     let messages = session.messages.clone();
                     let recap = session_recap(&session);
                     agent.load_messages(messages.clone()).await;
-                    let mid = agent
-                        .state()
-                        .await
+                    let state = agent.state().await;
+                    let mid = state
                         .last_model_id()
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| model_id.to_string());
-                    let blocks = build_system_prompt(working_dir, &mid, None, None).await;
+                    let current_thinking = thinking_level_to_string(state.thinking_level);
+                    drop(state);
+                    let blocks = build_system_prompt_with_skills(
+                        working_dir,
+                        &mid,
+                        Some(&current_thinking),
+                        &config.startup_skills,
+                    )
+                    .await;
                     agent.set_system_prompt(blocks).await;
                     *session_id_cell.write().await = Some(id.clone());
                     let _ = event_tx.send(TuiEvent::SessionCreated {
@@ -1145,7 +1161,20 @@ async fn handle_tui_action(
 
             // Clear in-memory transcript — no session file until first message.
             agent.load_messages(Vec::new()).await;
-            let blocks = build_system_prompt(working_dir, model_id, None, None).await;
+            // Read current model and thinking level from agent state so
+            // runtime context shows the correct values and startup skills are
+            // re-applied.
+            let state = agent.state().await;
+            let current_model_id = state.model.id.clone();
+            let current_thinking = thinking_level_to_string(state.thinking_level);
+            drop(state);
+            let blocks = build_system_prompt_with_skills(
+                working_dir,
+                &current_model_id,
+                Some(&current_thinking),
+                &config.startup_skills,
+            )
+            .await;
             agent.set_system_prompt(blocks).await;
 
             // Clear the chat display.
@@ -1154,7 +1183,7 @@ async fn handle_tui_action(
             *session_id_cell.write().await = None;
             let _ = event_tx.send(TuiEvent::SessionCreated {
                 id: "".to_string(),
-                model: model_id.to_string(),
+                model: current_model_id,
             });
             let _ = event_tx.send(TuiEvent::Info(
                 "Started new unsaved session (saved on first message).".into(),
