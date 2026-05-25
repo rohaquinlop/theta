@@ -4,7 +4,10 @@ use std::io::{self, Stdout};
 
 use crossterm::{
     ExecutableCommand,
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
@@ -14,6 +17,12 @@ pub fn setup() -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(EnableMouseCapture)?;
     io::stdout().execute(EnableBracketedPaste)?;
+    // Enable keyboard protocol so modified keys (Shift+Enter, etc.) are
+    // reported distinctly. Supported by Kitty, iTerm2, WezTerm, etc.
+    // Terminals that don't support it simply ignore this request.
+    let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+    ));
     Ok(())
 }
 
@@ -24,6 +33,9 @@ pub fn setup_with_title(title: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(EnableMouseCapture)?;
     io::stdout().execute(EnableBracketedPaste)?;
+    let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+    ));
     Ok(())
 }
 
@@ -42,6 +54,7 @@ pub fn set_window_title(title: &str) -> io::Result<()> {
 
 /// Restore terminal to normal mode.
 pub fn restore() -> io::Result<()> {
+    let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
     io::stdout().execute(DisableBracketedPaste)?;
     io::stdout().execute(DisableMouseCapture)?;
     io::stdout().execute(LeaveAlternateScreen)?;

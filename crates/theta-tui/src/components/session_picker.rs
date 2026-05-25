@@ -342,7 +342,8 @@ mod tests {
             .iter()
             .map(|r| {
                 let first = r.find('│').unwrap();
-                let second = r.char_indices()
+                let second = r
+                    .char_indices()
                     .filter(|(_, c)| *c == '│')
                     .nth(1)
                     .map(|(i, _)| i)
@@ -371,7 +372,7 @@ mod tests {
     fn truncation_handles_multi_byte_chars_safely() {
         // Title with multi-byte UTF-8 chars — Vec<char> slicing
         // must not panic.
-        let title = "áéíóú — accented chars";  // 27 chars, 31 bytes
+        let title = "áéíóú — accented chars"; // 27 chars, 31 bytes
         let title_chars: Vec<char> = title.chars().collect();
         assert!(title_chars.len() > 5);
         // Truncate to 5 chars

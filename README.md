@@ -26,8 +26,10 @@ cargo run -- rpc
 - Sending `@path/to/file` appends that file's contents to the prompt context.
 - `/sessions` opens the session picker.
 - `/tree [default|no-tools|user-only|labeled-only|all]` opens branch/session tree picker.
-- `Enter` sends normally when idle; while streaming it queues a steering message.
-- `Alt+Enter` queues a follow-up message.
+- `Enter` behavior is configurable via `settings.json` (`enter_behavior: "send" | "newline"`).
+- With `enter_behavior = "send"` (default), `Enter` sends normally when idle; while streaming it queues a steering message.
+- `Alt+Enter` inserts newline in the editor.
+- `Ctrl+Enter` queues a follow-up message.
 - `Ctrl+P` opens model selector.
 - `Ctrl+T` cycles themes.
 - `Tab` switches focus between input and chat.
@@ -129,6 +131,8 @@ Fields currently persisted there:
 - `follow_up_mode` (string, default: `"steer"`): Alt+Enter behavior while streaming.
 - `transport_preference` (string, default: `"auto"`): transport hint (`auto`/`http`/`sse`).
 - `show_thinking` (bool, default: `true`): show thinking text in UI.
+- `tool_progress_hz` (u64, default: `20`): tool progress update frequency in Hz.
+- `enter_behavior` (string, default: `"send"`): editor Enter behavior (`"send"` or `"newline"`).
 
 RPC examples:
 

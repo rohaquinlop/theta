@@ -52,11 +52,11 @@ impl SettingsSelector {
         let list_items = vec![
             ListItem::new(vec![
                 Line::from(format!("steeringMode: {}", self.view.steering_mode)),
-                Line::from("  Enter while streaming: steer or queue follow-up"),
+                Line::from("  Alt+Enter while streaming: steer or queue follow-up"),
             ]),
             ListItem::new(vec![
                 Line::from(format!("followUpMode: {}", self.view.follow_up_mode)),
-                Line::from("  Alt+Enter while streaming: queue follow-up or steer"),
+                Line::from("  Ctrl+Enter while streaming: queue follow-up or steer"),
             ]),
             ListItem::new(vec![
                 Line::from(format!(

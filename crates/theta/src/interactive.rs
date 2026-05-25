@@ -376,6 +376,7 @@ pub async fn run_tui(
             transport_preference: persisted.transport_preference,
             show_thinking: persisted.show_thinking,
             tool_progress_hz: persisted.tool_progress_hz,
+            enter_behavior: persisted.enter_behavior,
         },
         model_entries,
         commands,
@@ -492,8 +493,7 @@ fn compute_valid_thinking_levels(model: &theta_ai::Model) -> Vec<String> {
         .into_iter()
         .filter(|(_, level)| {
             // Off is always valid; other levels need a mapping.
-            *level == theta_ai::ThinkingLevel::Off
-                || model.thinking_param(*level).is_some()
+            *level == theta_ai::ThinkingLevel::Off || model.thinking_param(*level).is_some()
         })
         .map(|(name, _)| name.to_string())
         .collect()

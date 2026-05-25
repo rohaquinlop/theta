@@ -37,6 +37,10 @@ pub struct ThetaSettings {
     /// Tool progress update frequency in Hz.
     #[serde(default = "default_tool_progress_hz")]
     pub tool_progress_hz: u64,
+
+    /// Enter behavior in editor: "send" or "newline".
+    #[serde(default = "default_enter_behavior")]
+    pub enter_behavior: String,
 }
 
 fn default_steering_mode() -> String {
@@ -59,6 +63,10 @@ const fn default_tool_progress_hz() -> u64 {
     20
 }
 
+fn default_enter_behavior() -> String {
+    "send".to_string()
+}
+
 impl Default for ThetaSettings {
     fn default() -> Self {
         Self {
@@ -69,6 +77,7 @@ impl Default for ThetaSettings {
             transport_preference: default_transport_preference(),
             show_thinking: default_show_thinking(),
             tool_progress_hz: default_tool_progress_hz(),
+            enter_behavior: default_enter_behavior(),
         }
     }
 }

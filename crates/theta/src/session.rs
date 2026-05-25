@@ -435,11 +435,7 @@ impl SessionManager {
             index
                 .sessions
                 .iter()
-                .filter(|m| {
-                    m.project
-                        .as_deref()
-                        .is_some_and(|p| p == wd.as_ref())
-                })
+                .filter(|m| m.project.as_deref().is_some_and(|p| p == wd.as_ref()))
                 .cloned()
                 .collect()
         };

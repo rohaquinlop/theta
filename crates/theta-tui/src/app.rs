@@ -202,6 +202,7 @@ pub struct SettingsPayload {
     pub transport_preference: String,
     pub show_thinking: bool,
     pub tool_progress_hz: u64,
+    pub enter_behavior: String,
 }
 
 /// Which view is currently active.
@@ -317,6 +318,7 @@ impl App {
             theme.clone(),
             working_dir.clone(),
             commands.iter().map(|c| c.name.clone()).collect(),
+            settings.enter_behavior,
         );
         let skill_commands = commands
             .iter()
@@ -464,7 +466,10 @@ impl App {
             return;
         }
 
-        let editor_height = self.editor.desired_height(area.width as usize, 6);
+        // Editor grows with content, capped at ~1/3 of terminal height
+        // (min 6, max 15 rows) so chat always has room.
+        let max_editor = (area.height / 3).clamp(6, 15);
+        let editor_height = self.editor.desired_height(area.width as usize, max_editor);
         let status_height = self.status.desired_height();
         let main = Layout::default()
             .direction(Direction::Vertical)
@@ -586,7 +591,9 @@ impl App {
                     crossterm::event::KeyCode::Enter => {
                         if let Some(level) = self.thinking_selector.selected_level() {
                             self.status.thinking = level.to_string();
-                            let _ = self.action_tx.send(TuiAction::SetThinking(level.to_string()));
+                            let _ = self
+                                .action_tx
+                                .send(TuiAction::SetThinking(level.to_string()));
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
                                 text: format!("Thinking level set to {level}"),
@@ -1556,10 +1563,7 @@ impl App {
                             "xhigh" => "X-High (Max)".to_string(),
                             _ => id.clone(),
                         };
-                        crate::components::thinking_selector::ThinkingLevelEntry {
-                            id,
-                            label,
-                        }
+                        crate::components::thinking_selector::ThinkingLevelEntry { id, label }
                     })
                     .collect::<Vec<_>>();
                 let show_selector = self.thinking_selector.visible;

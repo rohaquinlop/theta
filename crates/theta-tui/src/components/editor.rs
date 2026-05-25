@@ -1,10 +1,12 @@
-//! Input editor — multiline text input with inline fuzzy autocomplete for @ files and / commands.
+//! Input editor — multiline text input with visual-line cursor navigation,
+//! inline fuzzy autocomplete for @ files and / commands, clipboard, and
+//! proper terminal cursor positioning via `frame.set_cursor()`.
 
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -12,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::components::fuzzy::fuzzy_filter;
 use crate::components::{Action, Component};
+use crate::keybinding::{EnterBehavior, is_enter_send, is_follow_up_key, is_newline_key};
 use crate::theme::Theme;
 
 /// State for inline autocomplete (file paths or slash commands).
@@ -25,14 +28,38 @@ struct AutocompleteState {
     prefix_start: usize,
     /// The filter query (text between @ or / and cursor).
     query: String,
+    /// Trigger character ('@' or '/').
+    trigger: char,
 }
 
-/// Multiline text editor for user input.
+/// Multiline text editor with professional visual-line cursor navigation.
+///
+/// ## Cursor model
+///
+/// The canonical cursor position is a byte offset into `text`.
+/// A cached `vis_lines` mapping (built by `rebuild_visual_lines`) gives us
+/// the visual layout: each entry is a `Vec<usize>` of byte offsets of each
+/// character in that visual line.  From these we derive the visual
+/// coordinates `(vis_line, vis_col)` on demand.
+///
+/// For vertical navigation we also track `desired_col` — the visual column
+/// the user "aimed for" when moving up/down.  This preserves horizontal
+/// position across lines of varying length.
 pub struct Editor {
     /// The text buffer.
     text: String,
-    /// Cursor position (byte offset).
+    /// Cursor position — byte offset into `text`.
     cursor: usize,
+    /// Cached visual lines: each entry is `[byte_offset, …]` for each
+    /// character on that visual line (from `rebuild_visual_lines`).
+    vis_lines: Vec<Vec<usize>>,
+    /// Visual column maintained during vertical navigation.
+    desired_col: usize,
+    /// Cached inner width used to build `vis_lines`.
+    cached_width: usize,
+    /// Whether the cache is dirty (text changed, width changed, etc.).
+    cache_dirty: bool,
+
     /// Whether focused.
     focused: bool,
     /// Theme.
@@ -51,21 +78,26 @@ pub struct Editor {
     working_dir: PathBuf,
     /// Known slash commands for command autocomplete.
     slash_commands: Vec<String>,
-    /// Last rendered inner area for hit-testing.
+    /// Enter key behavior.
+    enter_behavior: EnterBehavior,
+    /// Last rendered inner area for hit-testing and cursor placement.
     last_inner_area: Option<Rect>,
-    /// Last visible text lines (wrapped) for selection copy.
-    last_visible_lines: Vec<String>,
-    /// Selection anchor in (line, col) within visible lines.
-    select_anchor: Option<(usize, usize)>,
-    select_head: Option<(usize, usize)>,
-    selecting: bool,
 }
 
 impl Editor {
-    pub fn new(theme: Theme, working_dir: PathBuf, slash_commands: Vec<String>) -> Self {
+    pub fn new(
+        theme: Theme,
+        working_dir: PathBuf,
+        slash_commands: Vec<String>,
+        enter_behavior: String,
+    ) -> Self {
         Self {
             text: String::new(),
             cursor: 0,
+            vis_lines: Vec::new(),
+            desired_col: 0,
+            cached_width: 0,
+            cache_dirty: true,
             focused: false,
             theme,
             history: Vec::new(),
@@ -75,26 +107,27 @@ impl Editor {
             autocomplete: None,
             working_dir,
             slash_commands,
+            enter_behavior: EnterBehavior::parse(&enter_behavior),
             last_inner_area: None,
-            last_visible_lines: Vec::new(),
-            select_anchor: None,
-            select_head: None,
-            selecting: false,
         }
     }
 
     pub fn set_text(&mut self, text: &str) {
         self.text = text.to_string();
         self.cursor = self.text.len();
+        self.desired_col = 0;
+        self.scroll = 0;
+        self.cache_dirty = true;
     }
 
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    pub fn desired_height(&self, width: usize, max_height: u16) -> u16 {
+    pub fn desired_height(&mut self, width: usize, max_height: u16) -> u16 {
         let inner_width = width.saturating_sub(2).max(1);
-        let lines = wrap_text(&self.text, inner_width).len() as u16;
+        self.rebuild_visual_lines(inner_width);
+        let lines = self.vis_lines.len() as u16;
         lines.saturating_add(2).clamp(3, max_height.max(3))
     }
 
@@ -106,6 +139,7 @@ impl Editor {
     pub fn insert_at_cursor(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
+        self.after_mutate();
     }
 
     /// Delete the last character.
@@ -116,7 +150,70 @@ impl Editor {
             if self.cursor > self.text.len() {
                 self.cursor = self.text.len();
             }
+            self.after_mutate();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Visual line cache
+    // ------------------------------------------------------------------
+
+    /// Rebuild `vis_lines` from `text` and `width` if dirty or width changed.
+    fn rebuild_visual_lines(&mut self, width: usize) {
+        if !self.cache_dirty && self.cached_width == width {
+            return;
+        }
+        self.vis_lines = build_vis_lines(&self.text, width);
+        self.cached_width = width;
+        self.cache_dirty = false;
+    }
+
+    /// Visual column at byte offset, rebuilding cache as needed.
+    fn byte_to_vis_col(&mut self, byte: usize) -> usize {
+        let width = if self.cached_width > 0 {
+            self.cached_width
+        } else {
+            80
+        };
+        self.rebuild_visual_lines(width);
+        let (_, col) = byte_to_vis(&self.vis_lines, &self.text, byte);
+        col
+    }
+
+    fn nav_width(&self) -> usize {
+        if self.cached_width > 0 {
+            self.cached_width
+        } else {
+            80
+        }
+    }
+
+    /// After any text mutation, rebuild cache and re-clamp cursor + scroll.
+    fn after_mutate(&mut self) {
+        self.cache_dirty = true;
+        self.rebuild_visual_lines(self.nav_width());
+        // Clamp cursor to valid range.
+        if !self.text.is_empty() && self.cursor > self.text.len() {
+            self.cursor = self.text.len();
+        }
+        let (_vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        self.desired_col = vc;
+        self.ensure_cursor_visible();
+    }
+
+    /// Ensure scroll is within valid range.
+    fn clamp_scroll(&mut self) {
+        if self.vis_lines.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        let height = self
+            .last_inner_area
+            .map(|a| a.height as usize)
+            .unwrap_or(3)
+            .max(1);
+        let max_scroll = self.vis_lines.len().saturating_sub(height);
+        self.scroll = self.scroll.min(max_scroll);
     }
 
     // ------------------------------------------------------------------
@@ -126,6 +223,7 @@ impl Editor {
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.after_mutate();
     }
 
     fn delete_before(&mut self) {
@@ -135,6 +233,7 @@ impl Editor {
             let len = prev.len_utf8();
             self.text.replace_range(self.cursor - len..self.cursor, "");
             self.cursor -= len;
+            self.after_mutate();
         }
     }
 
@@ -144,82 +243,281 @@ impl Editor {
         {
             self.text
                 .replace_range(self.cursor..self.cursor + next.len_utf8(), "");
+            self.after_mutate();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor navigation (visual-line based)
+    // ------------------------------------------------------------------
+
+    /// Adjust scroll so the cursor visual line is visible.
+    fn ensure_cursor_visible(&mut self) {
+        if self.vis_lines.is_empty() {
+            return;
+        }
+        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let height = self
+            .last_inner_area
+            .map(|a| a.height as usize)
+            .unwrap_or(3)
+            .max(1);
+        if vl < self.scroll {
+            self.scroll = vl;
+        } else if vl >= self.scroll + height {
+            self.scroll = vl.saturating_add(1).saturating_sub(height);
+        }
+        self.clamp_scroll();
+    }
+
+    fn move_up(&mut self) {
+        self.rebuild_visual_lines(self.nav_width());
+        if self.vis_lines.is_empty() {
+            return;
+        }
+        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vl == 0 {
+            // Already at first visual line — move to earliest byte.
+            self.cursor = 0;
+            self.desired_col = 0;
+            self.scroll = 0;
+            return;
+        }
+        let target_line = vl.saturating_sub(1);
+        let clamped_col = self
+            .desired_col
+            .min(self.vis_lines[target_line].len().saturating_sub(1));
+        if self.vis_lines[target_line].is_empty() {
+            // Empty line: position cursor at the start of this line.
+            self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), target_line);
+        } else {
+            self.cursor = self.vis_lines[target_line]
+                .get(clamped_col)
+                .copied()
+                .unwrap_or(0);
+            // If past end of line, go to last byte on that line.
+            if self.cursor > self.text.len() {
+                self.cursor = self.vis_lines[target_line].last().copied().unwrap_or(0);
+                // Move past that char to the end.
+                self.cursor += self.text[self.cursor..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+            }
+        }
+        self.clamp_scroll();
+        // Update desired_col to the new position.
+        self.desired_col = self.byte_to_vis_col(self.cursor);
+        self.ensure_cursor_visible();
+    }
+
+    fn move_down(&mut self) {
+        self.rebuild_visual_lines(self.nav_width());
+        if self.vis_lines.is_empty() {
+            return;
+        }
+        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vl >= self.vis_lines.len().saturating_sub(1) {
+            // Already at last visual line — move to end of text.
+            self.cursor = self.text.len();
+            self.desired_col = self.byte_to_vis_col(self.cursor);
+            self.ensure_cursor_visible();
+            return;
+        }
+        let target_line = vl + 1;
+        let clamped_col = self
+            .desired_col
+            .min(self.vis_lines[target_line].len().saturating_sub(1));
+        if self.vis_lines[target_line].is_empty() {
+            // Empty line: position cursor at the start of this line.
+            self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), target_line);
+        } else {
+            self.cursor = self.vis_lines[target_line]
+                .get(clamped_col)
+                .copied()
+                .unwrap_or(0);
+            if self.cursor > self.text.len() {
+                self.cursor = self.vis_lines[target_line].last().copied().unwrap_or(0);
+                self.cursor += self.text[self.cursor..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+            }
+        }
+        self.clamp_scroll();
+        // Update desired_col to the new position.
+        self.desired_col = self.byte_to_vis_col(self.cursor);
+        self.ensure_cursor_visible();
     }
 
     fn move_left(&mut self) {
-        if self.cursor > 0
-            && let Some(prev) = self.text[..self.cursor].chars().last()
-        {
+        self.rebuild_visual_lines(self.nav_width());
+        if self.cursor == 0 {
+            return;
+        }
+        // If cursor is at start of a visual line (excl. the very first),
+        // wrap to end of previous visual line.
+        let (vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vc == 0 && vl > 0 {
+            // Go to the last byte offset of the previous visual line.
+            let prev = &self.vis_lines[vl - 1];
+            if let Some(&last_byte) = prev.last() {
+                self.cursor = last_byte;
+                // Advance past that character so we're AFTER it.
+                if let Some(ch) = self.text[last_byte..].chars().next() {
+                    self.cursor = last_byte + ch.len_utf8();
+                }
+            }
+        } else if let Some(prev) = self.text[..self.cursor].chars().last() {
             self.cursor -= prev.len_utf8();
         }
+        self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
     fn move_right(&mut self) {
-        if self.cursor < self.text.len()
-            && let Some(next) = self.text[self.cursor..].chars().next()
-        {
+        self.rebuild_visual_lines(self.nav_width());
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let (vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vc >= self.vis_lines[vl].len().saturating_sub(1) && vl + 1 < self.vis_lines.len() {
+            // At end of visual line (not the last) — wrap to start of next.
+            if let Some(&next_byte) = self.vis_lines[vl + 1].first() {
+                self.cursor = next_byte;
+            }
+        } else if let Some(next) = self.text[self.cursor..].chars().next() {
             self.cursor += next.len_utf8();
         }
+        self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
     fn move_word_left(&mut self) {
+        // Skip delimiters leftwards, then skip word chars leftwards.
         while self.cursor > 0 {
             if let Some(prev) = self.text[..self.cursor].chars().last() {
-                if prev.is_whitespace() {
-                    self.move_left();
-                } else {
+                if is_word_char(prev) {
                     break;
                 }
+                self.cursor -= prev.len_utf8();
             }
         }
         while self.cursor > 0 {
             if let Some(prev) = self.text[..self.cursor].chars().last() {
-                if !prev.is_whitespace() {
-                    self.move_left();
-                } else {
+                if !is_word_char(prev) {
                     break;
                 }
+                self.cursor -= prev.len_utf8();
             }
         }
+        self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
-    #[allow(dead_code)]
     fn move_word_right(&mut self) {
+        // Skip delimiters rightwards, then skip word chars rightwards.
         while self.cursor < self.text.len() {
             if let Some(next) = self.text[self.cursor..].chars().next() {
-                if next.is_whitespace() {
-                    self.move_right();
-                } else {
+                if is_word_char(next) {
                     break;
                 }
+                self.cursor += next.len_utf8();
             }
         }
         while self.cursor < self.text.len() {
             if let Some(next) = self.text[self.cursor..].chars().next() {
-                if !next.is_whitespace() {
-                    self.move_right();
-                } else {
+                if !is_word_char(next) {
                     break;
                 }
+                self.cursor += next.len_utf8();
+            }
+        }
+        self.desired_col = self.byte_to_vis_col(self.cursor);
+    }
+
+    fn move_line_start(&mut self) {
+        // Move to the start of the current visual line.
+        self.rebuild_visual_lines(self.nav_width());
+        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vl < self.vis_lines.len() {
+            if self.vis_lines[vl].is_empty() {
+                self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), vl);
+            } else {
+                self.cursor = *self.vis_lines[vl].first().unwrap_or(&0);
+            }
+        }
+        self.desired_col = 0;
+    }
+
+    fn move_line_end(&mut self) {
+        // Move to the end of the current visual line.
+        self.rebuild_visual_lines(self.nav_width());
+        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if vl < self.vis_lines.len() {
+            if self.vis_lines[vl].is_empty() {
+                // Empty line: start and end are the same position.
+                self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), vl);
+                self.desired_col = 0;
+            } else if let Some(&last_byte) = self.vis_lines[vl].last() {
+                // After the last character on the line.
+                if let Some(ch) = self.text[last_byte..].chars().next() {
+                    self.cursor = last_byte + ch.len_utf8();
+                } else {
+                    self.cursor = last_byte;
+                }
+                self.desired_col = self.vis_lines[vl].len();
             }
         }
     }
 
-    fn move_start(&mut self) {
+    fn move_page_up(&mut self) {
+        self.rebuild_visual_lines(self.nav_width());
+        let height = self
+            .last_inner_area
+            .map(|a| a.height as usize)
+            .unwrap_or(10)
+            .max(1);
+        for _ in 0..height {
+            self.move_up();
+        }
+    }
+
+    fn move_page_down(&mut self) {
+        self.rebuild_visual_lines(self.nav_width());
+        let height = self
+            .last_inner_area
+            .map(|a| a.height as usize)
+            .unwrap_or(10)
+            .max(1);
+        for _ in 0..height {
+            self.move_down();
+        }
+    }
+
+    fn move_text_start(&mut self) {
         self.cursor = 0;
+        self.desired_col = 0;
+        self.scroll = 0;
     }
 
-    fn move_end(&mut self) {
+    fn move_text_end(&mut self) {
         self.cursor = self.text.len();
+        self.desired_col = self.byte_to_vis_col(self.cursor);
+        self.clamp_scroll();
     }
+
+    // ------------------------------------------------------------------
+    // Submit & History
+    // ------------------------------------------------------------------
 
     fn submit(&mut self) -> Option<String> {
         let text = self.text.trim().to_string();
         self.text.clear();
         self.cursor = 0;
+        self.desired_col = 0;
         self.scroll = 0;
         self.autocomplete = None;
+        self.cache_dirty = true;
         if text.is_empty() {
             return None;
         }
@@ -239,7 +537,9 @@ impl Editor {
             self.history_idx -= 1;
             self.text = self.history[self.history_idx].clone();
             self.cursor = self.text.len();
+            self.desired_col = 0;
             self.scroll = 0;
+            self.cache_dirty = true;
         }
     }
 
@@ -251,12 +551,16 @@ impl Editor {
             self.history_idx += 1;
             self.text = self.history[self.history_idx].clone();
             self.cursor = self.text.len();
+            self.desired_col = 0;
             self.scroll = 0;
+            self.cache_dirty = true;
         } else if self.history_idx == self.history.len() - 1 {
             self.history_idx += 1;
             self.text = self.saved_text.clone();
             self.cursor = self.text.len();
+            self.desired_col = 0;
             self.scroll = 0;
+            self.cache_dirty = true;
         }
     }
 
@@ -272,12 +576,13 @@ impl Editor {
             selected: 0,
             prefix_start,
             query: String::new(),
+            trigger,
         });
-        self.update_autocomplete(trigger);
+        self.update_autocomplete_items();
     }
 
     /// Update autocomplete items based on current query.
-    fn update_autocomplete(&mut self, trigger: char) {
+    fn update_autocomplete_items(&mut self) {
         let Some(ref mut ac) = self.autocomplete else {
             return;
         };
@@ -289,7 +594,7 @@ impl Editor {
             ac.query.clear();
         }
 
-        ac.items = match trigger {
+        ac.items = match ac.trigger {
             '@' => file_mention_matches(&self.working_dir, &ac.query),
             '/' => fuzzy_command_matches(&self.slash_commands, &ac.query),
             _ => Vec::new(),
@@ -299,31 +604,42 @@ impl Editor {
     }
 
     /// Apply the selected autocomplete item.
-    fn accept_autocomplete(&mut self, trigger: char) {
+    fn accept_autocomplete(&mut self) {
+        let _trigger = self
+            .autocomplete
+            .as_ref()
+            .map(|ac| ac.trigger)
+            .unwrap_or('/');
+        let start = self
+            .autocomplete
+            .as_ref()
+            .map(|ac| ac.prefix_start)
+            .unwrap_or(self.cursor);
+
         let Some(ref ac) = self.autocomplete else {
             return;
         };
-        let Some(item) = ac.items.get(ac.selected) else {
+        let Some(item) = ac.items.get(ac.selected).cloned() else {
             return;
         };
         let is_dir = item.ends_with('/');
 
         // Replace query text with the selected item.
-        let start = ac.prefix_start;
         let end = self.cursor;
-        self.text.replace_range(start..end, item);
+        self.text.replace_range(start..end, &item);
+        self.cursor = start + item.len();
+        self.cache_dirty = true;
 
         if is_dir {
             // Keep autocomplete open so user can keep navigating.
-            self.cursor = start + item.len();
             self.autocomplete.as_mut().unwrap().prefix_start = start;
             self.autocomplete.as_mut().unwrap().query.clear();
-            self.update_autocomplete(trigger);
+            self.update_autocomplete_items();
         } else {
             // Insert space after file, dismiss autocomplete.
-            self.cursor = start + item.len();
             self.text.insert(self.cursor, ' ');
             self.cursor += 1;
+            self.cache_dirty = true;
             self.autocomplete = None;
         }
     }
@@ -358,7 +674,7 @@ impl Editor {
         if let Some(ref mut ac) = self.autocomplete
             && !ac.items.is_empty()
         {
-            ac.selected = (ac.selected + 1).min(ac.items.len().saturating_sub(1));
+            ac.selected = (ac.selected + 1) % ac.items.len();
         }
     }
 
@@ -371,16 +687,19 @@ impl Editor {
     fn refresh_slash_autocomplete(&mut self) {
         let at_start = self.text.starts_with('/');
         if !at_start || self.cursor == 0 {
+            self.dismiss_autocomplete();
             return;
         }
 
         let upto_cursor = &self.text[..self.cursor];
         if !upto_cursor.starts_with('/') {
+            self.dismiss_autocomplete();
             return;
         }
 
         let in_first_token = !upto_cursor.contains(' ') && !upto_cursor.contains('\n');
         if !in_first_token {
+            self.dismiss_autocomplete();
             return;
         }
 
@@ -391,24 +710,20 @@ impl Editor {
                 selected: 0,
                 prefix_start,
                 query: String::new(),
+                trigger: '/',
             });
         }
 
         if let Some(ref mut ac) = self.autocomplete {
             ac.prefix_start = prefix_start;
+            ac.trigger = '/';
         }
-        self.update_autocomplete('/');
+        self.update_autocomplete_items();
     }
 }
 
 impl Component for Editor {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let cursor_style = if self.focused {
-            Style::default().fg(self.theme.accent).bg(Color::DarkGray)
-        } else {
-            Style::default().fg(self.theme.dim)
-        };
-
         let input_border = if self.focused {
             self.theme.accent
         } else {
@@ -432,68 +747,70 @@ impl Component for Editor {
             return;
         }
 
-        // Wrap text into visual lines.
-        let visual_lines = wrap_text(&self.text, width);
-        let total_lines = visual_lines.len();
+        self.rebuild_visual_lines(width);
+        let total_lines = self.vis_lines.len();
 
-        // Find cursor visual line.
-        let cursor_line = cursor_visual_line(&self.text, self.cursor, width);
-
-        // Auto-scroll.
-        if cursor_line < self.scroll {
-            self.scroll = cursor_line;
-        } else if cursor_line >= self.scroll + height {
-            self.scroll = cursor_line.saturating_sub(height.saturating_sub(1));
+        // Find cursor visual line and auto-scroll.
+        let (cursor_vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        if cursor_vl < self.scroll {
+            self.scroll = cursor_vl;
+        } else if cursor_vl >= self.scroll + height {
+            self.scroll = cursor_vl.saturating_add(1).saturating_sub(height);
         }
-        self.scroll = self.scroll.min(total_lines.saturating_sub(height));
+        self.clamp_scroll();
 
         // Build visible text lines.
         let end = (self.scroll + height).min(total_lines);
-        let visible_lines: Vec<Line> = visual_lines[self.scroll..end]
-            .iter()
-            .enumerate()
-            .map(|(line_idx, line)| {
-                let abs_line = self.scroll + line_idx;
-                let sel = self.selection_bounds();
-                let spans: Vec<Span> = line
-                    .iter()
-                    .enumerate()
-                    .map(|(col_idx, &char_idx)| {
-                        let c = self.text[char_idx..].chars().next().unwrap_or(' ');
-                        let at_cursor = self.focused && char_idx == self.cursor;
-                        let mut style = if at_cursor {
-                            cursor_style
-                        } else {
-                            Style::default()
-                        };
-                        if let Some((start, end_sel)) = sel
-                            && cell_in_selection((line_idx, col_idx), start, end_sel)
-                        {
-                            style = style.bg(self.theme.highlight);
-                        }
-                        Span::styled(c.to_string(), style)
-                    })
-                    .collect();
-                let mut spans = spans;
-                if self.focused && self.cursor >= self.text.len() && abs_line == cursor_line {
-                    spans.push(Span::styled(" ", cursor_style));
+        let mut visible_lines: Vec<Line> = Vec::with_capacity(end.saturating_sub(self.scroll));
+
+        for line_idx in self.scroll..end {
+            let chars_in_line = &self.vis_lines[line_idx];
+            let mut spans: Vec<Span> = Vec::with_capacity(chars_in_line.len().max(1));
+            for &byte_offset in chars_in_line {
+                let c = self.text[byte_offset..].chars().next().unwrap_or(' ');
+                let style = if self.focused && byte_offset == self.cursor {
+                    Style::default().fg(self.theme.bg).bg(self.theme.accent)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            // Block cursor at end of current line.
+            if self.focused && cursor_vl == line_idx {
+                let (_, cursor_col) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+                if cursor_col == spans.len() {
+                    spans.push(Span::styled(
+                        " ",
+                        Style::default().fg(self.theme.bg).bg(self.theme.accent),
+                    ));
                 }
-                Line::from(spans)
-            })
-            .collect();
+            }
+            // Block cursor on empty line.
+            if spans.is_empty() && self.focused && cursor_vl == line_idx {
+                spans.push(Span::styled(
+                    " ",
+                    Style::default().fg(self.theme.bg).bg(self.theme.accent),
+                ));
+            }
+            visible_lines.push(Line::from(spans));
+        }
 
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(Text::from(visible_lines)), inner);
+
+        if self.focused {
+            let (cursor_line, cursor_col) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+            if cursor_line >= self.scroll && cursor_line < self.scroll + height {
+                let x = inner.x.saturating_add(cursor_col as u16);
+                let y = inner
+                    .y
+                    .saturating_add(cursor_line.saturating_sub(self.scroll) as u16);
+                frame.set_cursor_position((x, y));
+            }
+        }
+
         self.last_inner_area = Some(inner);
-        self.last_visible_lines = visual_lines[self.scroll..end]
-            .iter()
-            .map(|line| {
-                line.iter()
-                    .map(|&char_idx| self.text[char_idx..].chars().next().unwrap_or(' '))
-                    .collect::<String>()
-            })
-            .collect();
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -503,48 +820,39 @@ impl Component for Editor {
         if let Event::Paste(pasted) = event {
             self.text.insert_str(self.cursor, pasted);
             self.cursor += pasted.len();
+            self.after_mutate();
             self.refresh_slash_autocomplete();
             return None;
         }
         if let Event::Mouse(mouse) = event {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
-                        self.select_anchor = Some(pos);
-                        self.select_head = Some(pos);
-                        self.selecting = true;
-                        if let Some(text) = self.selection_text(pos) {
-                            return Some(Action::CopySelection(text));
+                    // Click-to-place cursor at the mouse position.
+                    if let Some((line, col)) = self.mouse_to_cell(mouse.column, mouse.row) {
+                        let vis_line = self.scroll + line;
+                        if vis_line < self.vis_lines.len() {
+                            let chars_on_line = &self.vis_lines[vis_line];
+                            let clamped_col = col.min(chars_on_line.len().saturating_sub(1));
+                            if let Some(&byte_offset) = chars_on_line.get(clamped_col) {
+                                self.cursor = byte_offset;
+                            } else {
+                                // Clicked past end of line → go to end.
+                                if let Some(&last_byte) = chars_on_line.last()
+                                    && let Some(ch) = self.text[last_byte..].chars().next()
+                                {
+                                    self.cursor = last_byte + ch.len_utf8();
+                                }
+                            }
+                            self.desired_col = self.byte_to_vis_col(self.cursor);
                         }
                     }
                 }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                    {
-                        self.select_head = Some(pos);
-                    }
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                        && let Some(text) = self.selection_text(pos)
-                    {
-                        return Some(Action::CopySelection(text));
-                    }
+                MouseEventKind::ScrollUp => {
+                    self.scroll = self.scroll.saturating_sub(3);
                 }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                    {
-                        self.select_head = Some(pos);
-                    }
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                        && let Some(text) = self.selection_text(pos)
-                    {
-                        self.selecting = false;
-                        return Some(Action::CopySelection(text));
-                    }
-                    self.selecting = false;
+                MouseEventKind::ScrollDown => {
+                    self.scroll = self.scroll.saturating_add(3);
+                    self.clamp_scroll();
                 }
                 _ => {}
             }
@@ -556,23 +864,15 @@ impl Component for Editor {
 
         // If autocomplete is active, handle its keys first.
         if self.autocomplete.is_some() {
+            if is_newline_key(key, self.enter_behavior) {
+                self.insert_char('\n');
+                return None;
+            }
             match key {
                 crossterm::event::KeyEvent {
                     code: KeyCode::Tab, ..
                 } => {
-                    let trigger = if self.text.as_bytes().get(
-                        self.autocomplete
-                            .as_ref()
-                            .unwrap()
-                            .prefix_start
-                            .wrapping_sub(1),
-                    ) == Some(&b'@')
-                    {
-                        '@'
-                    } else {
-                        '/'
-                    };
-                    self.accept_autocomplete(trigger);
+                    self.accept_autocomplete();
                     return None;
                 }
                 crossterm::event::KeyEvent {
@@ -598,19 +898,7 @@ impl Component for Editor {
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    let trigger = if self.text.as_bytes().get(
-                        self.autocomplete
-                            .as_ref()
-                            .unwrap()
-                            .prefix_start
-                            .wrapping_sub(1),
-                    ) == Some(&b'@')
-                    {
-                        '@'
-                    } else {
-                        '/'
-                    };
-                    self.accept_autocomplete(trigger);
+                    self.accept_autocomplete();
                     return None;
                 }
                 crossterm::event::KeyEvent {
@@ -618,19 +906,16 @@ impl Component for Editor {
                     ..
                 } => {
                     self.insert_char(*c);
-                    let trigger = if self.text.as_bytes().get(
-                        self.autocomplete
-                            .as_ref()
-                            .unwrap()
-                            .prefix_start
-                            .wrapping_sub(1),
-                    ) == Some(&b'@')
-                    {
-                        '@'
+                    let slash_mode = self
+                        .autocomplete
+                        .as_ref()
+                        .map(|ac| ac.trigger == '/')
+                        .unwrap_or(false);
+                    if slash_mode {
+                        self.refresh_slash_autocomplete();
                     } else {
-                        '/'
-                    };
-                    self.update_autocomplete(trigger);
+                        self.update_autocomplete_items();
+                    }
                     return None;
                 }
                 crossterm::event::KeyEvent {
@@ -645,58 +930,32 @@ impl Component for Editor {
                         return None;
                     }
                     self.delete_before();
-                    let trigger = if self.text.as_bytes().get(
-                        self.autocomplete
-                            .as_ref()
-                            .unwrap()
-                            .prefix_start
-                            .wrapping_sub(1),
-                    ) == Some(&b'@')
-                    {
-                        '@'
-                    } else {
-                        '/'
-                    };
-                    self.update_autocomplete(trigger);
+                    self.update_autocomplete_items();
                     return None;
                 }
                 _ => {}
             }
         }
 
+        if is_enter_send(key, self.enter_behavior) {
+            if let Some(text) = self.submit() {
+                return Some(Action::SendMessage(text));
+            }
+            return None;
+        }
+        if is_follow_up_key(key) {
+            if let Some(text) = self.submit() {
+                return Some(Action::FollowUpMessage(text));
+            }
+            return None;
+        }
+        if is_newline_key(key, self.enter_behavior) {
+            self.insert_char('\n');
+            return None;
+        }
+
         match key {
-            crossterm::event::KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                if let Some(text) = self.submit() {
-                    return Some(Action::SendMessage(text));
-                }
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::ALT,
-                ..
-            } => {
-                if let Some(text) = self.submit() {
-                    return Some(Action::FollowUpMessage(text));
-                }
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::SHIFT,
-                ..
-            } => {
-                self.insert_char('\n');
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.insert_char('\n');
-            }
+            // ── Autocomplete triggers ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Char('@'),
                 modifiers: KeyModifiers::NONE,
@@ -721,14 +980,24 @@ impl Component for Editor {
                 }
                 return None;
             }
+            // ── Regular character insertion ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Char(c),
-                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                modifiers,
                 ..
-            } => {
+            } if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT => {
                 self.insert_char(*c);
                 self.refresh_slash_autocomplete();
             }
+            // ── Tab → 2 spaces ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                self.text.insert_str(self.cursor, "  ");
+                self.cursor += 2;
+                self.after_mutate();
+            }
+            // ── Backspace / Delete ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Backspace,
                 ..
@@ -743,19 +1012,20 @@ impl Component for Editor {
                 self.delete_after();
                 self.refresh_slash_autocomplete();
             }
+            // ── Cursor navigation ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Left,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_start();
+                self.move_text_start();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Right,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_end();
+                self.move_text_end();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Left,
@@ -783,74 +1053,72 @@ impl Component for Editor {
             } => {
                 self.move_right();
             }
+            // ── Vertical navigation: Up/Down moves cursor ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Up,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_start();
+                self.move_text_start();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_end();
+                self.move_text_end();
             }
+            // ── History browsing: Alt+Up / Alt+Down (before bare Up/Down) ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Up,
-                modifiers: KeyModifiers::NONE,
+                modifiers: KeyModifiers::ALT,
                 ..
             } => {
                 self.history_up();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
-                modifiers: KeyModifiers::NONE,
+                modifiers: KeyModifiers::ALT,
                 ..
             } => {
                 self.history_down();
             }
+            // ── Vertical navigation: Up/Down moves cursor ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::Up, ..
+            } => {
+                self.move_up();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Down,
+                ..
+            } => {
+                self.move_down();
+            }
+            // ── Page Up / Page Down ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::PageUp,
+                ..
+            } => {
+                self.move_page_up();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::PageDown,
+                ..
+            } => {
+                self.move_page_down();
+            }
+            // ── Line start/end ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Home,
                 ..
             } => {
-                self.move_start();
+                self.move_line_start();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::End, ..
             } => {
-                self.move_end();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Char('a'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.move_start();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Char('e'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.move_end();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Char('w'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                let old = self.cursor;
-                self.move_word_left();
-                let new = self.cursor;
-                self.text.replace_range(new..old, "");
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Tab, ..
-            } => {
-                self.text.insert_str(self.cursor, "  ");
-                self.cursor += 2;
+                self.move_line_end();
             }
             _ => {}
         }
@@ -867,16 +1135,6 @@ impl Component for Editor {
 }
 
 impl Editor {
-    fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
-        match (self.select_anchor, self.select_head) {
-            (Some(a), Some(b)) => {
-                let (start, end) = if a <= b { (a, b) } else { (b, a) };
-                Some((start, end))
-            }
-            _ => None,
-        }
-    }
-
     fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
         let area = self.last_inner_area?;
         if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
@@ -887,60 +1145,162 @@ impl Editor {
         let col = (col - area.x) as usize;
         Some((line, col))
     }
-
-    fn selection_text(&self, head: (usize, usize)) -> Option<String> {
-        let anchor = self.select_anchor?;
-        let (start, end) = if anchor <= head {
-            (anchor, head)
-        } else {
-            (head, anchor)
-        };
-        if self.last_visible_lines.is_empty() {
-            return None;
-        }
-        let mut out = String::new();
-        for line_idx in start.0..=end.0 {
-            let line = self
-                .last_visible_lines
-                .get(line_idx)
-                .map(String::as_str)
-                .unwrap_or("");
-            let chars: Vec<char> = line.chars().collect();
-            let from = if line_idx == start.0 {
-                start.1.min(chars.len())
-            } else {
-                0
-            };
-            let to = if line_idx == end.0 {
-                end.1.min(chars.len())
-            } else {
-                chars.len()
-            };
-            if from < to {
-                out.push_str(&chars[from..to].iter().collect::<String>());
-            }
-            if line_idx != end.0 {
-                out.push('\n');
-            }
-        }
-        if out.is_empty() { None } else { Some(out) }
-    }
 }
 
-fn cell_in_selection(cell: (usize, usize), start: (usize, usize), end: (usize, usize)) -> bool {
-    if cell.0 < start.0 || cell.0 > end.0 {
-        return false;
+// ---------------------------------------------------------------------------
+// Visual-line helpers
+// ---------------------------------------------------------------------------
+
+/// Build visual line layout: for each visual line, a `Vec<usize>` of byte
+/// offsets of each character in that line.
+fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
+    if width == 0 {
+        return vec![vec![]];
     }
-    if start.0 == end.0 {
-        return cell.1 >= start.1 && cell.1 < end.1;
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut col = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut current));
+            col = 0;
+            continue;
+        }
+        if col >= width {
+            lines.push(std::mem::take(&mut current));
+            col = 0;
+        }
+        current.push(byte_idx);
+        col += 1;
     }
-    if cell.0 == start.0 {
-        return cell.1 >= start.1;
+    // Always push the last (possibly empty) line.
+    lines.push(current);
+    lines
+}
+
+/// Convert byte offset to (vis_line, vis_col) using the cached layout.
+fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
+    if vis_lines.is_empty() {
+        return (0, 0);
     }
-    if cell.0 == end.0 {
-        return cell.1 < end.1;
+
+    let starts = build_vis_line_starts_from_layout(vis_lines, text);
+    let text_len = text.len();
+    if byte >= text_len {
+        let last_idx = vis_lines.len() - 1;
+        return (last_idx, vis_lines[last_idx].len());
     }
-    true
+
+    let line_idx = match starts.binary_search(&byte) {
+        Ok(idx) => idx,
+        Err(ins) => ins.saturating_sub(1),
+    }
+    .min(vis_lines.len().saturating_sub(1));
+
+    let line = &vis_lines[line_idx];
+    for (col_idx, &b) in line.iter().enumerate() {
+        if b == byte {
+            return (line_idx, col_idx);
+        }
+    }
+
+    (line_idx, line.len())
+}
+
+fn build_vis_line_starts_from_layout(vis_lines: &[Vec<usize>], text: &str) -> Vec<usize> {
+    if vis_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut starts = Vec::with_capacity(vis_lines.len());
+    let mut pos = 0usize;
+
+    for (i, line) in vis_lines.iter().enumerate() {
+        starts.push(pos.min(text.len()));
+
+        // Advance by this visual line's character count.
+        for _ in 0..line.len() {
+            if pos >= text.len() {
+                break;
+            }
+            let mut iter = text[pos..].chars();
+            if let Some(ch) = iter.next() {
+                pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        // Between visual lines: consume newline boundary if present.
+        if i + 1 < vis_lines.len() && pos < text.len() && text.as_bytes()[pos] == b'\n' {
+            pos += 1;
+        }
+    }
+
+    starts
+}
+
+/// Returns true for code-like word characters.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Compute the byte offset for the start of a visual line at a given width.
+///
+/// This is robust for consecutive empty lines because it follows the same
+/// wrapping/newline rules as `build_vis_lines` while tracking explicit starts.
+fn line_start_byte_for_width(text: &str, width: usize, target_line: usize) -> usize {
+    if target_line == 0 {
+        return 0;
+    }
+    if width == 0 {
+        return text.len();
+    }
+
+    let mut current_line = 0usize;
+    let mut col = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if col == 0 && current_line == target_line {
+            return byte_idx;
+        }
+
+        if ch == '\n' {
+            current_line += 1;
+            col = 0;
+            continue;
+        }
+
+        if col >= width {
+            current_line += 1;
+            col = 0;
+            if current_line == target_line {
+                return byte_idx;
+            }
+        }
+
+        col += 1;
+    }
+
+    // After consuming text, there is always one trailing visual line.
+    if current_line + 1 == target_line {
+        return text.len();
+    }
+
+    text.len()
+}
+
+/// Convert (vis_line, vis_col) to byte offset.
+#[cfg(test)]
+fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: usize) -> usize {
+    let Some(chars) = vis_lines.get(line) else {
+        return text_len;
+    };
+    if col >= chars.len() {
+        return text_len;
+    }
+    chars[col]
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,56 +1438,8 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Text wrapping helpers
+// Tests
 // ---------------------------------------------------------------------------
-
-/// Split text into visual lines of at most `width` chars.
-fn wrap_text(text: &str, width: usize) -> Vec<Vec<usize>> {
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    let mut col = 0usize;
-
-    for (byte_idx, ch) in text.char_indices() {
-        if ch == '\n' {
-            lines.push(std::mem::take(&mut current));
-            col = 0;
-            continue;
-        }
-        if col >= width {
-            lines.push(std::mem::take(&mut current));
-            col = 0;
-        }
-        current.push(byte_idx);
-        col += 1;
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-/// Find which visual line the given byte cursor is on.
-fn cursor_visual_line(text: &str, cursor: usize, width: usize) -> usize {
-    let mut line = 0usize;
-    let mut col = 0usize;
-
-    for (byte_idx, ch) in text.char_indices() {
-        if byte_idx >= cursor {
-            return line;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-            continue;
-        }
-        if col >= width {
-            line += 1;
-            col = 0;
-        }
-        col += 1;
-    }
-    line
-}
 
 #[cfg(test)]
 mod tests {
@@ -1141,6 +1453,413 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         root
     }
+
+    // ── Visual line helpers ──
+
+    #[test]
+    fn build_vis_lines_empty() {
+        let lines = build_vis_lines("", 80);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].is_empty());
+    }
+
+    #[test]
+    fn build_vis_lines_single_short_line() {
+        let lines = build_vis_lines("hello", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 5);
+    }
+
+    #[test]
+    fn build_vis_lines_wraps_at_width() {
+        let lines = build_vis_lines("abcdefghij", 5);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 5);
+        assert_eq!(lines[1].len(), 5);
+    }
+
+    #[test]
+    fn build_vis_lines_newline_splits() {
+        let lines = build_vis_lines("ab\ncd", 80);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 2);
+        assert_eq!(lines[1].len(), 2);
+    }
+
+    #[test]
+    fn byte_to_vis_roundtrip() {
+        let text = "hello world";
+        let lines = build_vis_lines(text, 80);
+        for (i, _ch) in text.char_indices() {
+            let (vl, vc) = byte_to_vis(&lines, text, i);
+            let back = vis_to_byte(&lines, text.len(), vl, vc);
+            assert_eq!(back, i, "byte {i} -> ({vl},{vc}) -> {back}");
+        }
+    }
+
+    #[test]
+    fn byte_to_vis_wrapped_roundtrip() {
+        let text = "abcdefghijklmnop";
+        let lines = build_vis_lines(text, 5);
+        for (i, _ch) in text.char_indices() {
+            let (vl, vc) = byte_to_vis(&lines, text, i);
+            let back = vis_to_byte(&lines, text.len(), vl, vc);
+            assert_eq!(back, i, "byte {i} -> ({vl},{vc}) -> {back}");
+        }
+    }
+
+    #[test]
+    fn byte_to_vis_handles_empty_lines_after_non_empty_line() {
+        let text = "a new message\n\n\n\ntesting";
+        let lines = build_vis_lines(text, 80);
+        let testing_idx = text.find("testing").unwrap();
+
+        // Cursor at start of "testing" should map to last visual line, not line 0.
+        let (vl, vc) = byte_to_vis(&lines, text, testing_idx);
+        assert_eq!(vl, 4);
+        assert_eq!(vc, 0);
+
+        // Cursor at first empty line start should map to line 1.
+        let (vl2, vc2) = byte_to_vis(&lines, text, 14);
+        assert_eq!(vl2, 1);
+        assert_eq!(vc2, 0);
+    }
+
+    // ── Cursor navigation ──
+
+    fn make_editor(text: &str) -> Editor {
+        let root = temp_root("nav");
+        let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+        ed.focus(true);
+        ed.set_text(text);
+        ed.cached_width = 80;
+        ed.cache_dirty = true;
+        ed.rebuild_visual_lines(80);
+        ed.clamp_scroll();
+        ed
+    }
+
+    #[test]
+    fn cursor_starts_at_end() {
+        let ed = make_editor("hello");
+        assert_eq!(ed.cursor, 5);
+    }
+
+    #[test]
+    fn left_moves_backward() {
+        let mut ed = make_editor("abc");
+        ed.move_left();
+        assert_eq!(ed.cursor, 2);
+        ed.move_left();
+        assert_eq!(ed.cursor, 1);
+        ed.move_left();
+        assert_eq!(ed.cursor, 0);
+        ed.move_left(); // stays at 0
+        assert_eq!(ed.cursor, 0);
+    }
+
+    #[test]
+    fn right_moves_forward() {
+        let mut ed = make_editor("abc");
+        ed.cursor = 0;
+        ed.move_right();
+        assert_eq!(ed.cursor, 1);
+        ed.move_right();
+        assert_eq!(ed.cursor, 2);
+        ed.move_right();
+        assert_eq!(ed.cursor, 3);
+        ed.move_right(); // stays at 3
+        assert_eq!(ed.cursor, 3);
+    }
+
+    #[test]
+    fn up_down_on_single_line() {
+        let mut ed = make_editor("hello");
+        // On a single line, up goes to start, down goes to end.
+        ed.move_up();
+        assert_eq!(ed.cursor, 0);
+        ed.move_down();
+        assert_eq!(ed.cursor, 5);
+    }
+
+    #[test]
+    fn up_down_multi_line() {
+        let mut ed = make_editor("abcd\nefgh\nijkl");
+        ed.cursor = 0; // start
+        ed.after_mutate();
+        // Move down to line 2 (efgh).
+        ed.move_down();
+        assert!(
+            ed.cursor >= 5 && ed.cursor <= 9,
+            "cursor={} should be on efgh",
+            ed.cursor
+        );
+        // Move down to line 3 (ijkl).
+        ed.move_down();
+        assert!(
+            ed.cursor >= 10 && ed.cursor <= 14,
+            "cursor={} should be on ijkl",
+            ed.cursor
+        );
+        // Move down → end of text.
+        ed.move_down();
+        assert_eq!(ed.cursor, 14);
+        // Move up back to line 2.
+        ed.move_up();
+        assert!(
+            ed.cursor >= 5 && ed.cursor <= 9,
+            "cursor={} should be on efgh",
+            ed.cursor
+        );
+        // Move up back to line 1.
+        ed.move_up();
+        assert!(ed.cursor <= 4, "cursor={} should be on abcd", ed.cursor);
+    }
+
+    #[test]
+    fn home_end_multi_line() {
+        let mut ed = make_editor("abcd\nefgh");
+        // Cursor at end (byte 9) → on visual line 1 (efgh).
+        // Home goes to start of current visual line → byte 5.
+        ed.move_line_start();
+        assert_eq!(
+            ed.cursor, 5,
+            "home should go to start of current visual line"
+        );
+
+        ed.move_up();
+        ed.move_line_start();
+        assert_eq!(ed.cursor, 0, "home on first visual line");
+
+        ed.move_line_end();
+        assert_eq!(ed.cursor, 4, "end on first visual line");
+    }
+
+    #[test]
+    fn word_left_and_right() {
+        let mut ed = make_editor("alpha beta gamma");
+        ed.cursor = ed.text.len();
+        ed.move_word_left();
+        // Should be at start of "gamma".
+        assert_eq!(
+            &ed.text[ed.cursor..],
+            "gamma",
+            "first move_word_left: cursor={}",
+            ed.cursor
+        );
+
+        ed.move_word_left();
+        assert_eq!(
+            &ed.text[ed.cursor..],
+            "beta gamma",
+            "second move_word_left: cursor={}",
+            ed.cursor
+        );
+
+        // From start of "beta", move_word_right goes past "beta" and lands
+        // at the space before "gamma" (skip whitespace first, then non-ws).
+        ed.move_word_right();
+        assert_eq!(
+            &ed.text[ed.cursor..],
+            " gamma",
+            "move_word_right: cursor={}",
+            ed.cursor
+        );
+    }
+
+    #[test]
+    fn submit_message_via_enter() {
+        let root = temp_root("submit-enter");
+        let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
+        ed.focus(true);
+        ed.set_text("hello world");
+        let action = ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(action, Some(Action::SendMessage(ref t)) if t == "hello world"));
+        assert!(ed.text().is_empty());
+    }
+
+    #[test]
+    fn enter_behavior_newline_inserts_newline() {
+        let root = temp_root("enter-behavior-newline");
+        let mut ed = Editor::new(Theme::default(), root, vec![], "newline".into());
+        ed.focus(true);
+        ed.set_text("hello");
+
+        let action = ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(action.is_none());
+        assert_eq!(ed.text(), "hello\n");
+    }
+
+    #[test]
+    fn insert_newline_via_shift_enter() {
+        let mut ed = make_editor("hello");
+        ed.cursor = 3;
+        let action = ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+        assert!(action.is_none()); // no submit
+        assert_eq!(ed.text, "hel\nlo");
+        assert_eq!(ed.cursor, 4);
+    }
+
+    #[test]
+    fn insert_newline_via_alt_enter() {
+        let mut ed = make_editor("hello");
+        ed.cursor = 3;
+        let action = ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        )));
+        assert!(action.is_none()); // no submit
+        assert_eq!(ed.text, "hel\nlo");
+        assert_eq!(ed.cursor, 4);
+    }
+
+    #[test]
+    fn arrow_navigation_after_newline() {
+        let mut ed = make_editor("abc");
+        // Insert newline at end.
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        )));
+        assert_eq!(ed.text, "abc\n");
+        // Cursor should be on the empty second line.
+        assert!(
+            ed.cursor > 3,
+            "cursor should be on new line, got {}",
+            ed.cursor
+        );
+        // Up should go to first line.
+        ed.move_up();
+        assert!(
+            ed.cursor <= 3,
+            "up should go to first line, got {}",
+            ed.cursor
+        );
+        // Down should go back to the empty line.
+        ed.move_down();
+        assert!(
+            ed.cursor > 3,
+            "down should go to second line, got {}",
+            ed.cursor
+        );
+        // Type on second line.
+        ed.insert_char('x');
+        assert_eq!(ed.text, "abc\nx");
+    }
+
+    #[test]
+    fn up_lands_on_empty_line_between_content() {
+        // "aaa\n\nbbb" has 3 visual lines: "aaa", (empty), "bbb".
+        // Pressing Up from "bbb" should land on the empty line, not jump to "aaa".
+        let mut ed = make_editor("aaa\n\nbbb");
+        ed.cursor = ed.text.len(); // end of text
+        ed.move_up();
+        // Should be on the empty line (byte after first newline).
+        let line_start = ed.cursor;
+        assert_eq!(
+            &ed.text[line_start..],
+            "\nbbb",
+            "up from last line should go to empty line, got {:?}",
+            &ed.text[line_start..]
+        );
+        // Move up again — should go to "aaa".
+        ed.move_up();
+        let line_start2 = ed.cursor;
+        assert_eq!(
+            &ed.text[line_start2..line_start2 + 3],
+            "aaa",
+            "second up should go to first line"
+        );
+    }
+
+    #[test]
+    fn up_down_through_many_empty_lines() {
+        // 20 newlines = 21 visual lines, all empty.
+        let mut ed = make_editor(&"\n".repeat(20));
+        // Cursor starts at end (byte 20).
+        assert_eq!(ed.cursor, 20);
+        // Move up step by step — should reach byte 0 after 20 presses.
+        for i in 1..=20 {
+            ed.move_up();
+            assert_eq!(
+                ed.cursor,
+                20 - i,
+                "up press {} should land at byte {}",
+                i,
+                20 - i
+            );
+        }
+        // Now move back down.
+        for i in 1..=20 {
+            ed.move_down();
+            assert_eq!(ed.cursor, i, "down press {} should land at byte {}", i, i);
+        }
+        assert_eq!(ed.cursor, 20);
+    }
+
+    #[test]
+    fn submit_via_ctrl_enter() {
+        let root = temp_root("submit-ctrl-enter");
+        let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
+        ed.focus(true);
+        ed.set_text("follow up text");
+        let action = ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        assert!(matches!(action, Some(Action::FollowUpMessage(ref t)) if t == "follow up text"));
+        assert!(ed.text().is_empty());
+    }
+
+    #[test]
+    fn tab_inserts_two_spaces() {
+        let mut ed = make_editor("hello");
+        ed.cursor = 5;
+        ed.handle_event(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(ed.text, "hello  ");
+        assert_eq!(ed.cursor, 7);
+    }
+
+    #[test]
+    fn page_up_down() {
+        let mut ed = make_editor(
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12",
+        );
+        ed.last_inner_area = Some(Rect::new(0, 0, 80, 5));
+        ed.cursor = 0;
+        // Page down should move down by ~5 lines.
+        ed.move_page_down();
+        assert!(ed.cursor > 0, "cursor should have moved down");
+        let old = ed.cursor;
+        ed.move_page_up();
+        assert!(ed.cursor < old, "cursor should have moved back up");
+    }
+
+    #[test]
+    fn click_position_respects_working_dir_and_text() {
+        // This tests the mouse_to_cell + cursor placement mapping.
+        let mut ed = make_editor("hello\nworld");
+        ed.last_inner_area = Some(Rect::new(10, 5, 80, 10));
+        // Click at (10, 5) = inner area start = first character
+        let pos = ed.mouse_to_cell(10, 5);
+        assert_eq!(pos, Some((0, 0)));
+        let pos2 = ed.mouse_to_cell(14, 5);
+        assert_eq!(pos2, Some((0, 4)));
+        let pos3 = ed.mouse_to_cell(10, 6);
+        assert_eq!(pos3, Some((1, 0)));
+    }
+
+    // ── File mention matching ──
 
     #[test]
     fn file_mentions_recurse_and_fuzzy_match_relative_paths() {
@@ -1205,10 +1924,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // ── Event handling ──
+
     #[test]
     fn editor_handles_paste_event() {
         let root = temp_root("paste");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
         editor.focus(true);
 
         editor.handle_event(&Event::Paste("hello\nworld".to_string()));
@@ -1218,33 +1939,9 @@ mod tests {
     }
 
     #[test]
-    fn editor_moves_to_end_with_super_down() {
-        let root = temp_root("super-down");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
-        editor.focus(true);
-        editor.set_text("abcdef");
-
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Left,
-            KeyModifiers::NONE,
-        )));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::SUPER,
-        )));
-
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('!'),
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(editor.text(), "abcdef!");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn editor_moves_to_start_with_super_up() {
         let root = temp_root("super-up");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
         editor.focus(true);
         editor.set_text("abcdef");
 
@@ -1259,38 +1956,9 @@ mod tests {
     }
 
     #[test]
-    fn editor_moves_with_super_plus_shift_arrows() {
-        let root = temp_root("super-shift-arrows");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
-        editor.focus(true);
-        editor.set_text("abcdef");
-
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::SUPER | KeyModifiers::SHIFT,
-        )));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('!'),
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(editor.text(), "abcdef!");
-
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Up,
-            KeyModifiers::SUPER | KeyModifiers::SHIFT,
-        )));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('^'),
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(editor.text(), "^abcdef!");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn editor_moves_word_left_with_alt_left() {
         let root = temp_root("alt-left");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
         editor.focus(true);
         editor.set_text("alpha beta");
 
@@ -1307,14 +1975,16 @@ mod tests {
     #[test]
     fn editor_moves_word_right_with_alt_right() {
         let root = temp_root("alt-right");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
         editor.focus(true);
         editor.set_text("alpha beta");
 
+        // Home → start of visual line (byte 0).
         editor.handle_event(&Event::Key(KeyEvent::new(
             KeyCode::Home,
             KeyModifiers::NONE,
         )));
+        // Alt+Right → skip 'alpha' (non-ws), land at space after 'alpha'.
         editor.handle_event(&Event::Key(KeyEvent::new(
             KeyCode::Right,
             KeyModifiers::ALT,
@@ -1324,27 +1994,68 @@ mod tests {
             KeyModifiers::NONE,
         )));
 
+        // Cursor is at space after "alpha", so '!' goes before space.
         assert_eq!(editor.text(), "alpha! beta");
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn editor_inserts_newline_with_shift_enter() {
-        let root = temp_root("shift-enter");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
-        editor.focus(true);
-        editor.set_text("hello");
+    fn slash_autocomplete_dismisses_after_space() {
+        let root = temp_root("slash-dismiss");
+        let mut ed = Editor::new(
+            Theme::default(),
+            root,
+            vec!["help".into(), "model".into()],
+            "send".into(),
+        );
+        ed.focus(true);
 
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::SHIFT,
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
         )));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('w'),
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
+        assert!(ed.autocomplete_active());
+
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+        assert!(!ed.autocomplete_active());
+    }
+
+    #[test]
+    fn autocomplete_selection_wraps() {
+        let root = temp_root("autocomplete-wrap");
+        let mut ed = Editor::new(
+            Theme::default(),
+            root,
+            vec!["help".into(), "hello".into(), "model".into()],
+            "send".into(),
+        );
+        ed.focus(true);
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
             KeyModifiers::NONE,
         )));
 
-        assert_eq!(editor.text(), "hello\nw");
-        let _ = std::fs::remove_dir_all(root);
+        let initial = ed.autocomplete_selected();
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        ed.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(ed.autocomplete_selected(), initial);
     }
 }
