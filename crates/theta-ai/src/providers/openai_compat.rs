@@ -351,7 +351,7 @@ fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
             // DeepSeek requires at least `reasoning_content: ""` on replayed msgs.
             let mut msg_json = json!({
                 "role": "assistant",
-                "content": Value::Null,
+                "content": "",
             });
 
             let mut has_content = false;
