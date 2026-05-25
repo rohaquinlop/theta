@@ -319,6 +319,10 @@ pub async fn run_tui(
             description: "Set thinking level (off/minimal/low/medium/high/xhigh)".into(),
         },
         CommandEntry {
+            name: "effort".into(),
+            description: "Alias for /thinking".into(),
+        },
+        CommandEntry {
             name: "clear".into(),
             description: "Clear the chat display".into(),
         },
@@ -341,6 +345,10 @@ pub async fn run_tui(
         CommandEntry {
             name: "sessions".into(),
             description: "List recent sessions to resume".into(),
+        },
+        CommandEntry {
+            name: "resume".into(),
+            description: "Alias for /sessions".into(),
         },
         CommandEntry {
             name: "tree".into(),

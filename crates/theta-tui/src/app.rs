@@ -936,6 +936,7 @@ impl App {
                     "Slash commands:",
                     "  /model          Open model picker (available models)",
                     "  /thinking [lvl] Open selector or set thinking level (off/minimal/low/medium/high/xhigh)",
+                    "  /effort [lvl]   Alias for /thinking",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
                     "  /status         Show live runtime status snapshot",
@@ -944,6 +945,7 @@ impl App {
                     "  /fork           Fork the current session",
                     "  /new            Start a new unsaved session",
                     "  /sessions       List recent sessions (in picker press s to sort)",
+                    "  /resume         Alias for /sessions",
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
@@ -987,7 +989,7 @@ impl App {
                     });
                 }
             }
-            "thinking" => {
+            "thinking" | "effort" => {
                 if arg.is_empty() {
                     // No arg — open the modal selector.
                     if self.thinking_selector.has_levels() {
@@ -1082,7 +1084,7 @@ impl App {
                 self.chat.clear_messages();
                 let _ = self.action_tx.send(TuiAction::NewSession);
             }
-            "sessions" => {
+            "sessions" | "resume" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessions);
             }
             "tree" => {
