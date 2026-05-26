@@ -33,6 +33,8 @@ pub enum Action {
     SendMessage(String),
     SteerMessage(String),
     FollowUpMessage(String),
+    /// Cancel current agent turn if streaming, or initiate quit confirmation.
+    Cancel,
     Quit,
     SwitchModel(String),
     SetThinking(String),

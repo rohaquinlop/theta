@@ -79,13 +79,13 @@ pub fn default_bindings() -> Vec<Keybinding> {
     vec![
         Keybinding {
             key: KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            action: Action::Quit,
-            description: "Quit",
+            action: Action::Cancel,
+            description: "Cancel / Quit confirm",
         },
         Keybinding {
             key: KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            action: Action::Quit,
-            description: "Quit",
+            action: Action::Cancel,
+            description: "Cancel / Quit confirm",
         },
         Keybinding {
             key: KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
