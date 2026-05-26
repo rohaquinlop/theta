@@ -100,6 +100,9 @@ impl Chat {
         self.cached_msg_ranges.clear();
         self.cached_message_count = 0;
         self.cache_dirty = true;
+        self.select_anchor = None;
+        self.select_head = None;
+        self.selecting = false;
     }
 
     pub fn new(theme: Theme) -> Self {
@@ -433,7 +436,7 @@ impl Component for Chat {
             .cloned()
             .collect::<Vec<_>>();
 
-        if let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head) {
+        if self.selecting && let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head) {
             let (start, end) = ordered_selection(anchor, head);
             let visible_last = visible.len().saturating_sub(1);
             let from_line = start.0.min(visible_last);
@@ -554,9 +557,13 @@ impl Component for Chat {
                         && let Some(text) = self.selection_text(pos)
                     {
                         self.selecting = false;
+                        self.select_anchor = None;
+                        self.select_head = None;
                         return Some(Action::CopySelection(text));
                     }
                     self.selecting = false;
+                    self.select_anchor = None;
+                    self.select_head = None;
                 }
                 _ => {}
             },
