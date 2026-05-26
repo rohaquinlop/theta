@@ -31,9 +31,10 @@ impl AgentTool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command in the current working directory. Returns stdout and stderr. \
-         Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, \
-         full output is saved to a temp file. Optionally provide a timeout in seconds."
+        "Execute a bash command. The working directory is already set — do NOT prefix \
+         commands with `cd`. Returns stdout and stderr. Output is truncated to last 2000 \
+         lines or 50KB (whichever is hit first). If truncated, full output is saved to a \
+         temp file. Optionally provide a timeout in seconds."
     }
 
     fn label(&self) -> &str {
@@ -76,18 +77,30 @@ impl AgentTool for BashTool {
             })?;
         let timeout_secs = args["timeout"].as_f64().map(|t| t as u64);
 
+        let raw_command = command.to_string();
+
+        // Strip redundant leading `cd <working_dir> &&/;` — the tool already sets cwd.
+        let cwd_str = self.ctx.working_dir.to_string_lossy();
+        let stripped = raw_command
+            .strip_prefix(&format!("cd {} && ", cwd_str))
+            .or_else(|| raw_command.strip_prefix(&format!("cd {}; ", cwd_str)))
+            .or_else(|| raw_command.strip_prefix(&format!("cd {}\n", cwd_str)))
+            .or_else(|| raw_command.strip_prefix(&format!("cd {} &&", cwd_str)))
+            .unwrap_or(&raw_command);
+        let clean_command = stripped.trim();
+
         if let Some(ref update_sender) = on_update {
             update_sender(ToolUpdate {
                 tool_call_id: tool_call_id.into(),
                 tool_name: "bash".into(),
                 status: ToolUpdateStatus::Running,
-                output: Some(format!("running: {command}")),
+                output: Some(format!("running: {clean_command}")),
             });
         }
 
         let child = Command::new("bash")
             .arg("-c")
-            .arg(command)
+            .arg(clean_command)
             .current_dir(&self.ctx.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

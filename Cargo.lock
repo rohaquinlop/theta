@@ -2156,6 +2156,7 @@ dependencies = [
  "open",
  "pulldown-cmark",
  "ratatui",
+ "serde_json",
  "syntect",
  "thiserror",
  "tokio",

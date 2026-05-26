@@ -1,6 +1,6 @@
 //! Application — main TUI event loop and layout management.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
@@ -26,20 +26,6 @@ use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
 use crate::terminal;
 use crate::theme::Theme;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolVerbosity {
-    Compact,
-    Full,
-}
-
-#[derive(Debug, Clone)]
-struct ToolRecord {
-    id: String,
-    name: String,
-    summary: String,
-    is_error: bool,
-}
 
 /// Commands sent from the TUI back to the interactive handler.
 #[derive(Debug, Clone)]
@@ -99,6 +85,7 @@ pub enum TuiEvent {
     ToolStart {
         name: String,
         id: String,
+        args: Option<String>,
     },
     ToolProgress {
         name: String,
@@ -240,6 +227,7 @@ pub struct App {
     chat: Chat,
     editor: Editor,
     status: StatusBar,
+    working_dir: std::path::PathBuf,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
     tree_selector: TreeSelector,
@@ -264,20 +252,20 @@ pub struct App {
     /// this flag is set are shown with a visual transition cue.
     tool_exec_phase: bool,
     current_tool: Option<String>,
+    tool_display_text: HashMap<String, String>,
+    tool_started_at: HashMap<String, std::time::Instant>,
+    tool_last_tick_sec: HashMap<String, u64>,
     tools_in_turn: usize,
     retries_in_turn: u32,
     turn_index: u32,
     turn_intent: String,
     diag_enabled: bool,
-    tool_verbosity: ToolVerbosity,
-    last_tool_records: Vec<ToolRecord>,
     steer_queue_count: usize,
     follow_up_queue_count: usize,
     show_thinking: bool,
     steering_mode: String,
     follow_up_mode: String,
     tool_progress_hz: u64,
-    last_tool_progress_at: Option<std::time::Instant>,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
     window_title: Option<String>,
@@ -306,6 +294,47 @@ impl App {
     }
 
     /// Clear quit confirmation if the 2-second window has expired.
+    /// Update streaming tool messages with elapsed runtime.
+    /// Called from the 30fps tick when tools are executing.
+    /// Only updates once per second to avoid excessive cache rebuilds.
+    fn update_tool_elapsed(&mut self) {
+        if self.tool_started_at.is_empty() {
+            return;
+        }
+        let names: Vec<String> = self.tool_started_at.keys().cloned().collect();
+        for name in names {
+            let Some(start) = self.tool_started_at.get(&name) else {
+                continue;
+            };
+            let elapsed = start.elapsed().as_secs();
+            if elapsed < 1 {
+                continue;
+            }
+            let last = self
+                .tool_last_tick_sec
+                .get(&name)
+                .copied()
+                .unwrap_or(u64::MAX);
+            if elapsed == last {
+                continue;
+            }
+            let display = self
+                .tool_display_text
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let spinner = SPINNER[(elapsed as usize) % 10];
+            let text = if display.is_empty() {
+                format!("{name} {spinner} {elapsed}s")
+            } else {
+                format!("{display} {spinner} {elapsed}s")
+            };
+            self.chat.upsert_tool_message(&name, &text, true);
+            self.tool_last_tick_sec.insert(name.clone(), elapsed);
+        }
+    }
+
     fn clear_expired_quit_confirmation(&mut self) {
         if !self.quit_confirmation {
             return;
@@ -367,6 +396,7 @@ impl App {
         editor.focus(true); // Editor starts focused.
 
         Self {
+            working_dir,
             chat: Chat::new(theme.clone()),
             editor,
             status,
@@ -387,20 +417,20 @@ impl App {
             streaming: false,
             tool_exec_phase: false,
             current_tool: None,
+            tool_display_text: HashMap::new(),
+            tool_started_at: HashMap::new(),
+            tool_last_tick_sec: HashMap::new(),
             tools_in_turn: 0,
             retries_in_turn: 0,
             turn_index: 0,
             turn_intent: "chat".to_string(),
             diag_enabled: false,
-            tool_verbosity: ToolVerbosity::Compact,
-            last_tool_records: Vec::new(),
             steer_queue_count: 0,
             follow_up_queue_count: 0,
             show_thinking: settings.show_thinking,
             steering_mode: settings.steering_mode,
             follow_up_mode: settings.follow_up_mode,
             tool_progress_hz: settings.tool_progress_hz.max(1),
-            last_tool_progress_at: None,
             login_flow: None,
             window_title,
             pending_config_actions: HashSet::new(),
@@ -463,6 +493,7 @@ impl App {
                 }
                 _ = redraw_tick.tick() => {
                     self.clear_expired_quit_confirmation();
+                    self.update_tool_elapsed();
                     let _ = term.draw(|frame| self.draw(frame));
                 }
             }
@@ -1015,9 +1046,7 @@ impl App {
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
                     "  /diag on|off    Toggle diagnostic event stream in chat",
-                    "  /tools compact|full  Toggle compact/full tool output",
                     "  /tools-rate <hz> Set tool progress update rate (1-60)",
-                    "  /expand <id|last-tool> Show full tool summary",
                     "  /skill:<name>   Invoke a skill",
                     "  /cancel         Cancel current agent execution",
                     "  /exit           Exit Theta",
@@ -1216,71 +1245,6 @@ impl App {
                     });
                 }
             },
-            "tools" => match arg {
-                "compact" => {
-                    self.tool_verbosity = ToolVerbosity::Compact;
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Tool output set to compact.".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                }
-                "full" => {
-                    self.tool_verbosity = ToolVerbosity::Full;
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Tool output set to full.".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                }
-                _ => {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Usage: /tools <compact|full>".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                }
-            },
-            "expand" => {
-                let target = arg.trim();
-                if target.is_empty() {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Usage: /expand <id|last-tool>".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                    return;
-                }
-                let rec = if target == "last-tool" {
-                    self.last_tool_records.last()
-                } else {
-                    self.last_tool_records.iter().find(|r| r.id == target)
-                };
-                if let Some(r) = rec {
-                    let header = if r.is_error {
-                        format!("Tool {} ({}) failed", r.name, r.id)
-                    } else {
-                        format!("Tool {} ({})", r.name, r.id)
-                    };
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: format!("{header}\n{}", r.summary),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                } else {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: format!("No tool summary found for `{target}`."),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                }
-            }
             "tools-rate" => {
                 let parsed = arg.trim().parse::<u64>().ok();
                 let Some(hz) = parsed else {
@@ -1413,7 +1377,6 @@ impl App {
                 }
             }
             TuiEvent::ToolCallPrepared { name, .. } => {
-                self.status.set_detail(&format!("preparing {name}"));
                 // Show a visual cue that a tool call is being prepared
                 // during LLM streaming (before execution). This creates a
                 // tool message immediately so the user sees the transition
@@ -1421,79 +1384,45 @@ impl App {
                 self.chat
                     .upsert_tool_message(&name, &format!("{name} preparing..."), true);
             }
-            TuiEvent::ToolStart { name, .. } => {
+            TuiEvent::ToolStart { name, args, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("ToolExec");
-                self.status.set_detail(&format!("{name} running..."));
                 self.tools_in_turn += 1;
                 self.tool_exec_phase = true;
-                // Update the preparing message to "running". If ToolCallPrepared
-                // already created a message, this updates it in-place.
-                self.chat.upsert_tool_message(&name, "running", true);
+                // Extract command from args for display.
+                let display_text =
+                    tool_display_text(&name, &args, &self.working_dir.to_string_lossy());
+                self.tool_display_text
+                    .insert(name.clone(), display_text.clone());
+                self.tool_started_at
+                    .insert(name.clone(), std::time::Instant::now());
+                self.chat.upsert_tool_message(&name, &display_text, true);
             }
-            TuiEvent::ToolProgress { name, message } => {
-                let interval =
-                    std::time::Duration::from_millis(1000 / self.tool_progress_hz.max(1));
-                if let Some(last) = self.last_tool_progress_at
-                    && last.elapsed() < interval
-                {
-                    return;
-                }
-                self.last_tool_progress_at = Some(std::time::Instant::now());
-                self.status.set_detail(&truncate_status_text(&message, 80));
-                if self.tool_verbosity == ToolVerbosity::Full {
-                    self.chat.update_tool(
-                        &name,
-                        &format!("\n{}", truncate_status_text(&message, 120)),
-                        true,
-                    );
-                }
-            }
-            TuiEvent::ToolEnd {
-                id,
-                name,
-                is_error,
-                summary,
+            TuiEvent::ToolProgress {
+                name: _,
+                message: _,
             } => {
+                // Rate-limited progress — do not show tool output in chat.
+            }
+            TuiEvent::ToolEnd { name, is_error, .. } => {
                 if self.current_tool.as_deref() == Some(name.as_str()) {
                     self.current_tool = None;
                 }
-                self.last_tool_records.push(ToolRecord {
-                    id: id.clone(),
-                    name: name.clone(),
-                    summary: summary.clone(),
-                    is_error,
-                });
-                if self.last_tool_records.len() > 100 {
-                    let drop_n = self.last_tool_records.len() - 100;
-                    self.last_tool_records.drain(0..drop_n);
-                }
+                let display_text = self.tool_display_text.remove(&name).unwrap_or_default();
+                self.tool_started_at.remove(&name);
+                self.tool_last_tick_sec.remove(&name);
+                // Build status suffix for the command line.
+                let status = if is_error { " (failed)" } else { " (done)" };
+                let final_text = if display_text.is_empty() {
+                    format!("{name}{status}")
+                } else {
+                    format!("{display_text}{status}")
+                };
+                self.chat.complete_tool_compact(&name, &final_text);
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
-                    self.status.set_detail(&format!("{name} failed"));
-                    if self.tool_verbosity == ToolVerbosity::Full {
-                        self.chat
-                            .update_tool(&name, &format!("\nfailed\n{summary}"), false);
-                    } else {
-                        self.chat.complete_tool_compact(
-                            &name,
-                            &format!("failed: {}", compact_summary(&summary)),
-                        );
-                    }
                 } else {
                     self.status.set_agent_state("Completed");
-                    self.status.set_detail(&format!("{name} done"));
-                    if self.tool_verbosity == ToolVerbosity::Full {
-                        let suffix = if summary.is_empty() {
-                            "\ndone".to_string()
-                        } else {
-                            format!("\ndone\n{summary}")
-                        };
-                        self.chat.update_tool(&name, &suffix, false);
-                    } else {
-                        self.chat
-                            .complete_tool_compact(&name, &compact_summary(&summary));
-                    }
                 }
             }
             TuiEvent::TurnStart => {
@@ -1798,18 +1727,70 @@ impl App {
     }
 }
 
-fn compact_summary(summary: &str) -> String {
-    let first = summary.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let mut s = first.trim().to_string();
-    while s.starts_with("[tool:") {
-        let Some(end) = s.find(']') else {
-            break;
-        };
-        s = s[end + 1..].trim_start().to_string();
+/// Build the chat display text for a tool call.
+/// Shows the tool name plus its key argument (path for file tools, command for bash).
+fn tool_display_text(name: &str, args: &Option<String>, cwd: &str) -> String {
+    let Some(args_str) = args else {
+        return name.to_string();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(args_str) else {
+        return name.to_string();
+    };
+    match name {
+        "bash" => {
+            if let Some(cmd) = json.get("command").and_then(|v| v.as_str()) {
+                format!("{name}: {}", strip_cd_prefix(cmd, cwd))
+            } else {
+                name.to_string()
+            }
+        }
+        "write" | "edit" | "read" | "ls" => {
+            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                format!("{name}: {path}")
+            } else {
+                name.to_string()
+            }
+        }
+        "grep" | "find" => {
+            let pattern = json.get("pattern").and_then(|v| v.as_str());
+            let path = json.get("path").and_then(|v| v.as_str());
+            match (pattern, path) {
+                (Some(p), Some(fp)) => format!("{name}: {p} in {fp}"),
+                (Some(p), None) => format!("{name}: {p}"),
+                (None, Some(fp)) => format!("{name}: {fp}"),
+                (None, None) => name.to_string(),
+            }
+        }
+        _ => name.to_string(),
     }
-    truncate_status_text(&s, 100)
 }
 
+/// Strip a redundant leading `cd <cwd> &&`/`;`/`\n` prefix from a bash command.
+/// Only strips when the cd target matches the current working directory.
+fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &str) -> &'a str {
+    let trimmed = cmd.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("cd ") {
+        // Check if the path after `cd ` starts with the working directory.
+        if rest.starts_with(cwd) {
+            // Find the separator after the path: &&, ;, or newline
+            let sep_offset = rest
+                .find(" &&")
+                .or_else(|| rest.find(';'))
+                .or_else(|| rest.find('\n'));
+            if let Some(idx) = sep_offset {
+                let after_sep = &rest[idx..];
+                // Skip past the separator (&&, ;, or newline)
+                let skip = if after_sep.starts_with(" &&") { 3 } else { 1 };
+                let rest_after = &after_sep[skip..];
+                let result = rest_after.trim_start();
+                if !result.is_empty() {
+                    return result;
+                }
+            }
+        }
+    }
+    cmd
+}
 fn is_diagnostic_message(msg: &str) -> bool {
     msg.contains("produced no")
         || msg.contains("retrying same turn")

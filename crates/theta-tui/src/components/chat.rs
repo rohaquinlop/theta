@@ -284,28 +284,24 @@ impl Chat {
             ),
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Thinking => ("[thinking] ", Style::default().fg(self.theme.dim)),
-            ChatRole::Tool => ("[tool] ", Style::default().fg(self.theme.warning)),
+            ChatRole::Tool => {
+                let is_error = msg.text.contains("(failed)");
+                let style = if is_error {
+                    Style::default().fg(self.theme.error)
+                } else {
+                    Style::default().fg(self.theme.warning)
+                };
+                ("[tool] ", style)
+            }
             ChatRole::System => ("[system] ", Style::default().fg(self.theme.dim)),
         };
 
+        // Tool messages already include the full display text
+        // (e.g. "bash: ls -la (done)"), so render body as-is.
         let text = if msg.role == ChatRole::Tool {
-            let body = truncate_output(&msg.text, 500);
-            if let Some(name) = msg.tool_name.as_deref() {
-                format!("{name}: {body}")
-            } else {
-                body
-            }
+            truncate_output(&msg.text, 500)
         } else {
             msg.text.clone()
-        };
-
-        let cursor = if msg.is_streaming {
-            Some(Span::styled(
-                "\u{258c}",
-                Style::default().fg(self.theme.accent),
-            ))
-        } else {
-            None
         };
 
         let markdown_width = if msg.role == ChatRole::User {
@@ -331,17 +327,6 @@ impl Chat {
                 USER_BUBBLE_OUTER_MARGIN,
                 USER_BUBBLE_INNER_PAD,
             );
-        }
-
-        if let Some(ref c) = cursor {
-            if lines.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), role_style),
-                    c.clone(),
-                ]));
-            } else if let Some(last) = lines.last_mut() {
-                last.spans.push(c.clone());
-            }
         }
 
         lines
@@ -436,7 +421,9 @@ impl Component for Chat {
             .cloned()
             .collect::<Vec<_>>();
 
-        if self.selecting && let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head) {
+        if self.selecting
+            && let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head)
+        {
             let (start, end) = ordered_selection(anchor, head);
             let visible_last = visible.len().saturating_sub(1);
             let from_line = start.0.min(visible_last);

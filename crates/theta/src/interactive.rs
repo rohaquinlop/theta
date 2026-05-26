@@ -421,8 +421,7 @@ pub async fn run_tui(
         app.send_initial_message(prompt.to_string());
     }
 
-    // Forward all events directly — no coalescing. The TUI already
-    // rate-limits progress display via last_tool_progress_at. Coalescing
+    // Forward all events directly — no coalescing. Coalescing
     // progress here causes a "BUM!" effect where progress accumulates
     // silently and flushes only on the next non-progress event.
     tokio::spawn(async move {
@@ -537,6 +536,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
         let context_window = agent.state().await.model.context_window;
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut tool_args: HashMap<String, String> = HashMap::new(); // id -> raw args JSON
         let mut saw_assistant_text_delta = false;
         let mut saw_thinking_delta = false;
         let mut latest_turn_end_reason = "completed".to_string();
@@ -547,6 +547,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::MessageStart) => {
                     saw_assistant_text_delta = false;
                     saw_thinking_delta = false;
+                    tool_args.clear();
                 }
                 Ok(AgentEvent::TextDelta { text }) => {
                     saw_assistant_text_delta = true;
@@ -567,19 +568,25 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     // tools appearing during the response stream (before execution).
                     let _ = event_tx.send(TuiEvent::ToolCallPrepared { name, id });
                 }
+                Ok(AgentEvent::ToolCallDelta { id, arguments }) => {
+                    // Accumulate streamed arguments for this tool call.
+                    let entry = tool_args.entry(id).or_default();
+                    entry.push_str(&arguments);
+                }
                 Ok(AgentEvent::ToolExecutionStart {
                     tool_call_id: id,
                     tool_name: name,
                 }) => {
+                    let args = tool_args.remove(&id);
                     tool_names.insert(id.clone(), name.clone());
-                    let _ = event_tx.send(TuiEvent::ToolStart { name, id });
+                    let _ = event_tx.send(TuiEvent::ToolStart { name, id, args });
                 }
                 Ok(AgentEvent::ToolExecutionProgress {
                     tool_call_id: id,
                     output,
                 }) => {
-                    // Forward progress directly. The TUI rate-limits display
-                    // via last_tool_progress_at.
+                    // Forward progress directly. The TUI discards it during render,
+                    // so this is just a pass-through.
                     let name = tool_names.get(&id).cloned().unwrap_or_else(|| id.clone());
                     let _ = event_tx.send(TuiEvent::ToolProgress {
                         name,
@@ -589,6 +596,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
                     let summary = format_tool_summary(&result, 2200);
                     tool_names.remove(&result.tool_call_id);
+                    tool_args.remove(&result.tool_call_id); // cleanup stale args
                     let _ = event_tx.send(TuiEvent::ToolEnd {
                         id: result.tool_call_id,
                         name: result.tool_name,
@@ -1355,9 +1363,7 @@ async fn handle_tui_action(
         }
         TuiAction::AbortAgent => {
             let Some(agent) = agent_cell.read().await.clone() else {
-                let _ = event_tx.send(TuiEvent::Info(
-                    "No agent to cancel.".into(),
-                ));
+                let _ = event_tx.send(TuiEvent::Info("No agent to cancel.".into()));
                 return;
             };
             match agent.abort() {
@@ -1371,9 +1377,7 @@ async fn handle_tui_action(
                 }
                 Err(e) => {
                     tracing::warn!("failed to cancel agent: {e}");
-                    let _ = event_tx.send(TuiEvent::Error(
-                        format!("Failed to cancel: {e}"),
-                    ));
+                    let _ = event_tx.send(TuiEvent::Error(format!("Failed to cancel: {e}")));
                 }
             }
         }
