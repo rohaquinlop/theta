@@ -1,8 +1,13 @@
 //! Theta: minimal terminal coding agent harness.
 
-/// Override the terminal window title shown in your terminal emulator tab/title bar.
-/// Set to `Some("Your Title")` to customize, or `None` to leave unchanged.
-pub static WINDOW_TITLE: Option<&str> = Some("θ");
+/// Build the terminal window title: θ symbol + working directory name.
+pub fn window_title(working_dir: &std::path::Path) -> String {
+    let dir_name = working_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    format!("θ - {dir_name}")
+}
 
 pub mod cli;
 pub mod config;

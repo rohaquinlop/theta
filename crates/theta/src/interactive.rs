@@ -402,7 +402,7 @@ pub async fn run_tui(
         event_rx,
         message_tx,
         action_tx,
-        crate::WINDOW_TITLE.map(ToString::to_string),
+        Some(crate::window_title(working_dir)),
     );
 
     // If auth is missing, start the login flow immediately.
