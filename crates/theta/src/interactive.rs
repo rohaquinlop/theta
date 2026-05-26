@@ -683,8 +683,8 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         )));
                     }
                 }
-                Ok(AgentEvent::AgentEnd { .. }) => {
-                    let _ = event_tx.send(TuiEvent::AgentEnd);
+                Ok(AgentEvent::AgentEnd { aborted }) => {
+                    let _ = event_tx.send(TuiEvent::AgentEnd { aborted });
                 }
                 Ok(AgentEvent::ContextCompacted {
                     trimmed_count,
@@ -1324,6 +1324,30 @@ async fn handle_tui_action(
             agent.follow_up(vec![theta_ai::ContentBlock::Text { text }]);
             let (steer, follow_up) = agent.queue_lengths();
             let _ = event_tx.send(TuiEvent::QueueStatus { steer, follow_up });
+        }
+        TuiAction::AbortAgent => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Info(
+                    "No agent to cancel.".into(),
+                ));
+                return;
+            };
+            match agent.abort() {
+                Ok(()) => {
+                    tracing::info!("agent cancelled by user");
+                }
+                Err(theta_agent_core::error::AgentError::NotRunning) => {
+                    let _ = event_tx.send(TuiEvent::Error(
+                        "No active agent execution to cancel.".into(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!("failed to cancel agent: {e}");
+                    let _ = event_tx.send(TuiEvent::Error(
+                        format!("Failed to cancel: {e}"),
+                    ));
+                }
+            }
         }
     }
 }
