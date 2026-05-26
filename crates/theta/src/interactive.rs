@@ -362,6 +362,14 @@ pub async fn run_tui(
             name: "skills".into(),
             description: "List available skills".into(),
         },
+        CommandEntry {
+            name: "exit".into(),
+            description: "Exit Theta".into(),
+        },
+        CommandEntry {
+            name: "cancel".into(),
+            description: "Cancel current agent execution".into(),
+        },
     ];
 
     // Skills as /skill:<name> commands.
