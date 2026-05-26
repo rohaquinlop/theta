@@ -598,9 +598,8 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                                 .unwrap_or("")
                                 .to_string();
                             if !skill_name.is_empty() {
-                                let _ = event_tx.send(TuiEvent::SkillActivated {
-                                    name: skill_name,
-                                });
+                                let _ =
+                                    event_tx.send(TuiEvent::SkillActivated { name: skill_name });
                             }
                         }
                     }

@@ -802,7 +802,7 @@ fn default_auth_path() -> PathBuf {
 }
 
 /// ~/.theta directory.
-fn theta_dir() -> PathBuf {
+pub(crate) fn theta_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".theta")

@@ -39,15 +39,18 @@ cargo run -- rpc
 Theta supports scriptable tool hooks via `.rhai` files — no fork, no recompile, no external runtime. The agent can write these for you when you ask.
 
 **Ask the agent:**
+
 - "Block any `git push --force` and ask me to confirm"
 - "Warn me before editing `.env` files"
 - "Don't allow `rm -rf` commands"
 
 **Script locations:**
+
 - `~/.theta/extensions/*.rhai` — global (all projects)
 - `./.theta/extensions/*.rhai` — project-local
 
 **Example script** (`~/.theta/extensions/guard.rhai`):
+
 ```rhai
 // Block dangerous commands
 tool.before("bash", |ctx| {
@@ -65,6 +68,32 @@ tool.before("write", |ctx| {
 ```
 
 Scripts load automatically on next session. Script errors never block the tool they're guarding.
+
+## Custom System Prompt
+
+Theta checks for two override files in `~/.theta/` at session start:
+
+- **`~/.theta/SYSTEM_PROMPT.md`** — if present, replaces the entire system prompt (project context, skills, tools, and response contract). Use for a fully custom prompt.
+- **`~/.theta/APPEND_SYSTEM_PROMPT.md`** — if present and `SYSTEM_PROMPT.md` does not exist, its content is appended to the normal system prompt. Use for adding extra instructions without rebuilding everything.
+
+If both files exist, only `SYSTEM_PROMPT.md` is used.
+
+**Example — appending a custom rule** (`~/.theta/APPEND_SYSTEM_PROMPT.md`):
+
+```markdown
+## Custom Rule
+
+Always mention the estimated token cost of each operation before executing it.
+```
+
+**Example — full replacement** (`~/.theta/SYSTEM_PROMPT.md`):
+
+```markdown
+You are a helpful assistant with access to file tools.
+Follow the user's instructions carefully.
+```
+
+No config changes needed — just drop the file in and start a new session.
 
 ## Config
 

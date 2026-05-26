@@ -74,13 +74,15 @@ pub async fn build_system_prompt_with_skills(
     parts.push(build_runtime_context(working_dir, model_id, thinking_level));
     parts.push(RESPONSE_CONTRACT.to_string());
 
-    vec![ContentBlock::Text {
-        text: parts.join(
-            "
+    let text = parts.join("\n\n");
 
-",
-        ),
-    }]
+    // SYSTEM_PROMPT.md at ~/.theta/ replaces the entire system prompt.
+    // APPEND_SYSTEM_PROMPT.md at ~/.theta/ appends to the built prompt.
+    // If both exist, SYSTEM_PROMPT.md takes precedence.
+    let theta_dir = crate::config::theta_dir();
+    let text = apply_system_prompt_overrides(&theta_dir, text).await;
+
+    vec![ContentBlock::Text { text }]
 }
 
 /// Build an `<active_skills>` block for skills activated at session start.
@@ -461,6 +463,27 @@ When a user asks "auto-load X at start" or "run X every session", write this con
 
 Do NOT edit config.toml without explicit user request or clear intent."#;
 
+/// Apply system prompt overrides from ~/.theta/.
+/// Returns the (possibly replaced or appended) text.
+async fn apply_system_prompt_overrides(theta_dir: &Path, mut text: String) -> String {
+    let sys_prompt_path = theta_dir.join("SYSTEM_PROMPT.md");
+    let append_path = theta_dir.join("APPEND_SYSTEM_PROMPT.md");
+
+    if sys_prompt_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&sys_prompt_path).await {
+            text = content;
+        }
+    } else if append_path.exists()
+        && let Ok(content) = tokio::fs::read_to_string(&append_path).await
+        && !content.is_empty()
+    {
+        text.push_str("\n\n");
+        text.push_str(&content);
+    }
+
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RESPONSE_CONTRACT, build_tools_prompt, is_ignorable_dir};
@@ -576,5 +599,74 @@ mod tests {
             !found_crates.contains(&""),
             "root AGENTS.md should not be in nested results"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_no_files_returns_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "base prompt content".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original.clone()).await;
+        assert_eq!(result, original);
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_system_prompt_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "replacement prompt").await.unwrap();
+        let original = "base prompt content".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert_eq!(result, "replacement prompt");
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_append_adds_to_original() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "extra instructions").await.unwrap();
+        let original = "base prompt".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert!(result.contains("base prompt"));
+        assert!(result.contains("extra instructions"));
+        assert!(result.contains("\n\n"));
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_both_files_system_prompt_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "system wins").await.unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "append ignored").await.unwrap();
+        let original = "base".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert_eq!(result, "system wins");
+        assert!(!result.contains("append ignored"));
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_append_ignored_when_system_present() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "only system here").await.unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "should not appear").await.unwrap();
+        let original = "base".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert_eq!(result, "only system here");
+        assert!(!result.contains("should not appear"));
+        assert!(!result.contains("base"));
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_append_empty_file_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "").await.unwrap();
+        let original = "just the base".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert_eq!(result, "just the base");
+    }
+
+    #[tokio::test]
+    async fn apply_overrides_system_prompt_handles_missing_file_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        // SYSTEM_PROMPT.md doesn't exist; APPEND doesn't exist
+        let original = "stays intact".to_string();
+        let result = super::apply_system_prompt_overrides(dir.path(), original).await;
+        assert_eq!(result, "stays intact");
     }
 }
