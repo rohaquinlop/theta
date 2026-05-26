@@ -47,6 +47,17 @@ pub async fn build_system_prompt_with_skills(
 
     if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
         parts.push(skills_block);
+        // Immediate directive: placed right after available skills so the model
+        // sees the skills listing and the instructions as one unit.
+        parts.push(
+            "## Skill Auto-Loading (MANDATORY)\n\n\
+             For EVERY user message, scan the `<available_skills>` list above and check if\n\
+             the user's request matches any skill's `<description>` field.\n\
+             The `<description>` tells you exactly when that skill applies — trust it.\n\
+             When matched: READ the skill file (`<location>`) → Apply instructions → Respond.\n\
+             This is mandatory for every turn."
+                .to_string(),
+        );
     }
 
     // Available extension scripts.
@@ -401,10 +412,10 @@ or write code — IMPLEMENT. Do not stop at a plan.
 - If blocked by missing info/permission, ask one precise question and stop.
 - Report what you changed and validation results after completing tool calls.
 
-The following skills provide specialized instructions for specific tasks.
-Use the read tool to load a skill's SKILL.md file when the task matches its
-description. When a skill file references a relative path, resolve it against
-the skill directory.
+## Skill Auto-Loading
+
+Re-read the Skill Auto-Loading instructions above (next to `<available_skills>`).
+Apply them on this turn.
 
 ## Theta Extensions
 
@@ -467,6 +478,18 @@ mod tests {
         assert!(RESPONSE_CONTRACT.contains("DONE"));
         assert!(RESPONSE_CONTRACT.contains("BLOCKED"));
         assert!(RESPONSE_CONTRACT.contains("FAILED"));
+    }
+
+    #[test]
+    fn response_contract_contains_skill_auto_loading_reminder() {
+        assert!(
+            RESPONSE_CONTRACT.contains("Skill Auto-Loading"),
+            "RESPONSE_CONTRACT must have skill auto-loading reminder"
+        );
+        assert!(
+            RESPONSE_CONTRACT.contains("Re-read the Skill Auto-Loading instructions above"),
+            "must reference the main directive above"
+        );
     }
 
     #[test]

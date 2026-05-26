@@ -17,6 +17,22 @@ Theta = minimal terminal coding-agent harness in Rust, inspired by [pi](https://
 
 Extend without forking internals: custom tools via Rust traits, skills via Markdown, prompt templates, Rhai scripts, themes. No sub-agents, no plan mode in core.
 
+### The model decides, not the code
+
+Theta is an agent **harness** — it provides structure (tools, prompts, events) and gets out of the way.
+The LLM drives all behavioral decisions: when to use a skill, what mode to operate in,
+how to interpret user intent. Do not replace this with heuristic Rust code.
+
+Wrong: write a `find_matching_skills()` that scores keywords to decide which skill to load.
+Right: list `<available_skills>` with name+description in the system prompt, tell the model
+to read the `<description>` field and decide for itself.
+
+Wrong: write a classifier to detect "plan mode" or "action mode".
+Right: put instructions in the system prompt, let the model follow them.
+
+If you find yourself writing a scoring function, keyword matcher, or intent classifier
+in Rust to drive agent behavior — stop. The system prompt is the right place for that logic.
+
 ## Architecture
 
 Six crates in Cargo workspace (`edition = "2024"`, `resolver = "3"`):

@@ -579,6 +579,32 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 }) => {
                     let args = tool_args.remove(&id);
                     tool_names.insert(id.clone(), name.clone());
+
+                    // Detect skill loading: read tool targeting SKILL.md
+                    if name == "read"
+                        && let Some(ref raw_args) = args
+                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_args)
+                        && let Some(path) = json.get("path").and_then(|v| v.as_str())
+                    {
+                        let lower_path = path.to_lowercase();
+                        if lower_path.ends_with("skill.md") || lower_path.contains("/skill.md") {
+                            // Extract skill name from path
+                            // Path like: skills/web-research/SKILL.md -> web-research
+                            // Path like: .theta/skills/caveman/SKILL.md -> caveman
+                            let skill_name = std::path::Path::new(path)
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !skill_name.is_empty() {
+                                let _ = event_tx.send(TuiEvent::SkillActivated {
+                                    name: skill_name,
+                                });
+                            }
+                        }
+                    }
+
                     let _ = event_tx.send(TuiEvent::ToolStart { name, id, args });
                 }
                 Ok(AgentEvent::ToolExecutionProgress {

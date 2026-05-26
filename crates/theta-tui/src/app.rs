@@ -185,6 +185,10 @@ pub enum TuiEvent {
     ThinkingSet {
         level: String,
     },
+    /// A skill was activated by the agent.
+    SkillActivated {
+        name: String,
+    },
 }
 
 /// Structured status-bar data from extensions (Rhai scripts).
@@ -1719,6 +1723,14 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!("Thinking level set to {level}"),
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
+            TuiEvent::SkillActivated { name } => {
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::Skill,
+                    text: name,
                     tool_name: None,
                     is_streaming: false,
                 });

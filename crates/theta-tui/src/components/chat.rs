@@ -37,6 +37,7 @@ pub enum ChatRole {
     Assistant,
     Thinking,
     Tool,
+    Skill,
     System,
 }
 
@@ -266,7 +267,7 @@ impl Chat {
     /// Format a message into styled lines with markdown parsing.
     fn format_message(&self, msg: &ChatMessage, content_width: usize) -> Vec<Line<'static>> {
         const USER_BUBBLE_OUTER_MARGIN: usize = 0;
-        const USER_BUBBLE_INNER_PAD: usize = 1;
+        const USER_BUBBLE_INNER_PAD: usize = 0;
 
         let is_skill_invocation = msg.role == ChatRole::User && msg.text.starts_with("/skill:");
         let (prefix, role_style): (&str, Style) = match msg.role {
@@ -294,6 +295,12 @@ impl Chat {
                 ("[tool] ", style)
             }
             ChatRole::System => ("[system] ", Style::default().fg(self.theme.dim)),
+            ChatRole::Skill => (
+                "▸ skill ",
+                Style::default()
+                    .fg(self.theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
         };
 
         // Tool messages already include the full display text
@@ -892,6 +899,7 @@ fn role_group(role: ChatRole) -> u8 {
         ChatRole::Assistant | ChatRole::Thinking => 2,
         ChatRole::Tool => 3,
         ChatRole::System => 4,
+        ChatRole::Skill => 5,
     }
 }
 
