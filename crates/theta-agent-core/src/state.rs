@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use theta_ai::{ContentBlock, Message, Model, ThinkingLevel};
+use theta_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
 
 use crate::types::AgentTool;
 use crate::types::{RunReport, RunReportEvent, TurnEndReason};
@@ -50,6 +50,8 @@ pub struct AgentState {
     pub(crate) system_prompt_tokens: u32,
     /// Cached approximate token count of the resource context (computed once on set).
     pub(crate) resource_context_tokens: u32,
+    /// Cached theta_ai::Tool list built from tools Vec (cheap clone per turn).
+    pub(crate) theta_ai_tools: Vec<Tool>,
 }
 
 impl AgentState {
@@ -71,6 +73,7 @@ impl AgentState {
             executed_tool_call_ids_in_turn: HashSet::new(),
             system_prompt_tokens: 0,
             resource_context_tokens: 0,
+            theta_ai_tools: Vec::new(),
         }
     }
 
@@ -146,6 +149,20 @@ impl AgentState {
             .as_deref()
             .map(approximate_tokens_for_blocks)
             .unwrap_or(0);
+    }
+
+    /// Rebuild the cached theta_ai::Tool list from self.tools.
+    /// Called after add_tool().
+    pub fn rebuild_theta_ai_tools(&mut self) {
+        self.theta_ai_tools = self
+            .tools
+            .iter()
+            .map(|t| Tool {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            })
+            .collect();
     }
 
     /// Load past messages from a session (for continue/resume).

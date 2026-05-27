@@ -902,15 +902,7 @@ async fn build_context(
         );
     }
 
-    let tools: Vec<theta_ai::Tool> = state
-        .tools
-        .iter()
-        .map(|t| theta_ai::Tool {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters(),
-        })
-        .collect();
+    let tools: Vec<theta_ai::Tool> = state.theta_ai_tools.clone();
 
     (
         Context {

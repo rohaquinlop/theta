@@ -107,6 +107,7 @@ impl Agent {
     pub async fn add_tool(&self, tool: Arc<dyn AgentTool>) {
         let mut state = self.state.write().await;
         state.tools.push(tool);
+        state.rebuild_theta_ai_tools();
     }
 
     /// Add or replace an authentication token for a provider.
