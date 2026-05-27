@@ -87,6 +87,13 @@ impl ScriptEngine {
                 .unwrap_or_else(|_| "unknown".into())
         });
 
+        // Register home_dir() -> String — returns the user's home directory path.
+        engine.register_fn("home_dir", || -> String {
+            dirs::home_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "~".into())
+        });
+
         {
             let handlers: Arc<Mutex<HashMap<String, Vec<ToolHandler>>>> = Arc::clone(&handlers);
             let registration_context: Arc<Mutex<Option<RegistrationContext>>> =

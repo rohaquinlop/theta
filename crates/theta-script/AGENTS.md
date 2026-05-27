@@ -29,6 +29,7 @@ Rhai-powered runtime hooks that bridge user scripts to `theta_agent_core::Hooks`
 - `ctx.args` — tool arguments as object map
 - `ctx.notify(msg)` — send notification to TUI
 - `cwd()` — current working directory
+- `home_dir()` — user home directory
 - `get_state(key)` / `set_state(key, value)` — persistent string state
 
 ## Conventions
