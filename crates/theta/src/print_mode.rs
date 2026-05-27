@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::build_system_prompt;
+use crate::system_prompt::{build_resource_context, build_system_prompt};
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -45,9 +45,12 @@ pub async fn run_prompt_print_mode(
     }
 
     // Build and set the system prompt for prompt mode.
-    let system_blocks =
-        build_system_prompt(working_dir, model_id, Some("medium"), Some(prompt)).await;
+    let system_blocks = build_system_prompt(working_dir, model_id, Some("medium")).await;
     agent.set_system_prompt(system_blocks).await;
+    let resource_blocks = build_resource_context(working_dir, &[]).await;
+    if !resource_blocks.is_empty() {
+        agent.set_resource_context(resource_blocks).await;
+    }
 
     let agent = Arc::new(agent);
 
@@ -230,9 +233,12 @@ pub async fn run_continue_print_mode(
     }
 
     // Build and set system prompt.
-    let system_blocks =
-        build_system_prompt(working_dir, &effective_model, Some("medium"), follow_up).await;
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
     agent.set_system_prompt(system_blocks).await;
+    let resource_blocks = build_resource_context(working_dir, &[]).await;
+    if !resource_blocks.is_empty() {
+        agent.set_resource_context(resource_blocks).await;
+    }
 
     // Load past messages into agent state.
     agent.load_messages(session.messages.clone()).await;
@@ -367,9 +373,12 @@ pub async fn run_resume_print_mode(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks =
-        build_system_prompt(working_dir, &effective_model, Some("medium"), follow_up).await;
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
     agent.set_system_prompt(system_blocks).await;
+    let resource_blocks = build_resource_context(working_dir, &[]).await;
+    if !resource_blocks.is_empty() {
+        agent.set_resource_context(resource_blocks).await;
+    }
 
     agent.load_messages(session.messages.clone()).await;
 

@@ -20,6 +20,10 @@ pub struct AgentState {
     /// Available tools.
     pub tools: Vec<Arc<dyn AgentTool>>,
 
+    /// Resource context (skills, extensions, startup skills).
+    /// Injected at the start of the conversation, not in the system prompt.
+    pub resource_context: Option<Vec<ContentBlock>>,
+
     /// The conversation transcript (all messages).
     pub messages: Vec<Message>,
 
@@ -50,6 +54,7 @@ impl AgentState {
             system_prompt: Vec::new(),
             model,
             tools: Vec::new(),
+            resource_context: None,
             messages: Vec::new(),
             is_streaming: false,
             thinking_level: ThinkingLevel::Off,
@@ -106,7 +111,8 @@ impl AgentState {
 
     /// Get only the messages that should be sent to the LLM.
     /// Filters out ModelChange and ThinkingLevelChange events.
-    pub fn llm_messages(&self) -> Vec<&Message> {
+    /// Does NOT include resource_context — callers must prepend it separately.
+    pub fn llm_messages(&self) -> Vec<Message> {
         self.messages
             .iter()
             .filter(|m| {
@@ -115,7 +121,25 @@ impl AgentState {
                     Message::User { .. } | Message::Assistant { .. } | Message::ToolResult { .. }
                 )
             })
+            .cloned()
             .collect()
+    }
+
+    /// Approximate token count of the resource context blocks.
+    pub fn resource_context_tokens(&self) -> u32 {
+        self.resource_context
+            .as_ref()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .map(|b| {
+                        theta_ai::approximate_token_count(
+                            &serde_json::to_string(b).unwrap_or_default(),
+                        )
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     /// Load past messages from a session (for continue/resume).
@@ -142,7 +166,8 @@ impl AgentState {
                 theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
             })
             .sum();
-        msg_tokens + sys_tokens
+        let res_tokens: u32 = self.resource_context_tokens();
+        msg_tokens + sys_tokens + res_tokens
     }
 
     /// The last API-reported input token count (real, from the most recent

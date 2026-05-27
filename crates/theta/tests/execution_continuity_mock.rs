@@ -246,7 +246,7 @@ async fn system_prompt_guardrails_drive_tool_execution_with_mock_provider() {
     agent.add_tool(Arc::new(MockTool)).await;
 
     let wd = std::env::current_dir().expect("cwd");
-    let system = build_system_prompt(&wd, "test-model", Some("medium"), None).await;
+    let system = build_system_prompt(&wd, "test-model", Some("medium")).await;
     agent.set_system_prompt(system).await;
 
     agent

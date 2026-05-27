@@ -842,14 +842,17 @@ async fn build_context(
         })
         .unwrap_or(0);
 
-    let all_messages = state.llm_messages();
-    let all_slice: Vec<theta_ai::Message> = all_messages.into_iter().cloned().collect();
+    // Account for resource context tokens in compaction budget.
+    let res_tokens: u32 = state.resource_context_tokens();
+    let effective_sys_tokens = sys_tokens + res_tokens;
+
+    let all_slice: Vec<theta_ai::Message> = state.llm_messages();
     let (sanitized_messages, replay_stats) =
         theta_ai::sanitize_messages_for_replay(&all_slice, &state.model);
 
     let mut compact_result = crate::compact::compact_messages(
         &sanitized_messages,
-        sys_tokens,
+        effective_sys_tokens,
         state.model.context_window,
         &config.compaction,
     );
@@ -881,6 +884,19 @@ async fn build_context(
                 tracing::warn!(error = %error, "LLM compaction summary failed; using deterministic summary");
             }
         }
+    }
+
+    // Prepend resource context (skills, extensions) — never subject to compaction.
+    if let Some(ref res_ctx) = state.resource_context
+        && !res_ctx.is_empty()
+    {
+        compact_result.messages.insert(
+            0,
+            Message::User {
+                content: res_ctx.clone(),
+                timestamp: 0,
+            },
+        );
     }
 
     let tools: Vec<theta_ai::Tool> = state

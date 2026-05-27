@@ -120,6 +120,13 @@ impl Agent {
         state.system_prompt = prompt;
     }
 
+    /// Set the resource context (skills, extensions, startup skills).
+    /// This is injected as a synthetic user message, NOT in the system prompt.
+    pub async fn set_resource_context(&self, prompt: Vec<ContentBlock>) {
+        let mut state = self.state.write().await;
+        state.resource_context = Some(prompt);
+    }
+
     /// Switch the active model.
     /// Set the model and record a ModelChange in the transcript.
     pub async fn set_model(&self, model: Model) {
@@ -173,9 +180,10 @@ impl Agent {
     /// Live context stats for the TUI.
     pub async fn context_stats(&self) -> (usize, u32, Option<u32>) {
         let state = self.state.read().await;
+        let resource_tokens: u32 = state.resource_context_tokens();
         (
             state.messages.len(),
-            state.token_count(),
+            state.token_count() + resource_tokens,
             state.last_real_input_tokens(),
         )
     }
@@ -198,8 +206,8 @@ impl Agent {
                     theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
                 })
                 .sum();
-            let llm_msgs: Vec<theta_ai::Message> =
-                state.llm_messages().into_iter().cloned().collect();
+            let res_tokens: u32 = state.resource_context_tokens();
+            let llm_msgs: Vec<theta_ai::Message> = state.llm_messages();
             // Force-enable compaction for manual trigger (ignore config.enabled).
             let mut force_config = self.config.compaction.clone();
             force_config.enabled = true;
@@ -208,18 +216,19 @@ impl Agent {
             // conversation, summarize everything older. Keep a fixed
             // useful window (default 20K tokens) rather than basing
             // it on the model's context window.
-            // available = context_window - reserve_tokens - system_tokens
+            // available = context_window - reserve_tokens - system_tokens - resource_tokens
             // We set context_window so that available = keep_recent_tokens.
             let effective_window = self
                 .config
                 .compaction
                 .keep_recent_tokens
                 .saturating_add(self.config.compaction.reserve_tokens)
-                .saturating_add(system_tokens);
+                .saturating_add(system_tokens)
+                .saturating_add(res_tokens);
             (
                 crate::compact::compact_messages(
                     &llm_msgs,
-                    system_tokens,
+                    system_tokens + res_tokens,
                     effective_window,
                     &force_config,
                 ),

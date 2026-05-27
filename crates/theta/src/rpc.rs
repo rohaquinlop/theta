@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::build_system_prompt;
+use crate::system_prompt::{build_resource_context, build_system_prompt};
 use crate::tools::{ToolContext, builtin_tools};
 
 #[derive(Debug, Deserialize)]
@@ -123,9 +123,12 @@ async fn prompt(
     for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf())) {
         agent.add_tool(tool).await;
     }
-    let system_blocks =
-        build_system_prompt(working_dir, model_id, Some(thinking), Some(text)).await;
+    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking)).await;
     agent.set_system_prompt(system_blocks).await;
+    let resource_blocks = build_resource_context(working_dir, &[]).await;
+    if !resource_blocks.is_empty() {
+        agent.set_resource_context(resource_blocks).await;
+    }
 
     let agent = Arc::new(agent);
     let mut events = agent.subscribe();

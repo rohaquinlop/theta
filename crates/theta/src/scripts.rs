@@ -35,7 +35,25 @@ pub async fn discover_scripts(working_dir: &Path) -> Vec<DiscoveredScript> {
         .collect()
 }
 
-/// Build the `<available_extensions>` XML prompt block.
+/// Build the `<available_extensions>` XML prompt block (slim: name + location only).
+pub fn build_extensions_slim_block(scripts: &[DiscoveredScript]) -> Option<String> {
+    if scripts.is_empty() {
+        return None;
+    }
+
+    let mut block = String::from("\n<available_extensions>\n");
+    for script in scripts {
+        block.push_str(&format!(
+            "  <extension>\n    <name>{name}</name>\n    <location>{loc}</location>\n  </extension>\n",
+            name = script.name,
+            loc = script.location.display(),
+        ));
+    }
+    block.push_str("</available_extensions>");
+    Some(block)
+}
+
+/// Build the `<available_extensions>` XML prompt block with full source.
 pub fn build_extensions_prompt_block(scripts: &[DiscoveredScript]) -> Option<String> {
     if scripts.is_empty() {
         return None;

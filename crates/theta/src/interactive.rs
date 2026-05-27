@@ -461,7 +461,7 @@ async fn create_agent(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks = build_system_prompt_with_skills(
+    let (system_blocks, resource_blocks) = build_system_prompt_with_skills(
         working_dir,
         model_id,
         Some(thinking),
@@ -469,6 +469,9 @@ async fn create_agent(
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
+    if !resource_blocks.is_empty() {
+        agent.set_resource_context(resource_blocks).await;
+    }
 
     // Load script hooks from ~/.theta/extensions/*.rhai and ./.theta/extensions/*.rhai.
     if let Some(hooks) =
@@ -988,7 +991,7 @@ async fn handle_tui_action(
                 let state = agent.state().await;
                 let current_thinking = thinking_level_to_string(state.thinking_level);
                 drop(state);
-                let blocks = build_system_prompt_with_skills(
+                let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
                     &model_id,
                     Some(&current_thinking),
@@ -996,6 +999,9 @@ async fn handle_tui_action(
                 )
                 .await;
                 agent.set_system_prompt(blocks).await;
+                if !resource_blocks.is_empty() {
+                    agent.set_resource_context(resource_blocks).await;
+                }
                 let _ = event_tx.send(TuiEvent::Info(format!(
                     "Switched to {model_id} ({provider})"
                 )));
@@ -1180,7 +1186,7 @@ async fn handle_tui_action(
                         .unwrap_or_else(|| model_id.to_string());
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
-                    let blocks = build_system_prompt_with_skills(
+                    let (blocks, resource_blocks) = build_system_prompt_with_skills(
                         working_dir,
                         &mid,
                         Some(&current_thinking),
@@ -1188,6 +1194,9 @@ async fn handle_tui_action(
                     )
                     .await;
                     agent.set_system_prompt(blocks).await;
+                    if !resource_blocks.is_empty() {
+                        agent.set_resource_context(resource_blocks).await;
+                    }
                     *session_id_cell.write().await = Some(id.clone());
                     let _ = event_tx.send(TuiEvent::SessionCreated {
                         id: id.clone(),
@@ -1241,7 +1250,7 @@ async fn handle_tui_action(
             let current_model_id = state.model.id.clone();
             let current_thinking = thinking_level_to_string(state.thinking_level);
             drop(state);
-            let blocks = build_system_prompt_with_skills(
+            let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
                 &current_model_id,
                 Some(&current_thinking),
@@ -1249,6 +1258,9 @@ async fn handle_tui_action(
             )
             .await;
             agent.set_system_prompt(blocks).await;
+            if !resource_blocks.is_empty() {
+                agent.set_resource_context(resource_blocks).await;
+            }
 
             // Clear the chat display.
             let _ = event_tx.send(TuiEvent::ClearChat);

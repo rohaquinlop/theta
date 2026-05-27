@@ -1,7 +1,13 @@
 //! System prompt construction.
 //!
-//! Builds the system prompt from project context files, tool descriptions,
-//! available skills, and runtime context.
+//! Two outputs:
+//! - `build_system_prompt()` — core operational instructions (project context,
+//!   tools, runtime, response contract). Set via `agent.set_system_prompt()`.
+//! - `build_resource_context()` — available resources (skills, extensions,
+//!   startup skills, auto-loading directive). Set via `agent.set_resource_context()`.
+//!
+//! This split keeps system instructions lean and moves resource listings
+//! into the conversation where the model sees them as context, not mandates.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,57 +19,17 @@ use crate::skills;
 use crate::skills::Skill;
 use crate::tools::{ToolContext, builtin_tools};
 
+/// Build the core system prompt: project context + tools + runtime + response contract.
+/// Does NOT include skills, extensions, or startup skills.
 pub async fn build_system_prompt(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
-    _latest_user_input: Option<&str>,
-) -> Vec<ContentBlock> {
-    build_system_prompt_with_skills(working_dir, model_id, thinking_level, &[]).await
-}
-
-/// Build system prompt with active startup skills injected at system-prompt authority.
-pub async fn build_system_prompt_with_skills(
-    working_dir: &Path,
-    model_id: &str,
-    thinking_level: Option<&str>,
-    startup_skills: &[String],
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(ctx) = load_project_context(working_dir).await {
         parts.push(ctx);
-    }
-
-    // Available skills.
-    let discovered = skills::discover_skills(working_dir).await;
-
-    // Active startup skills — inject their full bodies at system-prompt level.
-    if !startup_skills.is_empty()
-        && let Some(active_block) = build_active_skills_block(&discovered, startup_skills)
-    {
-        parts.push(active_block);
-    }
-
-    if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
-        parts.push(skills_block);
-        // Immediate directive: placed right after available skills so the model
-        // sees the skills listing and the instructions as one unit.
-        parts.push(
-            "## Skill Auto-Loading (MANDATORY)\n\n\
-             For EVERY user message, scan the `<available_skills>` list above and check if\n\
-             the user's request matches any skill's `<description>` field.\n\
-             The `<description>` tells you exactly when that skill applies — trust it.\n\
-             When matched: READ the skill file (`<location>`) → Apply instructions → Respond.\n\
-             This is mandatory for every turn."
-                .to_string(),
-        );
-    }
-
-    // Available extension scripts.
-    let ext_scripts = scripts::discover_scripts(working_dir).await;
-    if let Some(ext_block) = scripts::build_extensions_prompt_block(&ext_scripts) {
-        parts.push(ext_block);
     }
 
     let tools_prompt = build_tools_prompt(working_dir);
@@ -76,27 +42,105 @@ pub async fn build_system_prompt_with_skills(
 
     let text = parts.join("\n\n");
 
-    // SYSTEM_PROMPT.md at ~/.theta/ replaces the entire system prompt.
-    // APPEND_SYSTEM_PROMPT.md at ~/.theta/ appends to the built prompt.
-    // If both exist, SYSTEM_PROMPT.md takes precedence.
     let theta_dir = crate::config::theta_dir();
     let text = apply_system_prompt_overrides(&theta_dir, text).await;
 
     vec![ContentBlock::Text { text }]
 }
 
+/// Build the resource context: skills + extensions + auto-loading + startup skills.
+/// This gets injected as a synthetic user message, NOT the system prompt.
+pub async fn build_resource_context(
+    working_dir: &Path,
+    startup_skills: &[String],
+) -> Vec<ContentBlock> {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Available skills.
+    let discovered = skills::discover_skills(working_dir).await;
+
+    // Active startup skills — inject their full bodies.
+    if !startup_skills.is_empty()
+        && let Some(active_block) = build_active_skills_block(&discovered, startup_skills)
+    {
+        parts.push(active_block);
+    }
+
+    if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
+        parts.push(skills_block);
+        // Concise skill auto-loading directive — kept with the skills it references.
+        parts.push(
+            "## Skill Auto-Loading\n\n\
+             For each user message, scan `<available_skills>` descriptions. \
+             When a skill's description matches: read the file at `<location>` \
+             and apply its instructions."
+                .to_string(),
+        );
+    }
+
+    // Available extension scripts — slim: name + location only, no source.
+    let ext_scripts = scripts::discover_scripts(working_dir).await;
+    if let Some(ext_block) = scripts::build_extensions_slim_block(&ext_scripts) {
+        parts.push(ext_block);
+    }
+
+    // Extension-creation guardrails. Always present so the model knows when
+    // to create one — even if no extensions are installed yet.
+    parts.push(EXTENSION_CREATION_GUARDRAILS.to_string());
+
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    let text = parts.join("\n\n");
+    vec![ContentBlock::Text { text }]
+}
+
+/// Compatibility wrapper — builds both system prompt and resource context.
+/// Used by call sites that previously called `build_system_prompt_with_skills`.
+/// Returns (system_prompt, resource_context).
+pub async fn build_system_prompt_with_skills(
+    working_dir: &Path,
+    model_id: &str,
+    thinking_level: Option<&str>,
+    startup_skills: &[String],
+) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
+    let system = build_system_prompt(working_dir, model_id, thinking_level).await;
+    let resource = build_resource_context(working_dir, startup_skills).await;
+    (system, resource)
+}
+
+// ── Resource context builders ──────────────────────────────────────
+
+/// Extension-creation guardrails injected into the resource context.
+/// Tells the model when it should (and should NOT) create Rhai scripts.
+const EXTENSION_CREATION_GUARDRAILS: &str = r#"## Theta Extensions
+
+Extensions are Rhai scripts at `~/.theta/extensions/*.rhai` (global) or
+`./.theta/extensions/*.rhai` (project-local). They take effect on the next
+session (loaded at agent startup).
+
+For the Rhai API reference, read `crates/theta-script/AGENTS.md`.
+
+CRITICAL — Only create an extension when the user uses one of these EXACT
+trigger phrases:
+- "create an extension" / "write an extension" / "make an extension"
+- "add a tool hook" / "add a before hook" / "add an after hook"
+- "add a status line" / "add a TUI status" / "add an extension status"
+- "install an extension"
+- "I want to extend theta" / "how do I extend theta"
+
+Do NOT create an extension from general task language.
+For "modify/extend theta" without specifics, ask: 1) Skill, 2) Extension, 3) Rust change."#;
+
 /// Build an `<active_skills>` block for skills activated at session start.
-/// These are injected with system-prompt-level authority, not as user messages.
 fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) -> Option<String> {
     let mut block = String::from("\n<active_skills>\n");
-    block.push_str("The following skills are ACTIVE for this entire session. Their instructions\n");
-    block.push_str("carry the same authority as system instructions. Follow them on every turn\n");
-    block.push_str("until you are told to stop.\n\n");
+    block.push_str("These skills are active for this session. Follow their instructions.\n\n");
 
     let mut found_any = false;
     for invocation in startup_skills {
-        // Parse "skill-name level" or just "skill-name"
-        let (skill_name, level) = match invocation.find(' ') {
+        let (skill_name, _level) = match invocation.find(' ') {
             Some(idx) => (&invocation[..idx], invocation[idx + 1..].trim()),
             None => (invocation.as_str(), ""),
         };
@@ -104,16 +148,9 @@ fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) ->
         if let Some(skill) = discovered.iter().find(|s| s.name == skill_name) {
             found_any = true;
             block.push_str(&format!("## Active Skill: {}\n", skill.name));
-            if !level.is_empty() {
-                block.push_str(&format!("Level: {}\n", level));
-            }
             block.push_str(&format!("Location: {}\n\n", skill.location.display()));
             block.push_str(skill.body.trim());
             block.push_str("\n\n");
-            block.push_str(
-                "--- RESPONSE DIRECTIVE: Apply the skill instructions above to EVERY response \
-                 you produce. Re-read this directive before generating each reply. ---\n\n",
-            );
         }
     }
 
@@ -124,8 +161,9 @@ fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) ->
     Some(block)
 }
 
+// ── Project context discovery ──────────────────────────────────────
+
 async fn load_project_context(working_dir: &Path) -> Option<String> {
-    // 1. Find root AGENTS.md (walk up from working dir)
     let agents_path = find_context_file(working_dir, "AGENTS.md").await?;
     let agents = tokio::fs::read_to_string(&agents_path).await.ok()?;
     let project_root = agents_path.parent().unwrap_or(working_dir);
@@ -136,7 +174,6 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
 {agents}"
     );
 
-    // 2. Discover nested AGENTS.md files (walk down from project root)
     let nested = discover_nested_agents(project_root).await;
     for (relative_path, content) in &nested {
         context.push_str(&format!(
@@ -148,7 +185,7 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
         ));
     }
 
-    // 3. CLAUDE.md (only if different from root AGENTS.md)
+    // CLAUDE.md (only if different from root AGENTS.md)
     if let Some(claude_path) = find_context_file(working_dir, "CLAUDE.md").await
         && claude_path != agents_path
         && let Ok(claude) = tokio::fs::read_to_string(&claude_path).await
@@ -162,7 +199,7 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
         ));
     }
 
-    // 4. Theta context file
+    // Theta context file
     let theta_ctx = working_dir.join(".theta").join("context.md");
     if theta_ctx.exists()
         && let Ok(ctx) = tokio::fs::read_to_string(&theta_ctx).await
@@ -179,16 +216,11 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
     Some(context)
 }
 
-/// Discover all AGENTS.md files nested under `root`, excluding ignorable directories.
-/// Returns a sorted Vec of (relative_path, content) pairs.
-/// Does NOT include the root AGENTS.md (handled separately).
 async fn discover_nested_agents(root: &Path) -> Vec<(String, String)> {
     let mut results = Vec::new();
-    // Manual stack to avoid async_recursion dependency
     let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
 
     while let Some(current) = dirs.pop() {
-        // Check for AGENTS.md in this directory (skip root level)
         if current != root {
             let candidate = current.join("AGENTS.md");
             if candidate.exists()
@@ -205,7 +237,6 @@ async fn discover_nested_agents(root: &Path) -> Vec<(String, String)> {
             }
         }
 
-        // Enumerate subdirectories
         let mut entries = match tokio::fs::read_dir(&current).await {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -223,12 +254,10 @@ async fn discover_nested_agents(root: &Path) -> Vec<(String, String)> {
         }
     }
 
-    // Sort by relative path for deterministic ordering
     results.sort_by(|a, b| a.0.cmp(&b.0));
     results
 }
 
-/// Directories to skip when walking for nested AGENTS.md files.
 fn is_ignorable_dir(name: &str) -> bool {
     matches!(
         name,
@@ -260,6 +289,8 @@ async fn find_context_file(start: &Path, filename: &str) -> Option<PathBuf> {
     }
     None
 }
+
+// ── Tools prompt ───────────────────────────────────────────────────
 
 fn build_tools_prompt(working_dir: &Path) -> String {
     let ctx = ToolContext::new(working_dir.to_path_buf());
@@ -299,6 +330,8 @@ fn build_tools_prompt(working_dir: &Path) -> String {
     p
 }
 
+// ── Runtime context ────────────────────────────────────────────────
+
 fn build_runtime_context(
     working_dir: &Path,
     model_id: &str,
@@ -311,7 +344,6 @@ fn build_runtime_context(
 
     let date = chrono_now(now);
     let cwd_display = working_dir.display();
-
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".into());
     let os = std::env::consts::OS;
 
@@ -328,9 +360,7 @@ fn build_runtime_context(
     )
 }
 
-// Simple date formatting without chrono dependency.
 fn chrono_now(ts: u64) -> String {
-    // Approximate: seconds since epoch -> YYYY-MM-DD.
     let days_since_epoch = ts / 86400;
     let mut year = 1970i64;
     let mut remaining = days_since_epoch as i64;
@@ -367,10 +397,12 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// Pi-style Response Contract — a universal set of rules the model
-/// follows on every turn. No heuristic intent detection, no mode gating.
-/// The contract drives all behavior: analysis vs execution, tool discipline,
-/// and completion protocol.
+// ── Response Contract ──────────────────────────────────────────────
+//
+// Slimmed down: only core behavioral directives. Skill auto-loading,
+// extension creation, and startup skills documentation live in the
+// resource context, not here.
+
 const RESPONSE_CONTRACT: &str = r#"# Response Contract
 
 You are a coding agent inside Theta, a Rust-based terminal harness. Your
@@ -414,57 +446,14 @@ or write code — IMPLEMENT. Do not stop at a plan.
 - If blocked by missing info/permission, ask one precise question and stop.
 - Report what you changed and validation results after completing tool calls.
 
-## Skill Auto-Loading
+## Resources
 
-Re-read the Skill Auto-Loading instructions above (next to `<available_skills>`).
-Apply them on this turn.
+Available skills and extensions are listed in the conversation context.
+Consult them before responding to messages that match their descriptions.
+Use available skills and extensions to guide your behavior."#;
 
-## Theta Extensions
+// ── System prompt overrides ────────────────────────────────────────
 
-Theta supports Rhai script extensions in `~/.theta/extensions/*.rhai` (global)
-and `./.theta/extensions/*.rhai` (project-local). Extensions take effect on
-the next session (loaded at agent startup).
-
-### Tool-Call Hooks
-
-Scripts use `tool.before(name, callback)` and `tool.after(name, callback)`
-to intercept tool calls at runtime.
-
-### TUI Status Lines
-
-Scripts use `tui.status(key, callback)` to display a status line in the TUI
-status bar. The callback must return a string.
-
-CRITICAL — Only create an extension when the user uses one of these EXACT
-phrases:
-- "create an extension" / "write an extension" / "make an extension"
-- "add a tool hook" / "add a before hook" / "add an after hook"
-- "add a status line" / "add a TUI status" / "add an extension status"
-- "install an extension"
-- "I want to extend theta" / "how do I extend theta"
-
-Do NOT create an extension from general task language.
-
-When the user says "modify theta" or "extend theta" without specifying how,
-ask: 1) A skill (Markdown file), 2) An extension (Rhai script), or 3) A Rust
-change (fork + recompile).
-
-## Startup Skills
-
-Theta can auto-invoke skills at session start via config.toml:
-
-```toml
-[startup]
-skills = ["caveman ultra", "other-skill lite"]
-```
-
-Each entry is `"<skill-name> <level>"`. Levels optional if skill doesn't use them.
-When a user asks "auto-load X at start" or "run X every session", write this config.
-
-Do NOT edit config.toml without explicit user request or clear intent."#;
-
-/// Apply system prompt overrides from ~/.theta/.
-/// Returns the (possibly replaced or appended) text.
 async fn apply_system_prompt_overrides(theta_dir: &Path, mut text: String) -> String {
     let sys_prompt_path = theta_dir.join("SYSTEM_PROMPT.md");
     let append_path = theta_dir.join("APPEND_SYSTEM_PROMPT.md");
@@ -486,7 +475,9 @@ async fn apply_system_prompt_overrides(theta_dir: &Path, mut text: String) -> St
 
 #[cfg(test)]
 mod tests {
-    use super::{RESPONSE_CONTRACT, build_tools_prompt, is_ignorable_dir};
+    use super::{
+        EXTENSION_CREATION_GUARDRAILS, RESPONSE_CONTRACT, build_tools_prompt, is_ignorable_dir,
+    };
     use std::path::Path;
 
     #[test]
@@ -504,18 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn response_contract_contains_skill_auto_loading_reminder() {
-        assert!(
-            RESPONSE_CONTRACT.contains("Skill Auto-Loading"),
-            "RESPONSE_CONTRACT must have skill auto-loading reminder"
-        );
-        assert!(
-            RESPONSE_CONTRACT.contains("Re-read the Skill Auto-Loading instructions above"),
-            "must reference the main directive above"
-        );
-    }
-
-    #[test]
     fn response_contract_contains_analysis_vs_execution() {
         assert!(RESPONSE_CONTRACT.contains("ANALYZE AND REPORT"));
         assert!(RESPONSE_CONTRACT.contains("IMPLEMENT"));
@@ -525,6 +504,65 @@ mod tests {
     fn response_contract_contains_tool_discipline() {
         assert!(RESPONSE_CONTRACT.contains("3-5 files"));
         assert!(RESPONSE_CONTRACT.contains("function-calling"));
+    }
+
+    #[test]
+    fn response_contract_no_longer_has_skill_auto_loading_section() {
+        // The old "Skill Auto-Loading" section is removed from the contract
+        // and lives in the resource context instead.
+        assert!(
+            !RESPONSE_CONTRACT.contains("## Skill Auto-Loading"),
+            "Skill Auto-Loading section must not be in response contract"
+        );
+    }
+
+    #[test]
+    fn response_contract_no_longer_has_theta_extensions_docs() {
+        assert!(
+            !RESPONSE_CONTRACT.contains("tool.before(name, callback)"),
+            "Rhai extension docs must not be in response contract"
+        );
+        assert!(
+            !RESPONSE_CONTRACT.contains("create an extension"),
+            "Extension creation docs must not be in response contract"
+        );
+    }
+
+    #[test]
+    fn response_contract_no_longer_has_startup_skills_config() {
+        assert!(
+            !RESPONSE_CONTRACT.contains("[startup]"),
+            "Startup skills config docs must not be in response contract"
+        );
+    }
+
+    #[test]
+    fn response_contract_has_resource_section() {
+        assert!(
+            RESPONSE_CONTRACT.contains("## Resources"),
+            "Response contract must reference resources"
+        );
+    }
+
+    #[test]
+    fn extension_guardrails_has_trigger_phrases() {
+        assert!(EXTENSION_CREATION_GUARDRAILS.contains("create an extension"));
+        assert!(EXTENSION_CREATION_GUARDRAILS.contains("write an extension"));
+        assert!(EXTENSION_CREATION_GUARDRAILS.contains("add a tool hook"));
+        assert!(EXTENSION_CREATION_GUARDRAILS.contains("add a TUI status"));
+    }
+
+    #[test]
+    fn extension_guardrails_rejects_general_language() {
+        assert!(
+            EXTENSION_CREATION_GUARDRAILS
+                .contains("Do NOT create an extension from general task language")
+        );
+    }
+
+    #[test]
+    fn extension_guardrails_references_rhai_api_docs() {
+        assert!(EXTENSION_CREATION_GUARDRAILS.contains("crates/theta-script/AGENTS.md"));
     }
 
     #[test]
@@ -556,13 +594,11 @@ mod tests {
 
     #[tokio::test]
     async fn discover_nested_agents_finds_crate_files() {
-        // CARGO_MANIFEST_DIR is crates/theta, parent is crates/
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let nested = super::discover_nested_agents(root).await;
 
         let found_crates: Vec<&str> = nested.iter().map(|(p, _)| p.as_str()).collect();
 
-        // Per-crate AGENTS.md files (relative to crates/)
         assert!(
             found_crates.contains(&"theta-ai"),
             "missing theta-ai: {:?}",
@@ -589,12 +625,10 @@ mod tests {
             found_crates
         );
 
-        // Each should have non-empty content
         for (_path, content) in &nested {
             assert!(!content.is_empty(), "empty AGENTS.md found");
         }
 
-        // Should NOT include root AGENTS.md
         assert!(
             !found_crates.contains(&""),
             "root AGENTS.md should not be in nested results"
@@ -612,7 +646,9 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_system_prompt_replaces() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "replacement prompt").await.unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "replacement prompt")
+            .await
+            .unwrap();
         let original = "base prompt content".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert_eq!(result, "replacement prompt");
@@ -621,7 +657,12 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_append_adds_to_original() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "extra instructions").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("APPEND_SYSTEM_PROMPT.md"),
+            "extra instructions",
+        )
+        .await
+        .unwrap();
         let original = "base prompt".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert!(result.contains("base prompt"));
@@ -632,8 +673,12 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_both_files_system_prompt_wins() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "system wins").await.unwrap();
-        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "append ignored").await.unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "system wins")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "append ignored")
+            .await
+            .unwrap();
         let original = "base".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert_eq!(result, "system wins");
@@ -643,8 +688,15 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_append_ignored_when_system_present() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "only system here").await.unwrap();
-        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "should not appear").await.unwrap();
+        tokio::fs::write(dir.path().join("SYSTEM_PROMPT.md"), "only system here")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            dir.path().join("APPEND_SYSTEM_PROMPT.md"),
+            "should not appear",
+        )
+        .await
+        .unwrap();
         let original = "base".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert_eq!(result, "only system here");
@@ -655,7 +707,9 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_append_empty_file_no_op() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "").await.unwrap();
+        tokio::fs::write(dir.path().join("APPEND_SYSTEM_PROMPT.md"), "")
+            .await
+            .unwrap();
         let original = "just the base".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert_eq!(result, "just the base");
@@ -664,7 +718,6 @@ mod tests {
     #[tokio::test]
     async fn apply_overrides_system_prompt_handles_missing_file_gracefully() {
         let dir = tempfile::tempdir().unwrap();
-        // SYSTEM_PROMPT.md doesn't exist; APPEND doesn't exist
         let original = "stays intact".to_string();
         let result = super::apply_system_prompt_overrides(dir.path(), original).await;
         assert_eq!(result, "stays intact");
