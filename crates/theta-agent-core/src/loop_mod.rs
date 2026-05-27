@@ -846,9 +846,8 @@ async fn build_context(
     let res_tokens: u32 = state.resource_context_tokens();
     let effective_sys_tokens = sys_tokens + res_tokens;
 
-    let all_slice: Vec<theta_ai::Message> = state.llm_messages();
     let (sanitized_messages, replay_stats) =
-        theta_ai::sanitize_messages_for_replay(&all_slice, &state.model);
+        theta_ai::sanitize_messages_for_replay(&state.messages, &state.model);
 
     let mut compact_result = crate::compact::compact_messages(
         &sanitized_messages,
@@ -858,11 +857,11 @@ async fn build_context(
     );
 
     if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm {
-        let trimmed_len = (compact_result.trimmed_count as usize).min(all_slice.len());
+        let trimmed_len = (compact_result.trimmed_count as usize).min(state.messages.len());
         match summarize_compacted_messages(
             state,
             provider,
-            &all_slice[..trimmed_len],
+            &state.messages[..trimmed_len],
             config,
             event_tx,
         )

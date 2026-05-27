@@ -144,6 +144,9 @@ pub fn sanitize_messages_for_replay(
                     timestamp: *timestamp,
                 });
             }
+            Message::ModelChange { .. } | Message::ThinkingLevelChange { .. } => {
+                // Internal-only metadata, never sent to providers.
+            }
             _ => first_pass.push(msg.clone()),
         }
     }

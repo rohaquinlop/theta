@@ -17,6 +17,7 @@ use crate::error::ThetaError;
 use crate::event::AssistantMessageEvent;
 use crate::model::Model;
 use crate::provider::{EventStream, Provider};
+#[cfg(test)]
 use crate::replay::sanitize_messages_for_replay;
 use crate::types::{
     ContentBlock, Context, Message, SimpleStreamOptions, StopReason, StreamOptions, Usage,
@@ -159,21 +160,13 @@ fn build_request_body(
     options: &StreamOptions,
     include_tools: bool,
 ) -> Result<Value, ThetaError> {
-    let (sanitized_messages, _) = sanitize_messages_for_replay(&context.messages, model);
-    let sanitized_context = Context {
-        system: context.system.clone(),
-        messages: sanitized_messages,
-        tools: context.tools.clone(),
-        thinking_level: context.thinking_level,
-    };
-
     let mut body = json!({
         "model": model.id,
         "stream": true,
     });
 
-    // Messages
-    let messages = convert_messages(model, &sanitized_context);
+    // Messages — context.messages are already sanitized by build_context().
+    let messages = convert_messages(model, context);
     body["messages"] = messages;
 
     // System prompt
@@ -201,8 +194,8 @@ fn build_request_body(
     }
 
     // Tools
-    if include_tools && !sanitized_context.tools.is_empty() {
-        let tools: Vec<Value> = sanitized_context
+    if include_tools && !context.tools.is_empty() {
+        let tools: Vec<Value> = context
             .tools
             .iter()
             .map(|tool| {
@@ -217,7 +210,7 @@ fn build_request_body(
             })
             .collect();
         body["tools"] = Value::Array(tools);
-    } else if include_tools && has_tool_history(&sanitized_context.messages) {
+    } else if include_tools && has_tool_history(&context.messages) {
         body["tools"] = Value::Array(vec![]);
     }
 
@@ -1392,36 +1385,42 @@ mod tests {
             max_tokens: 384_000,
             compat: crate::model::ModelCompat::for_deepseek(),
         };
+        // Dirty input: aborted assistant + orphan tool result. In production,
+        // build_context() sanitizes before build_request_body() sees it. Test
+        // that sanitize_messages_for_replay drops the orphan, then verify the
+        // sanitized output converts cleanly.
+        let dirty = vec![
+            Message::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"Cargo.toml"}),
+                }],
+                api: Some(crate::types::Api::OpenAiCompletions),
+                provider: Some(crate::types::Provider::DeepSeek),
+                model: Some("deepseek-v4-pro".into()),
+                usage: None,
+                stop_reason: Some(StopReason::Aborted),
+                error_message: Some("aborted".into()),
+                timestamp: 1,
+            },
+            Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentBlock::text("ok")],
+                details: None,
+                is_error: false,
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![ContentBlock::text("continue")],
+                timestamp: 3,
+            },
+        ];
+        let (sanitized, _) = sanitize_messages_for_replay(&dirty, &model);
         let ctx = Context {
             system: None,
-            messages: vec![
-                Message::Assistant {
-                    content: vec![ContentBlock::ToolCall {
-                        id: "call_1".into(),
-                        name: "read".into(),
-                        arguments: serde_json::json!({"path":"Cargo.toml"}),
-                    }],
-                    api: Some(crate::types::Api::OpenAiCompletions),
-                    provider: Some(crate::types::Provider::DeepSeek),
-                    model: Some("deepseek-v4-pro".into()),
-                    usage: None,
-                    stop_reason: Some(StopReason::Aborted),
-                    error_message: Some("aborted".into()),
-                    timestamp: 1,
-                },
-                Message::ToolResult {
-                    tool_call_id: "call_1".into(),
-                    tool_name: "read".into(),
-                    content: vec![ContentBlock::text("ok")],
-                    details: None,
-                    is_error: false,
-                    timestamp: 2,
-                },
-                Message::User {
-                    content: vec![ContentBlock::text("continue")],
-                    timestamp: 3,
-                },
-            ],
+            messages: sanitized,
             tools: vec![],
             thinking_level: None,
         };
