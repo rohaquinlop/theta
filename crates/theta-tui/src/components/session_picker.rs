@@ -25,7 +25,7 @@ pub struct SessionInfo {
 /// Session picker component.
 pub struct SessionPicker {
     /// Sessions to display.
-    sessions: Vec<SessionInfo>,
+    pub sessions: Vec<SessionInfo>,
     /// Currently selected index.
     selected: usize,
     /// List state for rendering.
@@ -262,7 +262,7 @@ fn format_relative_time(ts: u64) -> String {
     }
 }
 
-fn session_row_label(
+pub fn session_row_label(
     session: &SessionInfo,
     truncated_title: &str,
     when: &str,
@@ -273,111 +273,4 @@ fn session_row_label(
         "{:<title_width$}  │  {:<when_width$}  │  {} msgs",
         truncated_title, when, session.message_count
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mk(id: &str, title: &str, created_at: u64, messages: usize) -> SessionInfo {
-        SessionInfo {
-            id: id.to_string(),
-            title: title.to_string(),
-            model: None,
-            branch: None,
-            token_count: 0,
-            created_at,
-            message_count: messages,
-        }
-    }
-
-    #[test]
-    fn cycle_sort_mode_reorders_and_preserves_selection() {
-        let sessions = vec![
-            mk("a", "zeta", 3000, 2),
-            mk("b", "alpha", 1000, 10),
-            mk("c", "beta", 2000, 5),
-        ];
-        let mut picker = SessionPicker::new(sessions, Theme::default());
-        assert_eq!(picker.selected_session().map(|s| s.id.as_str()), Some("a"));
-
-        picker.select_down();
-        let selected = picker.selected_session().map(|s| s.id.clone());
-        picker.cycle_sort_mode();
-        assert_eq!(picker.sort_mode_label(), "oldest");
-        assert_eq!(picker.selected_session().map(|s| s.id.clone()), selected);
-
-        picker.cycle_sort_mode();
-        assert_eq!(picker.sort_mode_label(), "title");
-        assert_eq!(picker.sessions[0].title, "alpha");
-
-        picker.cycle_sort_mode();
-        assert_eq!(picker.sort_mode_label(), "messages");
-        assert_eq!(picker.sessions[0].message_count, 10);
-    }
-
-    #[test]
-    fn session_row_label_aligns_both_separators() {
-        let session = SessionInfo {
-            id: "s1".to_string(),
-            title: "conversation".to_string(),
-            model: Some("gpt-5.5".to_string()),
-            branch: Some("feature/ui".to_string()),
-            token_count: 3200,
-            created_at: 1_000_000_000_000,
-            message_count: 18,
-        };
-        // Simulate: max_title=21, max_when=8 ("just now")
-        let max_w = 21usize;
-        let max_when = 8usize;
-
-        let short = "conversation".to_string();
-        let row_short = session_row_label(&session, &short, "18h ago", max_w, max_when);
-        let row_justnow = session_row_label(&session, &short, "just now", max_w, max_when);
-        let long = "quite long title here".to_string();
-        let row_long = session_row_label(&session, &long, "5m ago", max_w, max_when);
-
-        // Find byte positions of both separators in each row
-        let seps: Vec<(usize, usize)> = [&row_short, &row_justnow, &row_long]
-            .iter()
-            .map(|r| {
-                let first = r.find('│').unwrap();
-                let second = r
-                    .char_indices()
-                    .filter(|(_, c)| *c == '│')
-                    .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap();
-                (first, second)
-            })
-            .collect();
-
-        // All first separators at same byte position
-        assert_eq!(seps[0].0, seps[1].0, "first │ should align across rows");
-        assert_eq!(seps[0].0, seps[2].0, "first │ should align across rows");
-
-        // All second separators at same byte position
-        assert_eq!(seps[0].1, seps[1].1, "second │ should align across rows");
-        assert_eq!(seps[0].1, seps[2].1, "second │ should align across rows");
-
-        // Verify expected positions:
-        // title(21) + "  "(2) = 23 for first │
-        // then │(3 bytes) + "  "(2) + when(8) + "  "(2) before second │
-        // = 23 + 3 + 2 + 8 + 2 = 38 for second │
-        assert_eq!(seps[0].0, 23, "first │ at byte 23");
-        assert_eq!(seps[0].1, 38, "second │ at byte 38");
-    }
-
-    #[test]
-    fn truncation_handles_multi_byte_chars_safely() {
-        // Title with multi-byte UTF-8 chars — Vec<char> slicing
-        // must not panic.
-        let title = "áéíóú — accented chars"; // 27 chars, 31 bytes
-        let title_chars: Vec<char> = title.chars().collect();
-        assert!(title_chars.len() > 5);
-        // Truncate to 5 chars
-        let truncated: String = title_chars[..5].iter().collect();
-        assert_eq!(truncated.chars().count(), 5);
-        assert_eq!(truncated, "áéíóú");
-    }
 }

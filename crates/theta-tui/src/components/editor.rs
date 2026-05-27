@@ -47,18 +47,18 @@ struct AutocompleteState {
 /// position across lines of varying length.
 pub struct Editor {
     /// The text buffer.
-    text: String,
+    pub text: String,
     /// Cursor position — byte offset into `text`.
-    cursor: usize,
+    pub cursor: usize,
     /// Cached visual lines: each entry is `[byte_offset, …]` for each
     /// character on that visual line (from `rebuild_visual_lines`).
     vis_lines: Vec<Vec<usize>>,
     /// Visual column maintained during vertical navigation.
     desired_col: usize,
     /// Cached inner width used to build `vis_lines`.
-    cached_width: usize,
+    pub cached_width: usize,
     /// Whether the cache is dirty (text changed, width changed, etc.).
-    cache_dirty: bool,
+    pub cache_dirty: bool,
 
     /// Whether focused.
     focused: bool,
@@ -81,7 +81,7 @@ pub struct Editor {
     /// Enter key behavior.
     enter_behavior: EnterBehavior,
     /// Last rendered inner area for hit-testing and cursor placement.
-    last_inner_area: Option<Rect>,
+    pub last_inner_area: Option<Rect>,
 }
 
 impl Editor {
@@ -159,7 +159,7 @@ impl Editor {
     // ------------------------------------------------------------------
 
     /// Rebuild `vis_lines` from `text` and `width` if dirty or width changed.
-    fn rebuild_visual_lines(&mut self, width: usize) {
+    pub fn rebuild_visual_lines(&mut self, width: usize) {
         if !self.cache_dirty && self.cached_width == width {
             return;
         }
@@ -189,7 +189,7 @@ impl Editor {
     }
 
     /// After any text mutation, rebuild cache and re-clamp cursor + scroll.
-    fn after_mutate(&mut self) {
+    pub fn after_mutate(&mut self) {
         self.cache_dirty = true;
         self.rebuild_visual_lines(self.nav_width());
         // Clamp cursor to valid range.
@@ -202,7 +202,7 @@ impl Editor {
     }
 
     /// Ensure scroll is within valid range.
-    fn clamp_scroll(&mut self) {
+    pub fn clamp_scroll(&mut self) {
         if self.vis_lines.is_empty() {
             self.scroll = 0;
             return;
@@ -220,7 +220,7 @@ impl Editor {
     // Text editing operations
     // ------------------------------------------------------------------
 
-    fn insert_char(&mut self, c: char) {
+    pub fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.after_mutate();
@@ -273,7 +273,7 @@ impl Editor {
     /// Move cursor up one visual line.
     /// Returns `true` if cursor was already at the first visual line
     /// (caller may want to navigate history instead).
-    fn move_up(&mut self) -> bool {
+    pub fn move_up(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         if self.vis_lines.is_empty() {
             return false;
@@ -313,7 +313,7 @@ impl Editor {
         false
     }
 
-    fn move_down(&mut self) -> bool {
+    pub fn move_down(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         if self.vis_lines.is_empty() {
             return false;
@@ -351,7 +351,7 @@ impl Editor {
         false
     }
 
-    fn move_left(&mut self) {
+    pub fn move_left(&mut self) {
         self.rebuild_visual_lines(self.nav_width());
         if self.cursor == 0 {
             return;
@@ -382,7 +382,7 @@ impl Editor {
         self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
-    fn move_right(&mut self) {
+    pub fn move_right(&mut self) {
         self.rebuild_visual_lines(self.nav_width());
         if self.cursor >= self.text.len() {
             return;
@@ -399,7 +399,7 @@ impl Editor {
         self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
-    fn move_word_left(&mut self) {
+    pub fn move_word_left(&mut self) {
         // Skip delimiters leftwards, then skip word chars leftwards.
         while self.cursor > 0 {
             if let Some(prev) = self.text[..self.cursor].chars().last() {
@@ -420,7 +420,7 @@ impl Editor {
         self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
-    fn move_word_right(&mut self) {
+    pub fn move_word_right(&mut self) {
         // Skip delimiters rightwards, then skip word chars rightwards.
         while self.cursor < self.text.len() {
             if let Some(next) = self.text[self.cursor..].chars().next() {
@@ -441,7 +441,7 @@ impl Editor {
         self.desired_col = self.byte_to_vis_col(self.cursor);
     }
 
-    fn move_line_start(&mut self) {
+    pub fn move_line_start(&mut self) {
         // Move to the start of the current visual line.
         self.rebuild_visual_lines(self.nav_width());
         let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
@@ -455,7 +455,7 @@ impl Editor {
         self.desired_col = 0;
     }
 
-    fn move_line_end(&mut self) {
+    pub fn move_line_end(&mut self) {
         // Move to the end of the current visual line.
         self.rebuild_visual_lines(self.nav_width());
         let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
@@ -477,7 +477,7 @@ impl Editor {
     }
 
     /// Move cursor up one page. Returns `true` if at first visual line.
-    fn move_page_up(&mut self) -> bool {
+    pub fn move_page_up(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         let height = self
             .last_inner_area
@@ -492,7 +492,7 @@ impl Editor {
         false
     }
 
-    fn move_page_down(&mut self) -> bool {
+    pub fn move_page_down(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         let height = self
             .last_inner_area
@@ -1163,7 +1163,7 @@ impl Component for Editor {
 }
 
 impl Editor {
-    fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+    pub fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
         let area = self.last_inner_area?;
         if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
         {
@@ -1181,7 +1181,7 @@ impl Editor {
 
 /// Build visual line layout: for each visual line, a `Vec<usize>` of byte
 /// offsets of each character in that line.
-fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
+pub fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
     if width == 0 {
         return vec![vec![]];
     }
@@ -1208,7 +1208,7 @@ fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
 }
 
 /// Convert byte offset to (vis_line, vis_col) using the cached layout.
-fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
+pub fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
     if vis_lines.is_empty() {
         return (0, 0);
     }
@@ -1320,8 +1320,7 @@ fn line_start_byte_for_width(text: &str, width: usize, target_line: usize) -> us
 }
 
 /// Convert (vis_line, vis_col) to byte offset.
-#[cfg(test)]
-fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: usize) -> usize {
+pub fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: usize) -> usize {
     let Some(chars) = vis_lines.get(line) else {
         return text_len;
     };
@@ -1337,7 +1336,7 @@ fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: usiz
 
 /// Return Codex-style file mention matches:
 /// gitignore-aware, recursive, relative paths, fuzzy-ranked.
-fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
+pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
     let mut entries = git_tracked_and_untracked_files(base_dir)
         .unwrap_or_else(|| recursive_file_paths(base_dir, query.starts_with('.')));
     entries.sort();
@@ -1468,622 +1467,3 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-
-    fn temp_root(name: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("theta-tui-editor-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    // ── Visual line helpers ──
-
-    #[test]
-    fn build_vis_lines_empty() {
-        let lines = build_vis_lines("", 80);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].is_empty());
-    }
-
-    #[test]
-    fn build_vis_lines_single_short_line() {
-        let lines = build_vis_lines("hello", 80);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), 5);
-    }
-
-    #[test]
-    fn build_vis_lines_wraps_at_width() {
-        let lines = build_vis_lines("abcdefghij", 5);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].len(), 5);
-        assert_eq!(lines[1].len(), 5);
-    }
-
-    #[test]
-    fn build_vis_lines_newline_splits() {
-        let lines = build_vis_lines("ab\ncd", 80);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].len(), 2);
-        assert_eq!(lines[1].len(), 2);
-    }
-
-    #[test]
-    fn byte_to_vis_roundtrip() {
-        let text = "hello world";
-        let lines = build_vis_lines(text, 80);
-        for (i, _ch) in text.char_indices() {
-            let (vl, vc) = byte_to_vis(&lines, text, i);
-            let back = vis_to_byte(&lines, text.len(), vl, vc);
-            assert_eq!(back, i, "byte {i} -> ({vl},{vc}) -> {back}");
-        }
-    }
-
-    #[test]
-    fn byte_to_vis_wrapped_roundtrip() {
-        let text = "abcdefghijklmnop";
-        let lines = build_vis_lines(text, 5);
-        for (i, _ch) in text.char_indices() {
-            let (vl, vc) = byte_to_vis(&lines, text, i);
-            let back = vis_to_byte(&lines, text.len(), vl, vc);
-            assert_eq!(back, i, "byte {i} -> ({vl},{vc}) -> {back}");
-        }
-    }
-
-    #[test]
-    fn byte_to_vis_handles_empty_lines_after_non_empty_line() {
-        let text = "a new message\n\n\n\ntesting";
-        let lines = build_vis_lines(text, 80);
-        let testing_idx = text.find("testing").unwrap();
-
-        // Cursor at start of "testing" should map to last visual line, not line 0.
-        let (vl, vc) = byte_to_vis(&lines, text, testing_idx);
-        assert_eq!(vl, 4);
-        assert_eq!(vc, 0);
-
-        // Cursor at first empty line start should map to line 1.
-        let (vl2, vc2) = byte_to_vis(&lines, text, 14);
-        assert_eq!(vl2, 1);
-        assert_eq!(vc2, 0);
-    }
-
-    // ── Cursor navigation ──
-
-    fn make_editor(text: &str) -> Editor {
-        let root = temp_root("nav");
-        let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
-        ed.focus(true);
-        ed.set_text(text);
-        ed.cached_width = 80;
-        ed.cache_dirty = true;
-        ed.rebuild_visual_lines(80);
-        ed.clamp_scroll();
-        ed
-    }
-
-    #[test]
-    fn cursor_starts_at_end() {
-        let ed = make_editor("hello");
-        assert_eq!(ed.cursor, 5);
-    }
-
-    #[test]
-    fn left_moves_backward() {
-        let mut ed = make_editor("abc");
-        ed.move_left();
-        assert_eq!(ed.cursor, 2);
-        ed.move_left();
-        assert_eq!(ed.cursor, 1);
-        ed.move_left();
-        assert_eq!(ed.cursor, 0);
-        ed.move_left(); // stays at 0
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn right_moves_forward() {
-        let mut ed = make_editor("abc");
-        ed.cursor = 0;
-        ed.move_right();
-        assert_eq!(ed.cursor, 1);
-        ed.move_right();
-        assert_eq!(ed.cursor, 2);
-        ed.move_right();
-        assert_eq!(ed.cursor, 3);
-        ed.move_right(); // stays at 3
-        assert_eq!(ed.cursor, 3);
-    }
-
-    #[test]
-    fn up_down_on_single_line() {
-        let mut ed = make_editor("hello");
-        // On a single line, up returns true (at first visual line) without moving cursor.
-        assert!(ed.move_up());
-        assert_eq!(ed.cursor, 5);
-        ed.move_down();
-        assert_eq!(ed.cursor, 5);
-    }
-
-    #[test]
-    fn up_down_multi_line() {
-        let mut ed = make_editor("abcd\nefgh\nijkl");
-        ed.cursor = 0; // start
-        ed.after_mutate();
-        // Move down to line 2 (efgh).
-        ed.move_down();
-        assert!(
-            ed.cursor >= 5 && ed.cursor <= 9,
-            "cursor={} should be on efgh",
-            ed.cursor
-        );
-        // Move down to line 3 (ijkl).
-        ed.move_down();
-        assert!(
-            ed.cursor >= 10 && ed.cursor <= 14,
-            "cursor={} should be on ijkl",
-            ed.cursor
-        );
-        // Move down at last line → returns true, cursor stays.
-        assert!(ed.move_down());
-        assert_eq!(ed.cursor, 10);
-        // Move up back to line 2.
-        ed.move_up();
-        assert!(
-            ed.cursor >= 5 && ed.cursor <= 9,
-            "cursor={} should be on efgh",
-            ed.cursor
-        );
-        // Move up back to line 1.
-        ed.move_up();
-        assert!(ed.cursor <= 4, "cursor={} should be on abcd", ed.cursor);
-    }
-
-    #[test]
-    fn home_end_multi_line() {
-        let mut ed = make_editor("abcd\nefgh");
-        // Cursor at end (byte 9) → on visual line 1 (efgh).
-        // Home goes to start of current visual line → byte 5.
-        ed.move_line_start();
-        assert_eq!(
-            ed.cursor, 5,
-            "home should go to start of current visual line"
-        );
-
-        ed.move_up();
-        ed.move_line_start();
-        assert_eq!(ed.cursor, 0, "home on first visual line");
-
-        ed.move_line_end();
-        assert_eq!(ed.cursor, 4, "end on first visual line");
-    }
-
-    #[test]
-    fn word_left_and_right() {
-        let mut ed = make_editor("alpha beta gamma");
-        ed.cursor = ed.text.len();
-        ed.move_word_left();
-        // Should be at start of "gamma".
-        assert_eq!(
-            &ed.text[ed.cursor..],
-            "gamma",
-            "first move_word_left: cursor={}",
-            ed.cursor
-        );
-
-        ed.move_word_left();
-        assert_eq!(
-            &ed.text[ed.cursor..],
-            "beta gamma",
-            "second move_word_left: cursor={}",
-            ed.cursor
-        );
-
-        // From start of "beta", move_word_right goes past "beta" and lands
-        // at the space before "gamma" (skip whitespace first, then non-ws).
-        ed.move_word_right();
-        assert_eq!(
-            &ed.text[ed.cursor..],
-            " gamma",
-            "move_word_right: cursor={}",
-            ed.cursor
-        );
-    }
-
-    #[test]
-    fn submit_message_via_enter() {
-        let root = temp_root("submit-enter");
-        let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
-        ed.focus(true);
-        ed.set_text("hello world");
-        let action = ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        )));
-        assert!(matches!(action, Some(Action::SendMessage(ref t)) if t == "hello world"));
-        assert!(ed.text().is_empty());
-    }
-
-    #[test]
-    fn enter_behavior_newline_inserts_newline() {
-        let root = temp_root("enter-behavior-newline");
-        let mut ed = Editor::new(Theme::default(), root, vec![], "newline".into());
-        ed.focus(true);
-        ed.set_text("hello");
-
-        let action = ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        )));
-
-        assert!(action.is_none());
-        assert_eq!(ed.text(), "hello\n");
-    }
-
-    #[test]
-    fn insert_newline_via_shift_enter() {
-        let mut ed = make_editor("hello");
-        ed.cursor = 3;
-        let action = ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::SHIFT,
-        )));
-        assert!(action.is_none()); // no submit
-        assert_eq!(ed.text, "hel\nlo");
-        assert_eq!(ed.cursor, 4);
-    }
-
-    #[test]
-    fn insert_newline_via_alt_enter() {
-        let mut ed = make_editor("hello");
-        ed.cursor = 3;
-        let action = ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::ALT,
-        )));
-        assert!(action.is_none()); // no submit
-        assert_eq!(ed.text, "hel\nlo");
-        assert_eq!(ed.cursor, 4);
-    }
-
-    #[test]
-    fn arrow_navigation_after_newline() {
-        let mut ed = make_editor("abc");
-        // Insert newline at end.
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::ALT,
-        )));
-        assert_eq!(ed.text, "abc\n");
-        // Cursor should be on the empty second line.
-        assert!(
-            ed.cursor > 3,
-            "cursor should be on new line, got {}",
-            ed.cursor
-        );
-        // Up should go to first line.
-        ed.move_up();
-        assert!(
-            ed.cursor <= 3,
-            "up should go to first line, got {}",
-            ed.cursor
-        );
-        // Down should go back to the empty line.
-        ed.move_down();
-        assert!(
-            ed.cursor > 3,
-            "down should go to second line, got {}",
-            ed.cursor
-        );
-        // Type on second line.
-        ed.insert_char('x');
-        assert_eq!(ed.text, "abc\nx");
-    }
-
-    #[test]
-    fn up_lands_on_empty_line_between_content() {
-        // "aaa\n\nbbb" has 3 visual lines: "aaa", (empty), "bbb".
-        // Pressing Up from "bbb" should land on the empty line, not jump to "aaa".
-        let mut ed = make_editor("aaa\n\nbbb");
-        ed.cursor = ed.text.len(); // end of text
-        ed.move_up();
-        // Should be on the empty line (byte after first newline).
-        let line_start = ed.cursor;
-        assert_eq!(
-            &ed.text[line_start..],
-            "\nbbb",
-            "up from last line should go to empty line, got {:?}",
-            &ed.text[line_start..]
-        );
-        // Move up again — should go to "aaa".
-        ed.move_up();
-        let line_start2 = ed.cursor;
-        assert_eq!(
-            &ed.text[line_start2..line_start2 + 3],
-            "aaa",
-            "second up should go to first line"
-        );
-    }
-
-    #[test]
-    fn up_down_through_many_empty_lines() {
-        // 20 newlines = 21 visual lines, all empty.
-        let mut ed = make_editor(&"\n".repeat(20));
-        // Cursor starts at end (byte 20).
-        assert_eq!(ed.cursor, 20);
-        // Move up step by step — should reach byte 0 after 20 presses.
-        for i in 1..=20 {
-            ed.move_up();
-            assert_eq!(
-                ed.cursor,
-                20 - i,
-                "up press {} should land at byte {}",
-                i,
-                20 - i
-            );
-        }
-        // Now move back down.
-        for i in 1..=20 {
-            ed.move_down();
-            assert_eq!(ed.cursor, i, "down press {} should land at byte {}", i, i);
-        }
-        assert_eq!(ed.cursor, 20);
-    }
-
-    #[test]
-    fn submit_via_ctrl_enter() {
-        let root = temp_root("submit-ctrl-enter");
-        let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
-        ed.focus(true);
-        ed.set_text("follow up text");
-        let action = ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::CONTROL,
-        )));
-        assert!(matches!(action, Some(Action::FollowUpMessage(ref t)) if t == "follow up text"));
-        assert!(ed.text().is_empty());
-    }
-
-    #[test]
-    fn tab_inserts_two_spaces() {
-        let mut ed = make_editor("hello");
-        ed.cursor = 5;
-        ed.handle_event(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
-        assert_eq!(ed.text, "hello  ");
-        assert_eq!(ed.cursor, 7);
-    }
-
-    #[test]
-    fn page_up_down() {
-        let mut ed = make_editor(
-            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12",
-        );
-        ed.last_inner_area = Some(Rect::new(0, 0, 80, 5));
-        ed.cursor = 0;
-        // Page down should move down by ~5 lines.
-        ed.move_page_down();
-        assert!(ed.cursor > 0, "cursor should have moved down");
-        let old = ed.cursor;
-        ed.move_page_up();
-        assert!(ed.cursor < old, "cursor should have moved back up");
-    }
-
-    #[test]
-    fn click_position_respects_working_dir_and_text() {
-        // This tests the mouse_to_cell + cursor placement mapping.
-        let mut ed = make_editor("hello\nworld");
-        ed.last_inner_area = Some(Rect::new(10, 5, 80, 10));
-        // Click at (10, 5) = inner area start = first character
-        let pos = ed.mouse_to_cell(10, 5);
-        assert_eq!(pos, Some((0, 0)));
-        let pos2 = ed.mouse_to_cell(14, 5);
-        assert_eq!(pos2, Some((0, 4)));
-        let pos3 = ed.mouse_to_cell(10, 6);
-        assert_eq!(pos3, Some((1, 0)));
-    }
-
-    // ── File mention matching ──
-
-    #[test]
-    fn file_mentions_recurse_and_fuzzy_match_relative_paths() {
-        let root = temp_root("fuzzy-path");
-        std::fs::create_dir_all(root.join("src/components")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "").unwrap();
-        std::fs::write(root.join("src/components/chat.rs"), "").unwrap();
-        std::fs::write(root.join("README.md"), "").unwrap();
-
-        let matches = file_mention_matches(&root, "src chat");
-
-        assert_eq!(matches, vec!["src/components/chat.rs".to_string()]);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn file_mentions_empty_query_returns_visible_files() {
-        let root = temp_root("empty");
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/lib.rs"), "").unwrap();
-        std::fs::write(root.join("Cargo.toml"), "").unwrap();
-
-        let matches = file_mention_matches(&root, "");
-
-        assert_eq!(
-            matches,
-            vec!["Cargo.toml".to_string(), "src/lib.rs".to_string()]
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn file_mentions_use_git_exclude_standard_when_available() {
-        let root = temp_root("git-aware");
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/visible.rs"), "").unwrap();
-        std::fs::write(root.join("ignored.log"), "").unwrap();
-        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .arg("init")
-            .output();
-
-        let matches = file_mention_matches(&root, "");
-
-        assert!(matches.contains(&"src/visible.rs".to_string()));
-        assert!(!matches.contains(&"ignored.log".to_string()));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn file_mentions_skips_hidden_paths_by_default() {
-        let root = temp_root("hidden");
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join(".git/config"), "").unwrap();
-        std::fs::write(root.join("visible.rs"), "").unwrap();
-
-        let matches = file_mention_matches(&root, "");
-
-        assert_eq!(matches, vec!["visible.rs".to_string()]);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    // ── Event handling ──
-
-    #[test]
-    fn editor_handles_paste_event() {
-        let root = temp_root("paste");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
-        editor.focus(true);
-
-        editor.handle_event(&Event::Paste("hello\nworld".to_string()));
-
-        assert_eq!(editor.text(), "hello\nworld");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn editor_moves_to_start_with_super_up() {
-        let root = temp_root("super-up");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
-        editor.focus(true);
-        editor.set_text("abcdef");
-
-        editor.handle_event(&Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SUPER)));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('!'),
-            KeyModifiers::NONE,
-        )));
-
-        assert_eq!(editor.text(), "!abcdef");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn editor_moves_word_left_with_alt_left() {
-        let root = temp_root("alt-left");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
-        editor.focus(true);
-        editor.set_text("alpha beta");
-
-        editor.handle_event(&Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('!'),
-            KeyModifiers::NONE,
-        )));
-
-        assert_eq!(editor.text(), "alpha !beta");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn editor_moves_word_right_with_alt_right() {
-        let root = temp_root("alt-right");
-        let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
-        editor.focus(true);
-        editor.set_text("alpha beta");
-
-        // Home → start of visual line (byte 0).
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Home,
-            KeyModifiers::NONE,
-        )));
-        // Alt+Right → skip 'alpha' (non-ws), land at space after 'alpha'.
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Right,
-            KeyModifiers::ALT,
-        )));
-        editor.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('!'),
-            KeyModifiers::NONE,
-        )));
-
-        // Cursor is at space after "alpha", so '!' goes before space.
-        assert_eq!(editor.text(), "alpha! beta");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn slash_autocomplete_dismisses_after_space() {
-        let root = temp_root("slash-dismiss");
-        let mut ed = Editor::new(
-            Theme::default(),
-            root,
-            vec!["help".into(), "model".into()],
-            "send".into(),
-        );
-        ed.focus(true);
-
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('/'),
-            KeyModifiers::NONE,
-        )));
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::NONE,
-        )));
-        assert!(ed.autocomplete_active());
-
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
-        assert!(!ed.autocomplete_active());
-    }
-
-    #[test]
-    fn autocomplete_selection_wraps() {
-        let root = temp_root("autocomplete-wrap");
-        let mut ed = Editor::new(
-            Theme::default(),
-            root,
-            vec!["help".into(), "hello".into(), "model".into()],
-            "send".into(),
-        );
-        ed.focus(true);
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Char('/'),
-            KeyModifiers::NONE,
-        )));
-
-        let initial = ed.autocomplete_selected();
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        )));
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        )));
-        ed.handle_event(&Event::Key(KeyEvent::new(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-        )));
-
-        assert_eq!(ed.autocomplete_selected(), initial);
-    }
-}

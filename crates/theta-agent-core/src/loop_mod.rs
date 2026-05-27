@@ -1044,9 +1044,3 @@ fn format_agent_error_chain(error: &AgentError) -> String {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    // No intent-classification tests. The loop follows Pi's approach:
-    // system prompt guides behavior, code does not infer intent.
-}

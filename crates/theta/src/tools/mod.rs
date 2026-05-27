@@ -3,10 +3,10 @@
 //! Four core tools: read, edit, write, bash. The agent uses bash for grep,
 //! find, ls, sed, and other operations via shell commands (rg, find, ls, sed, etc.).
 
-mod bash;
-mod edit;
-mod read;
-mod write;
+pub mod bash;
+pub mod edit;
+pub mod read;
+pub mod write;
 
 use std::path::{Path, PathBuf};
 
@@ -111,7 +111,7 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
 
 /// Resolve a path relative to the tool context's working directory.
 /// Sanitizes against path traversal attacks (.. components).
-fn resolve_path(ctx: &ToolContext, path: &str) -> PathBuf {
+pub fn resolve_path(ctx: &ToolContext, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     let resolved = if p.is_absolute() {
         p
@@ -133,7 +133,7 @@ fn classify_io_error(err: &std::io::Error) -> &'static str {
 /// Shorten an absolute path for display by replacing the home directory
 /// prefix with `~`. If the path is not under the home directory, returns
 /// the path unchanged.
-pub(crate) fn shorten_path(path: &Path) -> String {
+pub fn shorten_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir()
         && let Ok(rest) = path.strip_prefix(&home)
     {
@@ -160,41 +160,4 @@ pub fn builtin_tools(
         std::sync::Arc::new(WriteTool::new(ctx.clone())),
         std::sync::Arc::new(BashTool::new(ctx.clone())),
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ToolContext, resolve_path, shorten_path};
-
-    #[test]
-    fn resolve_path_keeps_absolute_path() {
-        let ctx = ToolContext::new(std::path::PathBuf::from("/tmp/theta-workdir"));
-        let resolved = resolve_path(&ctx, "/Users/rhafid/.theta");
-        assert_eq!(resolved, std::path::PathBuf::from("/Users/rhafid/.theta"));
-    }
-
-    #[test]
-    fn resolve_path_resolves_relative_from_workdir() {
-        let ctx = ToolContext::new(std::path::PathBuf::from("/tmp/theta-workdir"));
-        let resolved = resolve_path(&ctx, "src/main.rs");
-        assert_eq!(
-            resolved,
-            std::path::PathBuf::from("/tmp/theta-workdir/src/main.rs")
-        );
-    }
-
-    #[test]
-    fn shorten_path_replaces_home_with_tilde() {
-        let home = dirs::home_dir().unwrap();
-        let path = home.join("projects/theta");
-        let result = shorten_path(&path);
-        assert!(result.starts_with("~/"));
-        assert!(result.ends_with("projects/theta"));
-    }
-
-    #[test]
-    fn shorten_path_leaves_non_home_path_unchanged() {
-        let result = shorten_path(std::path::Path::new("/tmp/theta-workdir"));
-        assert_eq!(result, "/tmp/theta-workdir");
-    }
 }

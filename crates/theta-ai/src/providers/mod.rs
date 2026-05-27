@@ -8,10 +8,10 @@ use super::model::Model;
 use super::provider::{EventStream, Provider};
 use super::types::{Api, Context, Provider as ProviderKind, StreamOptions};
 
-mod openai_compat;
+pub mod openai_compat;
 pub use openai_compat::OpenAiCompatProvider;
 
-mod openai_codex;
+pub mod openai_codex;
 pub use openai_codex::OpenAiCodexProvider;
 
 /// A provider factory function — used for lazy provider creation.
@@ -130,16 +130,5 @@ fn provider_kind_to_api(kind: ProviderKind) -> Option<Api> {
         ProviderKind::DeepSeek => Some(Api::OpenAiCompletions),
         ProviderKind::OpenCode => Some(Api::OpenAiCompletions),
         ProviderKind::OpenCodeGo => Some(Api::OpenAiCompletions),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_registry_creation() {
-        let reg = ProviderRegistry::new();
-        assert!(reg.get(&Api::OpenAiCompletions).is_none());
     }
 }

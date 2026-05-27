@@ -12,7 +12,7 @@ use super::{ToolContext, format_path_io_error, resolve_path};
 const MAX_DIFF_HUNKS: usize = 6;
 const MAX_DIFF_CHARS: usize = 6000;
 
-fn make_diff_preview(path: &str, original: &str, modified: &str) -> String {
+pub fn make_diff_preview(path: &str, original: &str, modified: &str) -> String {
     let full = TextDiff::from_lines(original, modified)
         .unified_diff()
         .header(&format!("a/{path}"), &format!("b/{path}"))
@@ -199,20 +199,5 @@ impl AgentTool for EditTool {
             })),
             is_error: false,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::make_diff_preview;
-
-    #[test]
-    fn diff_preview_uses_git_like_headers() {
-        let before = "a\nb\nc\n";
-        let after = "a\nB\nc\n";
-        let diff = make_diff_preview("src/lib.rs", before, after);
-        assert!(diff.contains("--- a/src/lib.rs"));
-        assert!(diff.contains("+++ b/src/lib.rs"));
-        assert!(diff.contains("@@"));
     }
 }

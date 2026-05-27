@@ -24,7 +24,7 @@ pub struct ModelSelector {
     /// All available models.
     all_models: Vec<ModelEntry>,
     /// Currently displayed models (filtered).
-    filtered: Vec<usize>,
+    pub filtered: Vec<usize>,
     /// Currently selected index in filtered.
     selected: usize,
     /// List state.
@@ -217,7 +217,7 @@ impl ModelSelector {
     }
 }
 
-fn format_model_row(model: &ModelEntry) -> String {
+pub fn format_model_row(model: &ModelEntry) -> String {
     let ctx = format_context_window(model.context_window);
     format!(
         "{:18}  {:24}  {:13}  {ctx:>6}",
@@ -230,52 +230,5 @@ fn format_context_window(context_window: u32) -> String {
         format!("{}M", context_window / 1_000_000)
     } else {
         format!("{}K", context_window / 1000)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_row_places_identity_first() {
-        let row = format_model_row(&ModelEntry {
-            id: "gpt-5.5".to_string(),
-            name: "GPT 5.5".to_string(),
-            provider: "openai".to_string(),
-            context_window: 128_000,
-        });
-        assert!(row.starts_with("gpt-5.5"));
-        assert!(row.contains("GPT 5.5"));
-        assert!(row.contains("openai"));
-    }
-
-    #[test]
-    fn filter_matches_provider() {
-        let mut selector = ModelSelector::new(
-            vec![
-                ModelEntry {
-                    id: "gpt-5.5".to_string(),
-                    name: "GPT 5.5".to_string(),
-                    provider: "openai".to_string(),
-                    context_window: 128_000,
-                },
-                ModelEntry {
-                    id: "deepseek-v4-flash-free".to_string(),
-                    name: "DeepSeek V4 Flash Free".to_string(),
-                    provider: "opencode".to_string(),
-                    context_window: 200_000,
-                },
-            ],
-            Theme::default(),
-        );
-        selector.show();
-        for c in "opencode".chars() {
-            selector.push_query(c);
-        }
-
-        let selected = selector.selected_model().expect("expected selected model");
-        assert_eq!(selected.provider, "opencode");
-        assert_eq!(selector.filtered.len(), 1);
     }
 }

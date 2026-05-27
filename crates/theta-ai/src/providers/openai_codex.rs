@@ -128,7 +128,7 @@ impl Provider for OpenAiCodexProvider {
 // URL construction
 // ---------------------------------------------------------------------------
 
-fn codex_url(base_url: &str) -> String {
+pub fn codex_url(base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     if base.ends_with("/codex/responses") {
         return base.to_string();
@@ -139,7 +139,7 @@ fn codex_url(base_url: &str) -> String {
     format!("{base}/codex/responses")
 }
 
-fn codex_ws_url(base_url: &str) -> String {
+pub fn codex_ws_url(base_url: &str) -> String {
     let http = codex_url(base_url);
     if let Some(rest) = http.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -211,7 +211,7 @@ async fn sse_stream(
 // WebSocket transport (primary)
 // ---------------------------------------------------------------------------
 
-async fn ws_stream(
+pub async fn ws_stream(
     url: &str,
     body: &Value,
     account_id: &str,
@@ -385,7 +385,7 @@ fn byte_stream_to_events(
 // Request building
 // ---------------------------------------------------------------------------
 
-fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
+pub fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
     let (sanitized_messages, _stats) =
         crate::sanitize_messages_for_replay(&context.messages, model);
     let sanitized_context = Context {
@@ -472,7 +472,7 @@ fn map_default_effort(level: ThinkingLevel) -> String {
     }
 }
 
-fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
+pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
     let mut items = Vec::new();
 
     if model.compat.supports_developer_role
@@ -566,7 +566,7 @@ fn blocks_to_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn split_tool_call_id(id: &str) -> (&str, &str) {
+pub fn split_tool_call_id(id: &str) -> (&str, &str) {
     let parts: Vec<&str> = id.splitn(2, '|').collect();
     if parts.len() == 2 {
         (parts[0], parts[1])
@@ -575,7 +575,7 @@ fn split_tool_call_id(id: &str) -> (&str, &str) {
     }
 }
 
-fn stable_tool_call_id(call_id: &str, item_id: &str) -> String {
+pub fn stable_tool_call_id(call_id: &str, item_id: &str) -> String {
     if !call_id.is_empty() || !item_id.is_empty() {
         return format!("{call_id}|{item_id}");
     }
@@ -632,7 +632,7 @@ fn parse_codex_usage(usage: &Value) -> Usage {
 }
 
 #[derive(Default)]
-struct CodexEventParser {
+pub struct CodexEventParser {
     text_started: bool,
     text_emitted: bool,
     text_delta_seen_by_item: HashMap<String, bool>,
@@ -645,11 +645,11 @@ struct CodexEventParser {
 }
 
 impl CodexEventParser {
-    fn done_emitted(&self) -> bool {
+    pub fn done_emitted(&self) -> bool {
         self.done_seen
     }
 
-    fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
+    pub fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
         let line = line.trim();
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
@@ -674,7 +674,7 @@ impl CodexEventParser {
         self.parse_event(&data)
     }
 
-    fn parse_event(&mut self, data: &Value) -> Vec<AssistantMessageEvent> {
+    pub fn parse_event(&mut self, data: &Value) -> Vec<AssistantMessageEvent> {
         let mut out = Vec::new();
         let Some(event_type) = data["type"].as_str() else {
             return out;
@@ -1007,461 +1007,3 @@ fn base64_url_decode(input: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_codex_url_resolution() {
-        assert_eq!(
-            codex_url("https://chatgpt.com/backend-api"),
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
-        assert_eq!(
-            codex_url("https://chatgpt.com/backend-api/"),
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
-        assert_eq!(
-            codex_url("https://chatgpt.com/backend-api/codex"),
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
-        assert_eq!(
-            codex_url("https://chatgpt.com/backend-api/codex/responses"),
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
-    }
-
-    #[test]
-    fn test_codex_ws_url() {
-        assert_eq!(
-            codex_ws_url("https://chatgpt.com/backend-api"),
-            "wss://chatgpt.com/backend-api/codex/responses"
-        );
-    }
-
-    #[test]
-    fn test_split_tool_call_id() {
-        assert_eq!(split_tool_call_id("a|b"), ("a", "b"));
-        assert_eq!(split_tool_call_id("abc"), ("abc", ""));
-        assert_eq!(split_tool_call_id("a|b|c"), ("a", "b|c"));
-    }
-
-    #[test]
-    fn test_stable_tool_call_id_fallbacks() {
-        assert_eq!(stable_tool_call_id("", ""), "tool_call_0");
-        assert_eq!(stable_tool_call_id("call_1", ""), "call_1|");
-    }
-
-    #[test]
-    fn test_convert_messages_uses_non_empty_item_id_for_tool_call() {
-        let model = Model {
-            id: "gpt-5.5".into(),
-            name: "Codex".into(),
-            api: crate::types::Api::OpenAiCodexResponses,
-            provider: crate::types::Provider::OpenAiCodex,
-            base_url: "https://chatgpt.com/backend-api".into(),
-            reasoning: true,
-            thinking_level_map: Default::default(),
-            input: vec![crate::types::Modality::Text],
-            cost: Default::default(),
-            context_window: 128_000,
-            max_tokens: 16_384,
-            compat: crate::model::ModelCompat::for_openai(),
-        };
-        let ctx = crate::types::Context {
-            system: None,
-            messages: vec![crate::types::Message::Assistant {
-                content: vec![ContentBlock::ToolCall {
-                    id: "call_abc".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path":"Cargo.toml"}),
-                }],
-                api: Some(crate::types::Api::OpenAiCodexResponses),
-                provider: Some(crate::types::Provider::OpenAiCodex),
-                model: Some("gpt-5.5".into()),
-                usage: None,
-                stop_reason: Some(StopReason::ToolUse),
-                error_message: None,
-                timestamp: 1,
-            }],
-            tools: vec![],
-            thinking_level: None,
-        };
-
-        let out = convert_messages(&model, &ctx);
-        assert_eq!(out[0]["type"], "function_call");
-        assert_eq!(out[0]["id"], "item_0");
-        assert_eq!(out[0]["call_id"], "call_abc");
-    }
-
-    #[test]
-    fn test_delta_plus_done_text_no_duplication() {
-        let mut parser = CodexEventParser::default();
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "message", "id": "m1"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_text.delta",
-                "item_id": "m1",
-                "delta": "hello"
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_text.done",
-                "item_id": "m1",
-                "text": "hello"
-            })),
-        ]
-        .concat();
-
-        assert!(matches!(events[0], AssistantMessageEvent::TextStart));
-        assert!(matches!(events[1], AssistantMessageEvent::TextDelta { .. }));
-        assert!(matches!(events[2], AssistantMessageEvent::TextEnd));
-        assert_eq!(events.len(), 3);
-    }
-
-    #[test]
-    fn test_done_text_without_delta_emits_final_text_once() {
-        let mut parser = CodexEventParser::default();
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "message", "id": "m1"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_text.done",
-                "item_id": "m1",
-                "text": "hello"
-            })),
-        ]
-        .concat();
-
-        assert!(matches!(events[0], AssistantMessageEvent::TextStart));
-        assert!(matches!(events[1], AssistantMessageEvent::TextDelta { .. }));
-        assert!(matches!(events[2], AssistantMessageEvent::TextEnd));
-        assert_eq!(events.len(), 3);
-    }
-
-    #[test]
-    fn test_output_item_done_message_no_duplicate_text_replay() {
-        let mut parser = CodexEventParser::default();
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "message", "id": "m1"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.done",
-                "item": {"type": "message", "id": "m1", "content": [
-                    {"type": "output_text", "text": "hello"}
-                ]}
-            })),
-        ]
-        .concat();
-
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[1], AssistantMessageEvent::TextEnd));
-    }
-
-    #[test]
-    fn test_mixed_multi_item_response_ordering() {
-        let mut parser = CodexEventParser::default();
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "message", "id": "m1"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_text.delta", "item_id": "m1", "delta": "A"
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.done",
-                "item": {"type": "message", "id": "m1"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "message", "id": "m2"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_text.done", "item_id": "m2", "text": "B"
-            })),
-        ]
-        .concat();
-
-        let mut deltas = Vec::new();
-        for event in &events {
-            if let AssistantMessageEvent::TextDelta { text } = event {
-                deltas.push(text.clone());
-            }
-        }
-        assert_eq!(deltas, vec!["A".to_string(), "B".to_string()]);
-    }
-
-    #[test]
-    fn test_function_call_delta_uses_full_id() {
-        let mut parser = CodexEventParser::default();
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read"}
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.function_call_arguments.delta",
-                "call_id": "call_1",
-                "delta": "{\"path\":\"Cargo.toml\"}"
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.function_call_arguments.done",
-                "call_id": "call_1",
-                "id": "fc_1"
-            })),
-        ]
-        .concat();
-
-        assert!(matches!(
-            events[0],
-            AssistantMessageEvent::ToolCallStart { ref id, .. } if id == "call_1|fc_1"
-        ));
-        assert!(matches!(
-            events[1],
-            AssistantMessageEvent::ToolCallDelta { ref id, .. } if id == "call_1|fc_1"
-        ));
-        assert!(matches!(
-            events[2],
-            AssistantMessageEvent::ToolCallEnd { ref id } if id == "call_1|fc_1"
-        ));
-    }
-
-    #[test]
-    fn test_response_completed_with_function_call_sets_tool_use() {
-        let mut parser = CodexEventParser::default();
-        let events = parser.parse_event(&serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "output": [
-                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read"}
-                ]
-            }
-        }));
-
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Done {
-                stop_reason: StopReason::ToolUse,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn test_response_completed_emits_final_text_when_no_deltas() {
-        let mut parser = CodexEventParser::default();
-        let events = parser.parse_event(&serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [
-                            {"type":"output_text","text":"final answer from completed payload"}
-                        ]
-                    }
-                ]
-            }
-        }));
-
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextStart))
-        );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::TextDelta { text } if text.contains("final answer from completed payload")
-        )));
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextEnd))
-        );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::Done {
-                stop_reason: StopReason::Stop,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn test_response_completed_function_call_emits_toolcall_events() {
-        let mut parser = CodexEventParser::default();
-        let events = parser.parse_event(&serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "output": [
-                    {
-                        "type": "function_call",
-                        "id": "fc_9",
-                        "call_id": "call_9",
-                        "name": "edit",
-                        "arguments": "{\"path\":\"a.rs\",\"edits\":[]}"
-                    }
-                ]
-            }
-        }));
-
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallStart { id, name } if id == "call_9|fc_9" && name == "edit"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallDelta { id, arguments } if id == "call_9|fc_9" && arguments.contains("\"path\"")
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallEnd { id } if id == "call_9|fc_9"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::Done {
-                stop_reason: StopReason::ToolUse,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn test_output_item_done_function_call_emits_toolcall_events() {
-        let mut parser = CodexEventParser::default();
-        let events = parser.parse_event(&serde_json::json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "id": "fc_done",
-                "call_id": "call_done",
-                "name": "edit",
-                "arguments": {"path":"a.rs","edits":[]}
-            }
-        }));
-
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallStart { id, name } if id == "call_done|fc_done" && name == "edit"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallDelta { id, arguments } if id == "call_done|fc_done" && arguments.contains("\"path\"")
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::ToolCallEnd { id } if id == "call_done|fc_done"
-        )));
-    }
-
-    #[test]
-    fn test_no_duplicate_tool_arguments_when_added_then_completed_repeat_same_call() {
-        let mut parser = CodexEventParser::default();
-        let mut acc = crate::event::EventAccumulator::new();
-
-        let events = [
-            parser.parse_event(&serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "type": "function_call",
-                    "id": "fc_1",
-                    "call_id": "call_1",
-                    "name": "find",
-                    "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
-                }
-            })),
-            parser.parse_event(&serde_json::json!({
-                "type": "response.completed",
-                "response": {
-                    "output": [{
-                        "type": "function_call",
-                        "id": "fc_1",
-                        "call_id": "call_1",
-                        "name": "find",
-                        "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
-                    }]
-                }
-            })),
-        ]
-        .concat();
-
-        for e in &events {
-            acc.feed(e);
-        }
-        let blocks = acc.content_blocks();
-        let tc = blocks
-            .iter()
-            .find_map(|b| match b {
-                ContentBlock::ToolCall { arguments, .. } => Some(arguments),
-                _ => None,
-            })
-            .expect("tool call block");
-        assert_eq!(tc["path"], ".");
-        assert_eq!(tc["pattern"], "*.toml");
-    }
-
-    #[test]
-    fn test_parser_marks_done_seen_after_completed_event() {
-        let mut parser = CodexEventParser::default();
-        assert!(!parser.done_emitted());
-        let _ = parser.parse_event(&serde_json::json!({
-            "type": "response.completed",
-            "response": { "output": [] }
-        }));
-        assert!(parser.done_emitted());
-    }
-
-    #[test]
-    fn test_parse_sse_line_accepts_data_without_space() {
-        let mut parser = CodexEventParser::default();
-        let events = parser.parse_sse_line(
-            r#"data:{"type":"response.output_text.delta","item_id":"m1","delta":"hello"}"#,
-        );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::TextDelta { text } if text == "hello"
-        )));
-    }
-
-    #[test]
-    fn test_build_request_body_sets_max_output_tokens_when_configured() {
-        let model = Model {
-            id: "gpt-5.5".into(),
-            name: "Codex".into(),
-            api: crate::types::Api::OpenAiCodexResponses,
-            provider: crate::types::Provider::OpenAiCodex,
-            base_url: "https://chatgpt.com/backend-api".into(),
-            reasoning: true,
-            thinking_level_map: Default::default(),
-            input: vec![crate::types::Modality::Text],
-            cost: Default::default(),
-            context_window: 128_000,
-            max_tokens: 16_384,
-            compat: crate::model::ModelCompat::for_openai(),
-        };
-        let body = build_request_body(
-            &model,
-            &crate::types::Context::default(),
-            &StreamOptions {
-                max_tokens: Some(1234),
-                ..Default::default()
-            },
-        );
-        assert_eq!(body["max_output_tokens"], 1234);
-    }
-
-    #[tokio::test]
-    async fn test_ws_stream_invalid_url_returns_error_not_panic() {
-        let body = serde_json::json!({"model":"gpt-5.5","stream":true});
-        let result = ws_stream("://bad-url", &body, "", "token", Some(1)).await;
-        assert!(result.is_err());
-    }
-}

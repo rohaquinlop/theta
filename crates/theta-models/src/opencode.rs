@@ -28,7 +28,7 @@ struct ZenModelEntry {
 
 // ── Free model IDs to exclude (rate-limited even for subscribers) ─────
 
-const FREE_MODEL_IDS: &[&str] = &[
+pub const FREE_MODEL_IDS: &[&str] = &[
     "big-pickle",
     "deepseek-v4-flash-free",
     "nemotron-3-super-free",
@@ -37,7 +37,7 @@ const FREE_MODEL_IDS: &[&str] = &[
 
 // ── Known paid model costs per 1M tokens (from Zen pricing page) ──
 
-fn known_cost(id: &str) -> ModelCost {
+pub fn known_cost(id: &str) -> ModelCost {
     match id {
         "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" => ModelCost {
             input: 5.0,
@@ -187,7 +187,7 @@ fn known_cost(id: &str) -> ModelCost {
     }
 }
 
-fn is_free(id: &str) -> bool {
+pub fn is_free(id: &str) -> bool {
     FREE_MODEL_IDS.contains(&id)
 }
 
@@ -278,33 +278,4 @@ pub fn models() -> Vec<Model> {
         max_tokens: 64_000,
         compat: ModelCompat::for_opencode(),
     }]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_all_models_valid() {
-        for m in models() {
-            assert!(!m.id.is_empty());
-            assert_eq!(m.provider, Provider::OpenCode);
-            assert!(m.context_window > 0);
-        }
-    }
-
-    #[test]
-    fn test_free_models_are_excluded() {
-        for id in FREE_MODEL_IDS {
-            assert!(is_free(id), "free model {id} should be recognized");
-        }
-        assert!(!is_free("gpt-5.5"));
-    }
-
-    #[test]
-    fn test_paid_models_have_cost() {
-        let cost = known_cost("gpt-5.5");
-        assert!(cost.input > 0.0);
-        assert!(cost.output > 0.0);
-    }
 }

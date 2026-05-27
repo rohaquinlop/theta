@@ -89,7 +89,7 @@ fn safe_existing_path(path: &Path) -> Option<PathBuf> {
     path.exists().then(|| path.to_path_buf())
 }
 
-fn extract_mentions(text: &str) -> Vec<String> {
+pub fn extract_mentions(text: &str) -> Vec<String> {
     let chars = text.char_indices().collect::<Vec<_>>();
     let mut out = Vec::new();
     let mut idx = 0usize;
@@ -138,38 +138,4 @@ fn extract_mentions(text: &str) -> Vec<String> {
 
 fn is_path_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '+' | '=')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn extracts_plain_and_quoted_mentions() {
-        assert_eq!(
-            extract_mentions(r#"read @src/main.rs and @"docs/user guide.md""#),
-            vec!["docs/user guide.md".to_string(), "src/main.rs".to_string()]
-        );
-    }
-
-    #[test]
-    fn ignores_email_addresses() {
-        assert!(extract_mentions("a@b.com").is_empty());
-    }
-
-    #[tokio::test]
-    async fn expands_existing_file_mentions() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-
-        let blocks = expand_file_mentions(tmp.path(), "read @src/main.rs").await;
-        let ContentBlock::Text { text } = &blocks[0] else {
-            panic!("expected text block");
-        };
-        assert!(text.contains("# Referenced files"));
-        assert!(text.contains("## @src/main.rs"));
-        assert!(text.contains("fn main() {}"));
-    }
 }

@@ -44,24 +44,22 @@ pub enum ChatRole {
 /// Scrollable chat message list.
 pub struct Chat {
     pub messages: Vec<ChatMessage>,
-    scroll_top: usize,
-    auto_follow_tail: bool,
-    theme: Theme,
+    pub scroll_top: usize,
+    pub auto_follow_tail: bool,
+    pub theme: Theme,
     focused: bool,
     last_visible_lines: Vec<VisibleLine>,
     last_inner_area: Option<Rect>,
     select_anchor: Option<(usize, usize)>,
     select_head: Option<(usize, usize)>,
     selecting: bool,
-    active_tool_message_idx: HashMap<String, usize>,
+    pub active_tool_message_idx: HashMap<String, usize>,
     cached_inner_width: Option<usize>,
     cached_wrapped_lines: Vec<Line<'static>>,
     cached_visible_line_texts: Vec<String>,
-    /// For each message in self.messages, the (start, end) range into
-    /// cached_wrapped_lines / cached_visible_line_texts.
-    cached_msg_ranges: Vec<(usize, usize)>,
-    cached_message_count: usize,
-    cache_dirty: bool,
+    pub cached_msg_ranges: Vec<(usize, usize)>,
+    pub cached_message_count: usize,
+    pub cache_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +263,7 @@ impl Chat {
     }
 
     /// Format a message into styled lines with markdown parsing.
-    fn format_message(&self, msg: &ChatMessage, content_width: usize) -> Vec<Line<'static>> {
+    pub fn format_message(&self, msg: &ChatMessage, content_width: usize) -> Vec<Line<'static>> {
         const USER_BUBBLE_OUTER_MARGIN: usize = 0;
         const USER_BUBBLE_INNER_PAD: usize = 0;
 
@@ -576,7 +574,7 @@ impl Component for Chat {
 }
 
 impl Chat {
-    fn rebuild_render_cache(&mut self, inner_width: usize) {
+    pub fn rebuild_render_cache(&mut self, inner_width: usize) {
         if !self.cache_dirty && self.cached_inner_width == Some(inner_width) {
             return;
         }
@@ -889,7 +887,7 @@ fn truncate_output(text: &str, max_len: usize) -> String {
     }
 }
 
-fn should_insert_gap(prev: ChatRole, curr: ChatRole) -> bool {
+pub fn should_insert_gap(prev: ChatRole, curr: ChatRole) -> bool {
     role_group(prev) != role_group(curr)
 }
 
@@ -1003,7 +1001,7 @@ fn extract_url_ranges(text: &str) -> Vec<(usize, usize, String)> {
 // ---------------------------------------------------------------------------
 
 /// Parse text line-by-line and produce styled Lines.
-fn format_markdown(
+pub fn format_markdown(
     text: &str,
     base_style: Style,
     theme: &Theme,
@@ -1611,238 +1609,5 @@ fn map_lang_token(lang: &str) -> Option<&str> {
         "shell" => Some("bash"),
         "" => None,
         other => Some(other),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn rendered_text(lines: &[Line<'static>]) -> String {
-        lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn normalized_rendered_text(lines: &[Line<'static>]) -> String {
-        let raw = rendered_text(lines);
-        let mut rows: Vec<&str> = raw.lines().collect();
-        while rows.first().is_some_and(|r| r.is_empty()) {
-            rows.remove(0);
-        }
-        while rows.last().is_some_and(|r| r.is_empty()) {
-            rows.pop();
-        }
-        rows.join("\n")
-    }
-
-    #[test]
-    fn test_markdown_headers() {
-        let theme = Theme::default();
-        let style = Style::default();
-        let lines = format_markdown("# Top\n## Mid\n### Low\ntext", style, &theme, "", 80);
-        let rendered: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(rendered.iter().any(|l| l.contains("Top")));
-        assert!(rendered.iter().any(|l| l.contains("Mid")));
-        assert!(rendered.iter().any(|l| l.contains("Low")));
-        assert!(rendered.iter().any(|l| l.contains("text")));
-    }
-
-    #[test]
-    fn test_code_block() {
-        let theme = Theme::default();
-        let style = Style::default();
-        let lines = format_markdown(
-            "before\n```rust\nlet x = 1;\n```\nafter",
-            style,
-            &theme,
-            "",
-            80,
-        );
-        // before, code header, code line, after
-        assert!(lines.len() >= 3);
-    }
-
-    #[test]
-    fn test_task_list_markers() {
-        let theme = Theme::default();
-        let style = Style::default();
-        let lines = format_markdown("- [ ] todo\n- [x] done", style, &theme, "", 80);
-        let rendered: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(rendered.iter().any(|l| l.contains("☐")));
-        assert!(rendered.iter().any(|l| l.contains("☑")));
-    }
-
-    #[test]
-    fn test_skill_invocation_prefix_rendered() {
-        let chat = Chat::new(Theme::default());
-        let lines = chat.format_message(
-            &ChatMessage {
-                role: ChatRole::User,
-                text: "/skill:git-commit".into(),
-                tool_name: None,
-                is_streaming: false,
-            },
-            80,
-        );
-        let has_marker = lines.iter().any(|l| {
-            let txt = l
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>();
-            txt.contains("◈ ")
-        });
-        assert!(has_marker);
-    }
-
-    #[test]
-    fn test_user_message_uses_bubble_background() {
-        let chat = Chat::new(Theme::default());
-        let lines = chat.format_message(
-            &ChatMessage {
-                role: ChatRole::User,
-                text: "hello".into(),
-                tool_name: None,
-                is_streaming: false,
-            },
-            80,
-        );
-        let has_bubble_bg = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.style.bg == Some(chat.theme.user_bubble));
-        assert!(has_bubble_bg);
-    }
-
-    #[test]
-    fn test_add_message_does_not_force_scroll_to_bottom() {
-        let mut chat = Chat::new(Theme::default());
-        chat.scroll_top = 5;
-        chat.auto_follow_tail = false;
-        chat.add_message(ChatMessage {
-            role: ChatRole::Assistant,
-            text: "new content".into(),
-            tool_name: None,
-            is_streaming: false,
-        });
-        assert_eq!(chat.scroll_top, 5);
-        assert!(!chat.auto_follow_tail);
-    }
-
-    #[test]
-    fn test_markdown_golden_nested_lists_and_links() {
-        let theme = Theme::default();
-        let style = Style::default();
-        let md = "# Title\n- parent\n  - child with [link](https://example.com)\n> quote";
-        let lines = format_markdown(md, style, &theme, "", 80);
-        let got = normalized_rendered_text(&lines);
-        let expected = "Title\n• parent\n  • child with link (https://example.com)\nquote";
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn test_markdown_golden_table_wraps_inside_width() {
-        let theme = Theme::default();
-        let style = Style::default();
-        let md = "| Name | Description |\n| --- | --- |\n| A | verylongtoken_without_spaces_that_must_wrap |\n| B | short |";
-        let lines = format_markdown(md, style, &theme, "", 34);
-        let got = normalized_rendered_text(&lines);
-        let expected = "\
-| A   | verylongtoken_without_sp |
-|     | aces_that_must_wrap      |
-| B   | short                    |";
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn compact_tool_completion_updates_started_row() {
-        let mut chat = Chat::new(Theme::default());
-        chat.add_message(ChatMessage {
-            role: ChatRole::Tool,
-            text: "running".to_string(),
-            tool_name: Some("read".to_string()),
-            is_streaming: true,
-        });
-        chat.complete_tool_compact("read", "done: src/main.rs");
-        assert_eq!(chat.messages.len(), 1);
-        assert_eq!(chat.messages[0].text, "done: src/main.rs");
-        assert!(!chat.messages[0].is_streaming);
-    }
-
-    #[test]
-    fn inserts_gap_between_role_groups() {
-        assert!(should_insert_gap(ChatRole::User, ChatRole::Assistant));
-        assert!(!should_insert_gap(ChatRole::Assistant, ChatRole::Thinking));
-        assert!(should_insert_gap(ChatRole::Assistant, ChatRole::Tool));
-    }
-
-    #[test]
-    #[ignore = "perf characterization; run manually"]
-    fn perf_large_history_render_cache() {
-        let mut chat = Chat::new(Theme::default());
-        for i in 0..2500 {
-            chat.add_message(ChatMessage {
-                role: if i % 2 == 0 {
-                    ChatRole::User
-                } else {
-                    ChatRole::Assistant
-                },
-                text: format!("message {i} {}", "x".repeat(120)),
-                tool_name: None,
-                is_streaming: false,
-            });
-        }
-        let start = std::time::Instant::now();
-        chat.rebuild_render_cache(120);
-        let elapsed = start.elapsed();
-        assert!(elapsed.as_secs() < 10);
-    }
-
-    #[test]
-    fn test_clear_messages() {
-        let mut chat = Chat::new(Theme::default());
-        chat.add_message(ChatMessage {
-            role: ChatRole::User,
-            text: "hello".into(),
-            tool_name: None,
-            is_streaming: false,
-        });
-        chat.add_message(ChatMessage {
-            role: ChatRole::Assistant,
-            text: "hi".into(),
-            tool_name: None,
-            is_streaming: false,
-        });
-        assert_eq!(chat.messages.len(), 2);
-
-        chat.clear_messages();
-
-        assert!(chat.messages.is_empty());
-        assert!(chat.active_tool_message_idx.is_empty());
-        assert_eq!(chat.cached_message_count, 0);
-        assert!(chat.cache_dirty);
     }
 }

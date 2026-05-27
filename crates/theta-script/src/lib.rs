@@ -29,6 +29,6 @@ mod engine;
 mod hooks;
 mod loader;
 
-pub use engine::ScriptEngine;
+pub use engine::{BeforeHookResult, ScriptEngine};
 pub use hooks::ScriptHooks;
-pub use loader::ScriptLoader;
+pub use loader::{ScriptDef, ScriptLoader};
