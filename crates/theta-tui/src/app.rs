@@ -730,6 +730,7 @@ impl App {
                     }
                     crossterm::event::KeyCode::Enter => {
                         if let Some(s) = self.tree_selector.selected() {
+                            self.chat.clear_messages();
                             let _ = self.action_tx.send(TuiAction::ResumeSession(s.id.clone()));
                         }
                         self.tree_selector.visible = false;
@@ -763,6 +764,7 @@ impl App {
                         if let Some(ref picker) = self.session_picker
                             && let Some(info) = picker.selected_session()
                         {
+                            self.chat.clear_messages();
                             let _ = self
                                 .action_tx
                                 .send(TuiAction::ResumeSession(info.id.clone()));

@@ -1224,10 +1224,9 @@ async fn handle_tui_action(
                         .into_iter()
                         .flat_map(|msg| message_to_history_entries(&msg))
                         .collect();
+                    // Always send LoadHistory so old messages are cleared.
+                    let _ = event_tx.send(TuiEvent::LoadHistory(history));
                     let _ = event_tx.send(TuiEvent::Info(recap));
-                    if !history.is_empty() {
-                        let _ = event_tx.send(TuiEvent::LoadHistory(history));
-                    }
                 }
                 Err(e) => {
                     let _ =
