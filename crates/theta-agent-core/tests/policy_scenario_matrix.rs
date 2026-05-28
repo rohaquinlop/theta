@@ -13,8 +13,8 @@ use theta_ai::event::AssistantMessageEvent;
 use theta_ai::model::{Model, ModelCompat};
 use theta_ai::providers::ProviderRegistry;
 use theta_ai::types::{
-    Api, ContentBlock, Context, Message, Modality, Provider as ProviderKind,
-    SimpleStreamOptions, StopReason, StreamOptions,
+    Api, ContentBlock, Context, Message, Modality, Provider as ProviderKind, SimpleStreamOptions,
+    StopReason, StreamOptions,
 };
 use theta_ai::{LlmProvider, ThetaError};
 

@@ -21,8 +21,8 @@ mod integration {
     use theta_ai::model::Model;
     use theta_ai::providers::OpenAiCompatProvider;
     use theta_ai::types::{
-        Api, ContentBlock, Context, Message, Modality, Provider, StopReason,
-        StreamOptions, ThinkingLevel,
+        Api, ContentBlock, Context, Message, Modality, Provider, StopReason, StreamOptions,
+        ThinkingLevel,
     };
 
     /// Helper: create a simple OpenAI model for testing.
