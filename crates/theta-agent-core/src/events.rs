@@ -58,6 +58,9 @@ pub enum AgentEvent {
     ToolExecutionStart {
         tool_call_id: String,
         tool_name: String,
+        /// Raw JSON arguments for the tool call (for detection/lookup without
+        /// relying on separately-streamed ToolCallDelta events).
+        arguments: Option<serde_json::Value>,
     },
 
     /// Progress update during tool execution.

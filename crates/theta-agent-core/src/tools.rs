@@ -241,6 +241,7 @@ async fn run_tool(
     let _ = event_tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),
+        arguments: Some(tool_call.arguments.clone()),
     });
 
     let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));

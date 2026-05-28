@@ -516,7 +516,6 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
         let context_window = agent.config().effective_context_window(model_ctx);
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
-        let mut tool_args: HashMap<String, String> = HashMap::new(); // id -> raw args JSON
         let mut saw_assistant_text_delta = false;
         let mut saw_thinking_delta = false;
         let mut latest_turn_end_reason = "completed".to_string();
@@ -527,7 +526,6 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::MessageStart) => {
                     saw_assistant_text_delta = false;
                     saw_thinking_delta = false;
-                    tool_args.clear();
                 }
                 Ok(AgentEvent::TextDelta { text }) => {
                     saw_assistant_text_delta = true;
@@ -548,16 +546,12 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     // tools appearing during the response stream (before execution).
                     let _ = event_tx.send(TuiEvent::ToolCallPrepared { name, id });
                 }
-                Ok(AgentEvent::ToolCallDelta { id, arguments }) => {
-                    // Accumulate streamed arguments for this tool call.
-                    let entry = tool_args.entry(id).or_default();
-                    entry.push_str(&arguments);
-                }
                 Ok(AgentEvent::ToolExecutionStart {
                     tool_call_id: id,
                     tool_name: name,
+                    arguments,
                 }) => {
-                    let args = tool_args.remove(&id);
+                    let args = arguments.and_then(|v| serde_json::to_string(&v).ok());
                     tool_names.insert(id.clone(), name.clone());
 
                     // Detect skill loading: read tool targeting SKILL.md
@@ -568,9 +562,6 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     {
                         let lower_path = path.to_lowercase();
                         if lower_path.ends_with("skill.md") || lower_path.contains("/skill.md") {
-                            // Extract skill name from path
-                            // Path like: skills/web-research/SKILL.md -> web-research
-                            // Path like: .theta/skills/caveman/SKILL.md -> caveman
                             let skill_name = std::path::Path::new(path)
                                 .parent()
                                 .and_then(|p| p.file_name())
@@ -601,7 +592,6 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
                     let summary = format_tool_summary(&result, 2200);
                     tool_names.remove(&result.tool_call_id);
-                    tool_args.remove(&result.tool_call_id); // cleanup stale args
                     let _ = event_tx.send(TuiEvent::ToolEnd {
                         id: result.tool_call_id,
                         name: result.tool_name,
