@@ -1,13 +1,17 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use theta_tui::Action;
 use theta_tui::components::editor::{
     Editor, build_vis_lines, byte_to_vis, file_mention_matches, vis_to_byte,
 };
 use theta_tui::{Component, Theme};
 
+static ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn temp_root(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("theta-tui-editor-{name}-{}", std::process::id()));
+    let n = ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("theta-tui-editor-{name}-{n}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root
