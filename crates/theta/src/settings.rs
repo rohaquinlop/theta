@@ -3,6 +3,7 @@
 //! Stored in `~/.theta/settings.json`. Updated on model switch, thinking
 //! level change, and agent creation. Read on startup to restore defaults.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,12 @@ pub struct ThetaSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
 
-    /// Last used thinking level.
+    /// Per-model thinking level map: model_id → thinking level.
+    /// Enables restoring the last used thinking level when switching models.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_thinking_map: HashMap<String, String>,
+
+    /// Last used thinking level (global fallback, kept for backward compat).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_thinking: Option<String>,
 
@@ -52,6 +58,10 @@ pub struct ThetaSettings {
     /// in your Zen workspace). Add model IDs here to filter them out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_models: Vec<String>,
+
+    /// Favorite model IDs — shown in a pinned section at the top of the model selector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_models: Vec<String>,
 }
 
 fn default_steering_mode() -> String {
@@ -82,11 +92,46 @@ const fn default_max_context_window() -> Option<u32> {
     Some(250_000)
 }
 
+impl ThetaSettings {
+    /// Get the thinking level for a specific model, falling back to `last_thinking`.
+    pub fn thinking_for_model(&self, model_id: &str) -> Option<&str> {
+        self.model_thinking_map
+            .get(model_id)
+            .map(|s| s.as_str())
+            .or(self.last_thinking.as_deref())
+    }
+
+    /// Record the thinking level used for a specific model.
+    pub fn set_model_thinking(&mut self, model_id: &str, thinking: &str) {
+        self.model_thinking_map
+            .insert(model_id.to_string(), thinking.to_string());
+        // Keep last_thinking in sync as a global fallback.
+        self.last_thinking = Some(thinking.to_string());
+    }
+
+    /// Check if a model is in the favorites list.
+    pub fn is_favorite_model(&self, model_id: &str) -> bool {
+        self.favorite_models.iter().any(|id| id == model_id)
+    }
+
+    /// Toggle a model in the favorites list. Returns true if now favorited.
+    pub fn toggle_favorite_model(&mut self, model_id: &str) -> bool {
+        if let Some(pos) = self.favorite_models.iter().position(|id| id == model_id) {
+            self.favorite_models.remove(pos);
+            false
+        } else {
+            self.favorite_models.push(model_id.to_string());
+            true
+        }
+    }
+}
+
 impl Default for ThetaSettings {
     fn default() -> Self {
         Self {
             last_model: None,
             last_thinking: None,
+            model_thinking_map: HashMap::new(),
             steering_mode: default_steering_mode(),
             follow_up_mode: default_follow_up_mode(),
             transport_preference: default_transport_preference(),
@@ -95,6 +140,7 @@ impl Default for ThetaSettings {
             enter_behavior: default_enter_behavior(),
             max_context_window: default_max_context_window(),
             disabled_models: Vec::new(),
+            favorite_models: Vec::new(),
         }
     }
 }

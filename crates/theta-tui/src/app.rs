@@ -69,6 +69,10 @@ pub enum TuiAction {
     CompactContext,
     /// Abort the currently running agent turn.
     AbortAgent,
+    /// Toggle the selected model in the favorites list.
+    ToggleFavoriteModel {
+        model_id: String,
+    },
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -180,6 +184,9 @@ pub enum TuiEvent {
     ThinkingLevels {
         levels: Vec<String>,
         current: String,
+        /// When true, keep the selector visible after updating entries
+        /// (used after model switch with unknown thinking level).
+        show_selector: bool,
     },
     /// Thinking level was applied by backend.
     ThinkingSet {
@@ -188,6 +195,12 @@ pub enum TuiEvent {
     /// A skill was activated by the agent.
     SkillActivated {
         name: String,
+    },
+    /// Favorites list was updated — model selector needs to rebuild.
+    ModelFavoritesUpdated {
+        favorites: Vec<String>,
+        toggled_model: String,
+        is_favorite: bool,
     },
 }
 
@@ -374,6 +387,7 @@ impl App {
         thinking: &str,
         settings: SettingsPayload,
         models: Vec<ModelEntry>,
+        favorites: Vec<String>,
         commands: Vec<CommandEntry>,
         working_dir: std::path::PathBuf,
         event_rx: mpsc::UnboundedReceiver<TuiEvent>,
@@ -407,7 +421,7 @@ impl App {
             theme: theme.clone(),
             theme_idx: 0,
             session_picker: None,
-            model_selector: ModelSelector::new(models, theme.clone()),
+            model_selector: ModelSelector::new(models, favorites, theme.clone()),
             tree_selector: TreeSelector::new(theme.clone()),
             thinking_selector: ThinkingSelector::new(theme.clone()),
             commands,
@@ -666,6 +680,18 @@ impl App {
                     }
                     crossterm::event::KeyCode::Backspace => {
                         self.model_selector.pop_query();
+                    }
+                    crossterm::event::KeyCode::Char('f')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(entry) = self.model_selector.selected_model() {
+                            let model_id = entry.id.clone();
+                            let _ = self
+                                .action_tx
+                                .send(TuiAction::ToggleFavoriteModel { model_id });
+                        }
                     }
                     crossterm::event::KeyCode::Char(c) => {
                         self.model_selector.push_query(c);
@@ -1701,8 +1727,13 @@ impl App {
                 self.status.context_tokens = tokens;
                 self.status.ctx_pct = pct;
             }
-            TuiEvent::ThinkingLevels { levels, current } => {
+            TuiEvent::ThinkingLevels {
+                levels,
+                current,
+                show_selector,
+            } => {
                 self.status.thinking = current.clone();
+                let was_visible = self.thinking_selector.visible;
                 let entries = levels
                     .into_iter()
                     .map(|id| {
@@ -1718,10 +1749,9 @@ impl App {
                         crate::components::thinking_selector::ThinkingLevelEntry { id, label }
                     })
                     .collect::<Vec<_>>();
-                let show_selector = self.thinking_selector.visible;
                 self.thinking_selector.show(entries, Some(&current));
-                // If selector was already visible, keep it visible after update.
-                if !show_selector {
+                // Keep selector visible if it was already open or explicitly requested.
+                if !show_selector && !was_visible {
                     self.thinking_selector.hide();
                 }
             }
@@ -1738,6 +1768,24 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::Skill,
                     text: name,
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
+            TuiEvent::ModelFavoritesUpdated {
+                favorites,
+                toggled_model,
+                is_favorite,
+            } => {
+                self.model_selector.set_favorites(favorites);
+                let msg = if is_favorite {
+                    format!("Added {toggled_model} to favorites")
+                } else {
+                    format!("Removed {toggled_model} from favorites")
+                };
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: msg,
                     tool_name: None,
                     is_streaming: false,
                 });

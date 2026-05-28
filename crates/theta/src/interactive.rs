@@ -157,6 +157,7 @@ pub async fn run_tui(
         let _ = event_tx_raw.send(TuiEvent::ThinkingLevels {
             levels,
             current: tl,
+            show_selector: false,
         });
 
         // Poll extension status rows — wait on notify from hook evaluations.
@@ -183,7 +184,7 @@ pub async fn run_tui(
         // Persist the model + thinking for the next session.
         let mut s = crate::settings::load_settings().await;
         s.last_model = Some(model_id.clone());
-        s.last_thinking = Some(thinking.to_string());
+        s.set_model_thinking(&model_id, thinking);
         crate::settings::save_settings(&s).await.ok();
     }
 
@@ -377,6 +378,7 @@ pub async fn run_tui(
             max_context_window: persisted.max_context_window,
         },
         model_entries,
+        persisted.favorite_models.clone(),
         commands,
         working_dir.to_path_buf(),
         event_rx,
@@ -870,7 +872,7 @@ async fn handle_tui_action(
                                         // Persist model + thinking.
                                         let mut s = crate::settings::load_settings().await;
                                         s.last_model = Some(codex_model.id.clone());
-                                        s.last_thinking = Some(thinking.to_string());
+                                        s.set_model_thinking(&codex_model.id, thinking);
                                         crate::settings::save_settings(&s).await.ok();
                                     }
                                     Err(e) => {
@@ -943,7 +945,7 @@ async fn handle_tui_action(
                                 // Persist model + thinking.
                                 let mut s = crate::settings::load_settings().await;
                                 s.last_model = Some(model_id.to_string());
-                                s.last_thinking = Some(thinking.to_string());
+                                s.set_model_thinking(model_id, thinking);
                                 crate::settings::save_settings(&s).await.ok();
                             }
                             Err(e) => {
@@ -1012,18 +1014,32 @@ async fn handle_tui_action(
                 agent.set_api_key(m.provider, key);
                 let levels = compute_valid_thinking_levels(&m);
                 agent.set_model(m).await;
-                // Read thinking level before rebuilding prompt so runtime
-                // context shows the correct level.
-                let state = agent.state().await;
-                let mut current_thinking = thinking_level_to_string(state.thinking_level);
-                let needs_reset = !levels.contains(&current_thinking);
-                drop(state);
-                // If the current thinking level is not valid for the new model
-                // (e.g. switching from a reasoning model to a non-reasoning one),
-                // reset to "off".
-                if needs_reset {
+                // Restore saved thinking level for this model from the per-model map,
+                // falling back to the current agent thinking level.
+                let (saved_thinking, had_saved) = {
+                    let s = crate::settings::load_settings().await;
+                    match s.thinking_for_model(&model_id) {
+                        Some(t) => (t.to_string(), true),
+                        None => {
+                            let state = agent.state().await;
+                            let tl = thinking_level_to_string(state.thinking_level);
+                            drop(state);
+                            (tl, false)
+                        }
+                    }
+                };
+                let is_valid = levels.contains(&saved_thinking);
+                let show_thinking_selector = !had_saved || !is_valid;
+                let current_thinking = if is_valid {
+                    saved_thinking
+                } else {
                     agent.set_thinking_level(theta_ai::ThinkingLevel::Off).await;
-                    current_thinking = "off".to_string();
+                    "off".to_string()
+                };
+                if !show_thinking_selector {
+                    // Apply the restored thinking level.
+                    let tl = parse_thinking_level(&current_thinking);
+                    agent.set_thinking_level(tl).await;
                 }
                 let max_ctx = agent.config().max_context_window;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
@@ -1045,11 +1061,13 @@ async fn handle_tui_action(
                 });
                 let _ = event_tx.send(TuiEvent::ThinkingLevels {
                     levels,
-                    current: current_thinking,
+                    current: current_thinking.clone(),
+                    show_selector: show_thinking_selector,
                 });
-                // Persist model preference (merge with existing settings).
+                // Persist model + thinking preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
                 s.last_model = Some(model_id.to_string());
+                s.set_model_thinking(&model_id, &current_thinking);
                 crate::settings::save_settings(&s).await.ok();
                 acknowledge(event_tx);
             } else {
@@ -1084,9 +1102,13 @@ async fn handle_tui_action(
                 }
             };
             agent.set_thinking_level(tl).await;
-            // Persist thinking preference (merge with existing settings).
+            // Persist thinking preference to the per-model map.
             let mut s = crate::settings::load_settings().await;
-            s.last_thinking = Some(normalized.clone());
+            // Read current model ID from agent state.
+            {
+                let state = agent.state().await;
+                s.set_model_thinking(&state.model.id, &normalized);
+            }
             crate::settings::save_settings(&s).await.ok();
             let _ = event_tx.send(TuiEvent::ThinkingSet { level: normalized });
             acknowledge(event_tx);
@@ -1102,6 +1124,7 @@ async fn handle_tui_action(
             let _ = event_tx.send(TuiEvent::ThinkingLevels {
                 levels,
                 current: current_str,
+                show_selector: true,
             });
         }
         TuiAction::ForkSession => {
@@ -1454,6 +1477,16 @@ async fn handle_tui_action(
                     let _ = event_tx.send(TuiEvent::Error(format!("Failed to cancel: {e}")));
                 }
             }
+        }
+        TuiAction::ToggleFavoriteModel { model_id } => {
+            let mut s = crate::settings::load_settings().await;
+            let is_fav = s.toggle_favorite_model(&model_id);
+            crate::settings::save_settings(&s).await.ok();
+            let _ = event_tx.send(TuiEvent::ModelFavoritesUpdated {
+                favorites: s.favorite_models.clone(),
+                toggled_model: model_id,
+                is_favorite: is_fav,
+            });
         }
     }
 }

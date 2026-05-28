@@ -217,6 +217,7 @@ async fn handle_tui(
         .thinking
         .as_deref()
         .or(config.thinking.default.as_deref())
+        .or_else(|| settings.thinking_for_model(model))
         .or(settings.last_thinking.as_deref())
         .unwrap_or("medium");
 
