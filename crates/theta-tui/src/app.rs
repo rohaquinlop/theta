@@ -913,7 +913,7 @@ impl App {
         });
         self.status.set_agent_state("streaming");
         self.streaming = true;
-        self.status.set_detail("awaiting assistant response");
+        // Don't set detail — [stream] badge already shows the mode.
         let _ = self.message_tx.send(text);
     }
 
@@ -1383,19 +1383,15 @@ impl App {
                 if self.current_tool.is_none() {
                     self.status.set_agent_state("ModelCall");
                 }
-                self.status.set_detail("assistant responding");
+                // Don't set detail — [stream] badge already shows the mode.
             }
             TuiEvent::ThinkingDelta(text) => {
                 self.status.set_agent_state("thinking");
                 if self.show_thinking {
                     self.chat.update_last(&text, ChatRole::Thinking, true);
-                    let summary = text.lines().next().unwrap_or("").trim();
-                    if !summary.is_empty() {
-                        self.status.set_detail(&truncate_status_text(summary, 80));
-                    }
-                } else {
-                    self.status.set_detail("thinking...");
                 }
+                // Don't set detail — thinking level is already shown in the
+                // [model:thinking] badge on the left.
             }
             TuiEvent::ThinkingStart => {
                 self.status.set_agent_state("thinking");
@@ -1453,9 +1449,8 @@ impl App {
                 self.chat.complete_tool_compact(&name, &final_text);
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
-                } else {
-                    self.status.set_agent_state("Completed");
                 }
+                // Don't set "Completed" here — AgentEnd handles the final state.
             }
             TuiEvent::TurnStart => {
                 self.streaming = true;
@@ -1500,18 +1495,9 @@ impl App {
                     self.status.set_agent_state("Blocked");
                 } else if normalized.contains("error") || normalized.contains("failure") {
                     self.status.set_agent_state("Failed");
-                } else {
-                    self.status.set_agent_state("Completed");
                 }
-                let detail = if stop_reason == "error" {
-                    "failed".to_string()
-                } else if stop_reason.eq_ignore_ascii_case("completed") {
-                    "complete".to_string()
-                } else {
-                    stop_reason
-                };
-                self.status
-                    .set_detail(&format!("turn #{}: {detail}", self.turn_index));
+                // Don't set detail on TurnEnd — the agent loop will emit
+                // AgentEnd with the final idle state when truly finished.
             }
             TuiEvent::TurnDecision { reason, details } => {
                 self.status.last_turn_decision = reason;
@@ -1522,7 +1508,7 @@ impl App {
                 // so the cursor is removed and subsequent tool events render cleanly.
                 self.chat.finish_last(ChatRole::Assistant);
                 self.chat.finish_last(ChatRole::Thinking);
-                self.status.set_detail("tools resolving");
+                // Don't set detail — agent state already conveys the mode.
             }
             TuiEvent::ContextCompacted {
                 trimmed_count,

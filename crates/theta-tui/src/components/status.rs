@@ -36,6 +36,7 @@ pub struct StatusBar {
     /// excluding status lines merged into primary row.
     extension_row_count: usize,
     spinner_idx: usize,
+    last_dot_tick: std::time::Instant,
     theme: Theme,
 }
 
@@ -66,6 +67,7 @@ impl StatusBar {
             extension_rows: Vec::new(),
             extension_row_count: 0,
             spinner_idx: 0,
+            last_dot_tick: std::time::Instant::now(),
             theme,
         }
     }
@@ -130,19 +132,24 @@ impl Component for StatusBar {
         };
 
         let mode = mode_from_state(&self.agent_state);
-        let active = matches!(mode, "thinking" | "tool" | "retry" | "stream");
-        let spinner = if active {
-            const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
-            let frame = FRAMES[self.spinner_idx % FRAMES.len()];
-            self.spinner_idx = self.spinner_idx.wrapping_add(1);
-            format!(" {frame}")
-        } else {
-            String::new()
-        };
         let right_badge = if self.show_diagnostics {
-            format!("[{mode}] turn:{}{spinner}", self.turn_index)
+            format!("[{mode}] turn:{}", self.turn_index)
         } else {
-            format!("[{mode}]{spinner}")
+            format!("[{mode}]")
+        };
+        // Dots animation for thinking/streaming states (shown left of the badge).
+        // Throttled to 500ms per frame so it doesn't flash at render speed.
+        const DOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        let thinking_dots = if mode == "thinking" || mode == "stream" {
+            const FRAMES: [&str; 3] = [".", "..", "..."];
+            if self.last_dot_tick.elapsed() >= DOT_INTERVAL {
+                self.spinner_idx = self.spinner_idx.wrapping_add(1);
+                self.last_dot_tick = std::time::Instant::now();
+            }
+            FRAMES[self.spinner_idx % FRAMES.len()]
+        } else {
+            self.spinner_idx = 0;
+            ""
         };
 
         // Determine total rows: always primary row (0) + any extension-defined rows.
@@ -171,6 +178,7 @@ impl Component for StatusBar {
                     total_width,
                     ext_row,
                     &right_badge,
+                    thinking_dots,
                     state_color,
                 );
             } else {
@@ -195,6 +203,7 @@ impl StatusBar {
     // ── private render helpers ───────────────────────────────────
 
     /// Render the primary (bottom) row: model + ext-left + detail + ext-right + agent-state.
+    #[allow(clippy::too_many_arguments)]
     fn render_primary_row(
         &self,
         frame: &mut Frame,
@@ -202,6 +211,7 @@ impl StatusBar {
         total_width: usize,
         ext_row: Option<&StatusRow>,
         right_badge: &str,
+        thinking_dots: &str,
         state_color: Color,
     ) {
         let model_str = if self.ctx_pct > 0 {
@@ -290,8 +300,13 @@ impl StatusBar {
         }
 
         // Right-anchor the state badge so it never gets clipped.
+        let dots_str = if thinking_dots.is_empty() {
+            String::new()
+        } else {
+            format!("{thinking_dots} ")
+        };
         let badge_space = " ";
-        let badge_len = badge_space.len() + right_badge.len();
+        let badge_len = badge_space.len() + dots_str.len() + right_badge.len();
         let left_max = total_width.saturating_sub(badge_len);
         let left_line = Line::from(truncate_line_chars(spans, left_max));
         // Pad to fill the gap before the badge.
@@ -305,6 +320,12 @@ impl StatusBar {
         let mut all_spans: Vec<Span> = left_line.spans;
         if !gap.is_empty() {
             all_spans.push(Span::raw(gap));
+        }
+        if !dots_str.is_empty() {
+            all_spans.push(Span::styled(
+                dots_str,
+                Style::default().fg(self.theme.warning),
+            ));
         }
         all_spans.push(Span::raw(badge_space));
         all_spans.push(state_span);
