@@ -563,7 +563,7 @@ fn provider_token_url(provider: &str) -> &str {
         "openai-codex" => "https://chatgpt.com",
         "deepseek" => "https://platform.deepseek.com/api_keys",
         "opencode" => "https://api.opencode.ai/settings",
-        "xiaomi" => "https://platform.xiaomimimo.com/token-plan",
+        "xiaomi" => "https://platform.xiaomimimo.com/console/plan-manage",
         _ => "https://google.com",
     }
 }

@@ -34,7 +34,7 @@ pub fn supports_reasoning(id: &str) -> bool {
         || id.starts_with("claude-")
         || id.starts_with("gemini-")
         || id.starts_with("deepseek-")
-        || id.starts_with("mimo-")
+        || (id.starts_with("mimo-v2") && !id.ends_with("-free"))
         || id.starts_with("qwen")
 }
 

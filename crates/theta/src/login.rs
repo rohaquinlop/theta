@@ -119,7 +119,7 @@ fn provider_token_url(provider: &str) -> String {
         "openai-codex" => "https://chatgpt.com",
         "deepseek" => "https://platform.deepseek.com/api_keys",
         "opencode" => "https://api.opencode.ai/settings",
-        "xiaomi" => "https://platform.xiaomimimo.com/token-plan",
+        "xiaomi" => "https://platform.xiaomimimo.com/console/plan-manage",
         other => {
             eprintln!("Unknown provider '{other}'. Opening generic URL.");
             "https://google.com"
