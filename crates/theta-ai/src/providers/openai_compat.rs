@@ -25,6 +25,8 @@ use crate::types::{
 pub struct OpenAiCompatProvider {
     client: Client,
     api_key: RwLock<Option<String>>,
+    /// User-selected MiMo cluster URL override (from latency test).
+    mimo_base_url: RwLock<Option<String>>,
 }
 
 impl OpenAiCompatProvider {
@@ -32,6 +34,7 @@ impl OpenAiCompatProvider {
         Self {
             client: Client::new(),
             api_key: RwLock::new(None),
+            mimo_base_url: RwLock::new(None),
         }
     }
 }
@@ -51,17 +54,6 @@ impl Provider for OpenAiCompatProvider {
         options: &StreamOptions,
     ) -> Result<EventStream<'a>, ThetaError> {
         let request_body = build_request_body(model, context, options, true)?;
-        let url = format!(
-            "{}/v1/chat/completions",
-            model.base_url.trim_end_matches('/')
-        );
-
-        tracing::debug!(
-            "POST {} with {} messages and {} tools",
-            url,
-            context.messages.len(),
-            context.tools.len(),
-        );
 
         let api_key = self
             .api_key
@@ -73,12 +65,46 @@ impl Provider for OpenAiCompatProvider {
                 provider: model.provider,
             })?;
 
+        // Detect base URL from API key prefix for MiMo:
+        //   sk-* → pay-as-you-go → model.base_url (api.xiaomimimo.com)
+        //   tp-* → token plan    → MIMO_BASE_URL or token-plan-sgp.xiaomimimo.com
+        let base_url = if model.provider == crate::types::Provider::XiaomiMiMo {
+            resolve_mimo_base_url(&api_key, &self.mimo_base_url)
+        } else {
+            model.base_url.to_string()
+        };
+        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+        // Debug: log first/last 4 chars of key and its length
+        let key_preview = if api_key.len() <= 8 {
+            "***too-short***".to_string()
+        } else {
+            format!(
+                "{}...{} (len={})",
+                &api_key[..4],
+                &api_key[api_key.len() - 4..],
+                api_key.len()
+            )
+        };
+        tracing::debug!(
+            api_key_preview = %key_preview,
+            provider = ?model.provider,
+            url = %url,
+            uses_api_key_header = model.compat.uses_api_key_header,
+            "sending request"
+        );
+
         let mut request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&request_body);
+
+        if model.compat.uses_api_key_header {
+            request = request.header("api-key", &api_key);
+        } else {
+            request = request.header("Authorization", format!("Bearer {api_key}"));
+        }
 
         if let Some(timeout_ms) = options.timeout_ms {
             request = request.timeout(std::time::Duration::from_millis(timeout_ms));
@@ -94,6 +120,11 @@ impl Provider for OpenAiCompatProvider {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse().ok());
             let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = %status,
+                response_body = %body,
+                "MiMo/OpenAI compat API returned non-success"
+            );
             return Err(ThetaError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -138,6 +169,20 @@ impl Provider for OpenAiCompatProvider {
             *api_key = Some(token.to_string());
         }
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl OpenAiCompatProvider {
+    /// Set the user-selected MiMo cluster URL (from latency test).
+    /// Overrides auto-detection and env vars.
+    pub fn set_mimo_base_url(&self, url: &str) {
+        if let Ok(mut u) = self.mimo_base_url.write() {
+            *u = Some(url.to_string());
+        }
+    }
 }
 
 /// Get the environment variable name for a provider's API key.
@@ -148,6 +193,25 @@ pub fn api_key_env(provider: crate::types::Provider) -> &'static str {
         crate::types::Provider::DeepSeek => "DEEPSEEK_API_KEY",
         crate::types::Provider::OpenCode => "OPENCODE_API_KEY",
         crate::types::Provider::OpenCodeGo => "OPENCODE_API_KEY",
+        crate::types::Provider::XiaomiMiMo => "MIMO_API_KEY",
+    }
+}
+
+fn resolve_mimo_base_url(api_key: &str, override_url: &RwLock<Option<String>>) -> String {
+    // 1. User-selected cluster override (from latency test modal).
+    //    Always honored regardless of key prefix.
+    if let Ok(Some(url)) = override_url.read().map(|u| u.clone()) {
+        return url;
+    }
+    // 2. MIMO_BASE_URL env var.
+    if let Ok(url) = std::env::var("MIMO_BASE_URL") {
+        return url;
+    }
+    // 3. Key-prefix-based default.
+    if api_key.starts_with("tp-") {
+        "https://token-plan-sgp.xiaomimimo.com".to_string()
+    } else {
+        "https://api.xiaomimimo.com".to_string()
     }
 }
 
@@ -277,6 +341,14 @@ pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::type
             }
             // Unmapped non-Off levels (minimal/low/medium on DeepSeek):
             // do nothing — let model use its default behavior.
+        }
+        Some(crate::model::ThinkingFormat::XiaomiMiMo) => {
+            // MiMo: binary on/off only, no reasoning_effort field.
+            if level == crate::types::ThinkingLevel::Off {
+                body["thinking"] = json!({"type": "disabled"});
+            } else if level_str.is_some() {
+                body["thinking"] = json!({"type": "enabled"});
+            }
         }
         _ => {
             // OpenAI / OpenCode: reasoning_effort field

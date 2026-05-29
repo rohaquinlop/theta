@@ -36,4 +36,7 @@ pub trait Provider: Send + Sync {
     /// Default is a no-op; providers that need tokens (e.g. Codex OAuth)
     /// override this.
     fn set_token(&self, _token: &str) {}
+
+    /// Return a reference to `self` as `&dyn Any` for downcasting.
+    fn as_any(&self) -> &dyn std::any::Any;
 }

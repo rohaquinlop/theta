@@ -10,9 +10,10 @@ use theta_ai::providers::default_registry;
 use theta_ai::{Model, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
 use theta_models::opencode;
+use theta_models::xiaomi;
 use theta_tui::App;
 use theta_tui::app::{HistoryEntry, TuiAction, TuiEvent};
-use theta_tui::components::CommandEntry;
+use theta_tui::components::{CommandEntry, MimoClusterEntry};
 use theta_tui::components::{ModelEntry, SessionInfo, known_providers};
 use theta_tui::theme::Theme;
 use tokio::sync::{RwLock, mpsc};
@@ -34,8 +35,9 @@ pub async fn run_tui(
     initial_prompt: Option<&str>,
 ) -> anyhow::Result<()> {
     let catalog = BuiltInCatalog::new();
-    let runtime_models_cell: Arc<RwLock<Vec<Model>>> =
-        Arc::new(RwLock::new(resolve_runtime_models(&catalog, None).await));
+    let runtime_models_cell: Arc<RwLock<Vec<Model>>> = Arc::new(RwLock::new(
+        resolve_runtime_models(&catalog, None, None).await,
+    ));
     let runtime_models = runtime_models_cell.read().await.clone();
 
     let model = find_model_by_id(&runtime_models, model_id)
@@ -54,6 +56,7 @@ pub async fn run_tui(
             ("openai", Provider::OpenAI),
             ("deepseek", Provider::DeepSeek),
             ("opencode", Provider::OpenCode),
+            ("xiaomi", Provider::XiaomiMiMo),
         ];
         let mut found: Option<(theta_ai::Model, String, String)> = None;
         for (prov_str, prov) in &alt_providers {
@@ -153,7 +156,8 @@ pub async fn run_tui(
 
         // Send initial valid thinking levels for the model.
         let levels = compute_valid_thinking_levels(&model);
-        let tl = thinking_level_to_string(parse_thinking_level(thinking));
+        let parsed = parse_thinking_level(thinking);
+        let tl = normalize_thinking_level(&model, parsed, &levels);
         let _ = event_tx_raw.send(TuiEvent::ThinkingLevels {
             levels,
             current: tl,
@@ -394,6 +398,7 @@ pub async fn run_tui(
             config.auth.has_token("openai-codex"),
             config.auth.has_token("deepseek"),
             config.auth.has_token("opencode"),
+            config.auth.has_token("xiaomi"),
         );
         app.start_login_flow(providers);
     }
@@ -474,6 +479,7 @@ async fn create_agent(
 fn parse_thinking_level(level: &str) -> theta_ai::ThinkingLevel {
     match level.to_lowercase().as_str() {
         "off" => theta_ai::ThinkingLevel::Off,
+        "enabled" => theta_ai::ThinkingLevel::Minimal,
         "minimal" => theta_ai::ThinkingLevel::Minimal,
         "low" => theta_ai::ThinkingLevel::Low,
         "medium" => theta_ai::ThinkingLevel::Medium,
@@ -485,7 +491,7 @@ fn parse_thinking_level(level: &str) -> theta_ai::ThinkingLevel {
 
 /// Compute the list of valid thinking level strings for a model.
 fn compute_valid_thinking_levels(model: &theta_ai::Model) -> Vec<String> {
-    let all_levels = [
+    let all_levels: &[(&str, theta_ai::ThinkingLevel)] = &[
         ("off", theta_ai::ThinkingLevel::Off),
         ("minimal", theta_ai::ThinkingLevel::Minimal),
         ("low", theta_ai::ThinkingLevel::Low),
@@ -493,13 +499,22 @@ fn compute_valid_thinking_levels(model: &theta_ai::Model) -> Vec<String> {
         ("high", theta_ai::ThinkingLevel::High),
         ("xhigh", theta_ai::ThinkingLevel::XHigh),
     ];
+    // Deduplicate by the actual param value sent to the provider.
+    // For binary-thinking providers (like MiMo), all non-Off levels
+    // share the same param, so only one non-Off entry appears.
+    let mut seen_params: std::collections::HashSet<Option<String>> =
+        std::collections::HashSet::new();
     all_levels
-        .into_iter()
-        .filter(|(_, level)| {
-            // Off is always valid; other levels need a mapping.
-            *level == theta_ai::ThinkingLevel::Off || model.thinking_param(*level).is_some()
+        .iter()
+        .filter_map(|(_name, level)| {
+            if *level == theta_ai::ThinkingLevel::Off {
+                // Always include Off.
+                seen_params.insert(None);
+                return Some("off".to_string());
+            }
+            let param = model.thinking_param(*level);
+            param.filter(|p| seen_params.insert(Some(p.clone())))
         })
-        .map(|(name, _)| name.to_string())
         .collect()
 }
 
@@ -513,6 +528,29 @@ fn thinking_level_to_string(level: theta_ai::ThinkingLevel) -> String {
         theta_ai::ThinkingLevel::High => "high".to_string(),
         theta_ai::ThinkingLevel::XHigh => "xhigh".to_string(),
     }
+}
+
+/// Normalize a ThinkingLevel to match the provider's param in the valid levels list.
+/// For binary-thinking providers (MiMo), maps generic levels like "minimal" to the
+/// provider-native ID (e.g. "enabled"). Falls back to the generic string if no match.
+fn normalize_thinking_level(
+    model: &theta_ai::Model,
+    level: theta_ai::ThinkingLevel,
+    valid_levels: &[String],
+) -> String {
+    let generic = thinking_level_to_string(level);
+    if valid_levels.contains(&generic) {
+        return generic;
+    }
+    // Try to find a matching provider param in the valid levels.
+    // Deduplicate by param value for binary-thinking providers (MiMo).
+    let param = model.thinking_param(level);
+    if let Some(p) = param
+        && valid_levels.contains(&p)
+    {
+        return p;
+    }
+    generic
 }
 
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
@@ -690,9 +728,11 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                                 detail = %detail,
                                 "turn terminated with provider failure"
                             );
-                            let _ = event_tx.send(TuiEvent::Info(
-                                "Provider error — check logs for details".to_string(),
-                            ));
+                            // Include the error detail so the user can diagnose.
+                            // Clip to a reasonable length; the full body is in tracing logs.
+                            let short = truncate_chars(detail, 500);
+                            let _ =
+                                event_tx.send(TuiEvent::Info(format!("Provider error: {short}",)));
                         } else {
                             let message = if detail.is_empty() {
                                 format!("Turn ended: {reason:?}")
@@ -887,6 +927,7 @@ async fn handle_tui_action(
                                 catalog,
                                 runtime_models_cell,
                                 auth.get_api_key("opencode").await.as_deref(),
+                                auth.get_api_key("xiaomi").await.as_deref(),
                             )
                             .await;
                             let runtime_models = runtime_models_cell.read().await.clone();
@@ -959,6 +1000,7 @@ async fn handle_tui_action(
                         catalog,
                         runtime_models_cell,
                         auth.get_api_key("opencode").await.as_deref(),
+                        auth.get_api_key("xiaomi").await.as_deref(),
                     )
                     .await;
                     let runtime_models = runtime_models_cell.read().await.clone();
@@ -1013,10 +1055,9 @@ async fn handle_tui_action(
 
                 agent.set_api_key(m.provider, key);
                 let levels = compute_valid_thinking_levels(&m);
-                agent.set_model(m).await;
                 // Restore saved thinking level for this model from the per-model map,
                 // falling back to the current agent thinking level.
-                let (saved_thinking, had_saved) = {
+                let (saved_thinking, _had_saved) = {
                     let s = crate::settings::load_settings().await;
                     match s.thinking_for_model(&model_id) {
                         Some(t) => (t.to_string(), true),
@@ -1029,17 +1070,31 @@ async fn handle_tui_action(
                     }
                 };
                 let is_valid = levels.contains(&saved_thinking);
-                let show_thinking_selector = !had_saved || !is_valid;
-                let current_thinking = if is_valid {
-                    saved_thinking
+                // Normalize legacy level names: "minimal" → "enabled" for
+                // binary-thinking providers (MiMo). If the saved level isn't
+                // valid but its provider param matches one of the valid levels,
+                // use that valid level ID instead.
+                let normalized_saved = if is_valid {
+                    Some(saved_thinking.clone())
                 } else {
-                    agent.set_thinking_level(theta_ai::ThinkingLevel::Off).await;
-                    "off".to_string()
+                    let tl = parse_thinking_level(&saved_thinking);
+                    let param = m.thinking_param(tl);
+                    param.and_then(|p| levels.iter().find(|l| **l == p).cloned())
                 };
+                let show_thinking_selector = normalized_saved.is_none();
+                let current_thinking = match normalized_saved {
+                    Some(t) => t,
+                    None => "off".to_string(),
+                };
+
+                agent.set_model(m).await;
+
                 if !show_thinking_selector {
                     // Apply the restored thinking level.
                     let tl = parse_thinking_level(&current_thinking);
                     agent.set_thinking_level(tl).await;
+                } else {
+                    agent.set_thinking_level(theta_ai::ThinkingLevel::Off).await;
                 }
                 let max_ctx = agent.config().max_context_window;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
@@ -1088,6 +1143,7 @@ async fn handle_tui_action(
             let normalized = level.to_lowercase();
             let tl = match normalized.as_str() {
                 "off" => theta_ai::ThinkingLevel::Off,
+                "enabled" => theta_ai::ThinkingLevel::Minimal,
                 "minimal" => theta_ai::ThinkingLevel::Minimal,
                 "low" => theta_ai::ThinkingLevel::Low,
                 "medium" => theta_ai::ThinkingLevel::Medium,
@@ -1095,7 +1151,7 @@ async fn handle_tui_action(
                 "xhigh" => theta_ai::ThinkingLevel::XHigh,
                 _ => {
                     let _ = event_tx.send(TuiEvent::Error(format!(
-                        "Invalid thinking level: {level}. Use off/minimal/low/medium/high/xhigh"
+                        "Invalid thinking level: {level}. Use off/enabled/minimal/low/medium/high/xhigh"
                     )));
                     acknowledge(event_tx);
                     return;
@@ -1120,7 +1176,9 @@ async fn handle_tui_action(
             };
             let state = agent.state().await;
             let levels = compute_valid_thinking_levels(&state.model);
-            let current_str = thinking_level_to_string(state.thinking_level);
+            // Normalize the current level to match the provider param (e.g.
+            // "minimal" → "enabled" for binary-thinking providers).
+            let current_str = normalize_thinking_level(&state.model, state.thinking_level, &levels);
             let _ = event_tx.send(TuiEvent::ThinkingLevels {
                 levels,
                 current: current_str,
@@ -1488,6 +1546,44 @@ async fn handle_tui_action(
                 is_favorite: is_fav,
             });
         }
+        TuiAction::ShowMimoClusters => {
+            // Measure latencies and send results back to TUI.
+            // Always show the modal — the user may want to switch clusters.
+            // Use the stored API key to filter clusters (token-plan keys only
+            // work on their assigned region).
+            let api_key = if let Some(agent) = agent_cell.read().await.clone() {
+                agent.provider_key(Provider::XiaomiMiMo).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let clusters = crate::mimo_cluster::measure_cluster_latencies(&api_key).await;
+            let entries: Vec<MimoClusterEntry> = clusters
+                .into_iter()
+                .map(|c| MimoClusterEntry {
+                    label: c.label,
+                    url: c.url,
+                    latency_ms: c.latency_ms,
+                })
+                .collect();
+            let s = crate::settings::load_settings().await;
+            let _ = event_tx.send(TuiEvent::MimoClusterResults {
+                clusters: entries,
+                current_url: s.mimo_cluster_url,
+            });
+        }
+        TuiAction::SelectMimoCluster { url } => {
+            // Store in settings and set on the provider.
+            let mut s = crate::settings::load_settings().await;
+            s.mimo_cluster_url = Some(url.clone());
+            crate::settings::save_settings(&s).await.ok();
+
+            // Set on the provider for immediate effect.
+            if let Some(agent) = agent_cell.read().await.clone() {
+                agent.set_mimo_base_url(&url);
+            }
+
+            let _ = event_tx.send(TuiEvent::Info(format!("MiMo cluster set to {url}")));
+        }
     }
 }
 
@@ -1496,7 +1592,7 @@ async fn available_model_entries(
     auth: &mut crate::config::AuthConfig,
 ) -> Vec<ModelEntry> {
     let mut provider_has_auth: HashMap<String, bool> = HashMap::new();
-    for provider in ["openai", "openai-codex", "deepseek", "opencode"] {
+    for provider in ["openai", "openai-codex", "deepseek", "opencode", "xiaomi"] {
         provider_has_auth.insert(
             provider.to_string(),
             auth.get_api_key(provider).await.is_some(),
@@ -1566,19 +1662,26 @@ async fn refresh_runtime_models(
     catalog: &BuiltInCatalog,
     runtime_models_cell: &Arc<RwLock<Vec<Model>>>,
     opencode_api_key: Option<&str>,
+    mimo_api_key: Option<&str>,
 ) {
-    let refreshed = resolve_runtime_models(catalog, opencode_api_key).await;
+    let refreshed = resolve_runtime_models(catalog, opencode_api_key, mimo_api_key).await;
     *runtime_models_cell.write().await = refreshed;
 }
 
 async fn resolve_runtime_models(
     catalog: &BuiltInCatalog,
     opencode_api_key: Option<&str>,
+    mimo_api_key: Option<&str>,
 ) -> Vec<Model> {
     let mut models: Vec<Model> = catalog.list().into_iter().cloned().collect();
     let fetched = opencode::fetch_models(opencode_api_key).await;
     if !fetched.is_empty() {
         models.retain(|m| m.provider != Provider::OpenCode);
+        models.extend(fetched);
+    }
+    let fetched = xiaomi::fetch_models(mimo_api_key).await;
+    if !fetched.is_empty() {
+        models.retain(|m| m.provider != Provider::XiaomiMiMo);
         models.extend(fetched);
     }
     models
@@ -1631,6 +1734,7 @@ fn provider_to_string(provider: Provider) -> String {
         Provider::DeepSeek => "deepseek".into(),
         Provider::OpenCode => "opencode".into(),
         Provider::OpenCodeGo => "opencode-go".into(),
+        Provider::XiaomiMiMo => "xiaomi".into(),
     }
 }
 
@@ -1641,6 +1745,7 @@ fn provider_from_string(provider: &str) -> Option<Provider> {
         "deepseek" => Some(Provider::DeepSeek),
         "opencode" => Some(Provider::OpenCode),
         "opencode-go" => Some(Provider::OpenCodeGo),
+        "xiaomi" => Some(Provider::XiaomiMiMo),
         _ => None,
     }
 }

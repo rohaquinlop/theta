@@ -15,6 +15,7 @@ pub mod extensions;
 pub mod interactive;
 pub mod login;
 pub mod mentions;
+pub mod mimo_cluster;
 pub mod oauth;
 pub mod print_mode;
 pub mod prompts;

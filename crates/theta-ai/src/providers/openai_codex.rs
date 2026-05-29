@@ -57,6 +57,10 @@ impl Provider for OpenAiCodexProvider {
         }
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn stream<'a>(
         &'a self,
         model: &Model,

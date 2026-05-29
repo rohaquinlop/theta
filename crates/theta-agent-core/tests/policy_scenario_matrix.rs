@@ -67,6 +67,10 @@ impl LlmProvider for MockProvider {
         };
         self.stream(model, context, &so).await
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 struct MatrixTool {

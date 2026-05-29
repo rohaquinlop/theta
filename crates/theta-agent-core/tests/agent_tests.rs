@@ -108,6 +108,10 @@ impl LlmProvider for MockProvider {
         };
         self.stream(model, context, &stream_opts).await
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ── Mock Tool ─────────────────────────────────────────────────

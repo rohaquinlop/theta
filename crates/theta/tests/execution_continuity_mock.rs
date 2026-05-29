@@ -82,6 +82,10 @@ impl LlmProvider for ReplayValidationProvider {
         };
         self.stream(model, context, &stream_opts).await
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 type EventStream<'a> = Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>;
@@ -167,6 +171,10 @@ impl LlmProvider for PromptSensitiveMockProvider {
             ..Default::default()
         };
         self.stream(model, context, &stream_opts).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -62,6 +62,12 @@ pub struct ThetaSettings {
     /// Favorite model IDs — shown in a pinned section at the top of the model selector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_models: Vec<String>,
+
+    /// MiMo cluster base URL selected by the user (for token-plan users).
+    /// One of the regional endpoints: cn, sgp, ams.
+    /// Overrides the MIMO_BASE_URL env var when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mimo_cluster_url: Option<String>,
 }
 
 fn default_steering_mode() -> String {
@@ -141,6 +147,7 @@ impl Default for ThetaSettings {
             max_context_window: default_max_context_window(),
             disabled_models: Vec::new(),
             favorite_models: Vec::new(),
+            mimo_cluster_url: None,
         }
     }
 }

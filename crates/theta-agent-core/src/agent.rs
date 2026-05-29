@@ -115,6 +115,17 @@ impl Agent {
         self.provider.set_api_key(provider, key);
     }
 
+    /// Set the MiMo cluster base URL (from latency test modal).
+    pub fn set_mimo_base_url(&self, url: &str) {
+        let url = url.to_string();
+        self.provider.set_mimo_base_url(&url);
+    }
+
+    /// Get the stored API key for a provider.
+    pub fn provider_key(&self, provider: ProviderKind) -> Option<String> {
+        self.provider.get_api_key(provider)
+    }
+
     /// Set the system prompt.
     pub async fn set_system_prompt(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;

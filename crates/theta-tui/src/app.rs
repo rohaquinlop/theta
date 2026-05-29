@@ -17,6 +17,7 @@ use crate::components::CommandEntry;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
+use crate::components::mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
 use crate::components::status::StatusBar;
@@ -72,6 +73,12 @@ pub enum TuiAction {
     /// Toggle the selected model in the favorites list.
     ToggleFavoriteModel {
         model_id: String,
+    },
+    /// Show the MiMo cluster selector (latency test).
+    ShowMimoClusters,
+    /// Select a MiMo cluster URL.
+    SelectMimoCluster {
+        url: String,
     },
 }
 
@@ -202,6 +209,12 @@ pub enum TuiEvent {
         toggled_model: String,
         is_favorite: bool,
     },
+    /// MiMo cluster latency results (from async measurement).
+    /// Includes the currently configured cluster URL for pre-selection.
+    MimoClusterResults {
+        clusters: Vec<MimoClusterEntry>,
+        current_url: Option<String>,
+    },
 }
 
 /// Structured status-bar data from extensions (Rhai scripts).
@@ -250,6 +263,7 @@ pub struct App {
     model_selector: ModelSelector,
     tree_selector: TreeSelector,
     thinking_selector: ThinkingSelector,
+    mimo_cluster_selector: MimoClusterSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
@@ -424,6 +438,7 @@ impl App {
             model_selector: ModelSelector::new(models, favorites, theme.clone()),
             tree_selector: TreeSelector::new(theme.clone()),
             thinking_selector: ThinkingSelector::new(theme.clone()),
+            mimo_cluster_selector: MimoClusterSelector::new(),
             commands,
             skill_commands,
             keybindings: default_bindings(),
@@ -533,6 +548,10 @@ impl App {
         }
         self.thinking_selector.render(area, frame);
         if self.thinking_selector.visible {
+            return;
+        }
+        self.mimo_cluster_selector.render(area, frame, &self.theme);
+        if self.mimo_cluster_selector.visible {
             return;
         }
 
@@ -647,9 +666,11 @@ impl App {
                         self.model_selector.hide();
                     }
                     crossterm::event::KeyCode::Enter => {
+                        let is_xiaomi_and_cluster_needed;
                         if let Some(entry) = self.model_selector.selected_model() {
                             let model_id = entry.id.clone();
                             let provider = entry.provider.clone();
+                            is_xiaomi_and_cluster_needed = entry.provider == "xiaomi";
                             let request_id = self.begin_config_action();
                             if !self.send_config_action(
                                 request_id,
@@ -669,6 +690,12 @@ impl App {
                                 tool_name: None,
                                 is_streaming: false,
                             });
+                            // For MiMo models without a selected cluster, show
+                            // the cluster selector so the user can pick an endpoint.
+                            if is_xiaomi_and_cluster_needed {
+                                let _ = self.action_tx.send(TuiAction::ShowMimoClusters);
+                                self.mimo_cluster_selector.start_measuring();
+                            }
                         }
                         self.model_selector.hide();
                     }
@@ -738,6 +765,31 @@ impl App {
                     }
                     crossterm::event::KeyCode::Down => {
                         self.thinking_selector.select_down();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // MiMo cluster selector mode — handle keys exclusively.
+        if self.mimo_cluster_selector.visible {
+            // Delegate navigation to the component.
+            self.mimo_cluster_selector.handle_event(event);
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.mimo_cluster_selector.close();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(url) = self
+                            .mimo_cluster_selector
+                            .selected_url()
+                            .map(|s| s.to_string())
+                        {
+                            let _ = self.action_tx.send(TuiAction::SelectMimoCluster { url });
+                        }
+                        self.mimo_cluster_selector.close();
                     }
                     _ => {}
                 }
@@ -1063,7 +1115,7 @@ impl App {
                 let help_text = [
                     "Slash commands:",
                     "  /model          Open model picker (available models)",
-                    "  /thinking [lvl] Open selector or set thinking level (off/minimal/low/medium/high/xhigh)",
+                    "  /thinking [lvl] Open selector or set thinking level (off/enabled/minimal/low/medium/high/xhigh)",
                     "  /effort [lvl]   Alias for /thinking",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
@@ -1203,7 +1255,7 @@ impl App {
             }
             "login" => {
                 // Start the login flow.
-                let providers = known_providers(false, false, false, false);
+                let providers = known_providers(false, false, false, false, false);
                 self.login_flow = Some(LoginFlow::new(self.theme.clone(), providers));
             }
             "new" => {
@@ -1725,6 +1777,7 @@ impl App {
                     .map(|id| {
                         let label = match id.as_str() {
                             "off" => "Disabled".to_string(),
+                            "enabled" => "Enabled".to_string(),
                             "minimal" => "Minimal".to_string(),
                             "low" => "Low".to_string(),
                             "medium" => "Medium".to_string(),
@@ -1775,6 +1828,17 @@ impl App {
                     tool_name: None,
                     is_streaming: false,
                 });
+            }
+            TuiEvent::MimoClusterResults {
+                clusters,
+                current_url,
+            } => {
+                if clusters.is_empty() {
+                    self.mimo_cluster_selector.close();
+                } else {
+                    self.mimo_cluster_selector
+                        .open(clusters, current_url.as_deref());
+                }
             }
         }
     }

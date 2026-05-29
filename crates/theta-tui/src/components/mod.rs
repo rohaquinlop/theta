@@ -7,6 +7,7 @@ pub mod chat;
 pub mod editor;
 pub mod fuzzy;
 pub mod login_flow;
+pub mod mimo_cluster;
 pub mod model_selector;
 pub mod session_picker;
 pub mod status;
@@ -14,6 +15,7 @@ pub mod thinking_selector;
 pub mod tree_selector;
 
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
+pub use mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 pub use model_selector::{ModelEntry, ModelSelector};
 pub use session_picker::{SessionInfo, SessionPicker};
 pub use thinking_selector::ThinkingSelector;

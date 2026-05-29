@@ -98,6 +98,18 @@ impl ProviderRegistry {
     pub fn get(&self, api: &Api) -> Option<&dyn Provider> {
         self.providers.get(api).map(|p| p.as_ref())
     }
+
+    /// Set the MiMo cluster base URL on the OpenAI-compatible provider.
+    /// Used after the user runs the latency test and selects a cluster.
+    pub fn set_mimo_base_url(&self, url: &str) {
+        if let Some(provider) = self
+            .providers
+            .get(&Api::OpenAiCompletions)
+            .and_then(|p| p.as_any().downcast_ref::<OpenAiCompatProvider>())
+        {
+            provider.set_mimo_base_url(url);
+        }
+    }
 }
 
 impl Default for ProviderRegistry {
@@ -130,5 +142,6 @@ fn provider_kind_to_api(kind: ProviderKind) -> Option<Api> {
         ProviderKind::DeepSeek => Some(Api::OpenAiCompletions),
         ProviderKind::OpenCode => Some(Api::OpenAiCompletions),
         ProviderKind::OpenCodeGo => Some(Api::OpenAiCompletions),
+        ProviderKind::XiaomiMiMo => Some(Api::OpenAiCompletions),
     }
 }
