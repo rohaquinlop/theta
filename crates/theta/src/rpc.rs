@@ -176,6 +176,7 @@ fn provider_to_string(provider: theta_ai::Provider) -> &'static str {
         theta_ai::Provider::OpenAiCodex => "openai-codex",
         theta_ai::Provider::DeepSeek => "deepseek",
         theta_ai::Provider::OpenCode | theta_ai::Provider::OpenCodeGo => "opencode",
+        theta_ai::Provider::XiaomiMiMo => "xiaomi",
     }
 }
 
@@ -201,6 +202,7 @@ pub async fn resolve_auth_for_model(
         ("openai", theta_ai::Provider::OpenAI),
         ("deepseek", theta_ai::Provider::DeepSeek),
         ("opencode", theta_ai::Provider::OpenCode),
+        ("xiaomi", theta_ai::Provider::XiaomiMiMo),
     ];
     for (prov_str, prov) in &alt_providers {
         if *prov_str == provider {

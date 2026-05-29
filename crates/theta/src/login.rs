@@ -14,6 +14,7 @@ const PROVIDERS: &[(&str, &str, &str)] = &[
     ),
     ("deepseek", "DeepSeek", "API Key"),
     ("opencode", "OpenCode", "API Key"),
+    ("xiaomi", "Xiaomi MiMo", "API Key"),
 ];
 
 /// Login to a provider.
@@ -118,6 +119,7 @@ fn provider_token_url(provider: &str) -> String {
         "openai-codex" => "https://chatgpt.com",
         "deepseek" => "https://platform.deepseek.com/api_keys",
         "opencode" => "https://api.opencode.ai/settings",
+        "xiaomi" => "https://platform.xiaomimimo.com/token-plan",
         other => {
             eprintln!("Unknown provider '{other}'. Opening generic URL.");
             "https://google.com"

@@ -145,6 +145,7 @@ fn provider_to_string(provider: theta_ai::Provider) -> String {
         theta_ai::Provider::OpenAiCodex => "openai-codex".into(),
         theta_ai::Provider::DeepSeek => "deepseek".into(),
         theta_ai::Provider::OpenCode | theta_ai::Provider::OpenCodeGo => "opencode".into(),
+        theta_ai::Provider::XiaomiMiMo => "xiaomi".into(),
     }
 }
 
@@ -173,6 +174,7 @@ async fn resolve_auth(
         ("openai", theta_ai::Provider::OpenAI),
         ("deepseek", theta_ai::Provider::DeepSeek),
         ("opencode", theta_ai::Provider::OpenCode),
+        ("xiaomi", theta_ai::Provider::XiaomiMiMo),
     ];
     for (prov_str, prov) in &alt_providers {
         if prov_str == &provider_str {

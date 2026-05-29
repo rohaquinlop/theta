@@ -116,6 +116,9 @@ pub enum Provider {
     OpenCode,
     #[serde(rename = "opencode-go")]
     OpenCodeGo,
+    /// Xiaomi MiMo — OpenAI-compatible provider.
+    #[serde(rename = "xiaomi")]
+    XiaomiMiMo,
 }
 
 /// Why the model stopped generating.

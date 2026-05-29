@@ -312,6 +312,7 @@ pub fn provider_env_var(provider: &str) -> &'static str {
         "openai-codex" => "OPENAI_CODEX_TOKEN",
         "deepseek" => "DEEPSEEK_API_KEY",
         "opencode" => "OPENCODE_API_KEY",
+        "xiaomi" => "MIMO_API_KEY",
         _ => "",
     }
 }
@@ -509,6 +510,7 @@ impl AuthConfig {
             "openai-codex" => "OPENAI_CODEX_TOKEN",
             "deepseek" => "DEEPSEEK_API_KEY",
             "opencode" => "OPENCODE_API_KEY",
+            "xiaomi" => "MIMO_API_KEY",
             _ => return None,
         };
         std::env::var(env_var).ok()

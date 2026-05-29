@@ -563,6 +563,7 @@ fn provider_token_url(provider: &str) -> &str {
         "openai-codex" => "https://chatgpt.com",
         "deepseek" => "https://platform.deepseek.com/api_keys",
         "opencode" => "https://api.opencode.ai/settings",
+        "xiaomi" => "https://platform.xiaomimimo.com/token-plan",
         _ => "https://google.com",
     }
 }
@@ -573,6 +574,7 @@ pub fn known_providers(
     has_codex_token: bool,
     has_deepseek_key: bool,
     has_opencode_key: bool,
+    has_xiaomi_key: bool,
 ) -> Vec<ProviderEntry> {
     vec![
         ProviderEntry {
@@ -598,6 +600,12 @@ pub fn known_providers(
             name: "OpenCode".into(),
             auth_type: AuthType::ApiKey,
             is_configured: has_opencode_key,
+        },
+        ProviderEntry {
+            id: "xiaomi".into(),
+            name: "Xiaomi MiMo".into(),
+            auth_type: AuthType::ApiKey,
+            is_configured: has_xiaomi_key,
         },
     ]
 }

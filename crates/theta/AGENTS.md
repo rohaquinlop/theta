@@ -46,6 +46,7 @@ JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_leve
 
 - Config: `~/.theta/config.toml` (model default, thinking default, agent safety, compaction, retry, provider, profile, theme).
 - Auth: `~/.theta/auth.json` with env var fallback. OAuth tokens auto-refresh.
+- Supported providers: OpenAI, OpenAI Codex, DeepSeek, OpenCode, Xiaomi MiMo.
 
 ## Conventions
 

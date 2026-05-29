@@ -7,6 +7,7 @@ pub mod codex;
 pub mod deepseek;
 pub mod openai;
 pub mod opencode;
+pub mod xiaomi;
 
 use theta_ai::model::Model;
 use theta_ai::types::Provider;
@@ -23,6 +24,7 @@ impl BuiltInCatalog {
         models.extend(deepseek::models());
         models.extend(opencode::models());
         models.extend(codex::models());
+        models.extend(xiaomi::models());
         Self { models }
     }
 }

@@ -12,9 +12,12 @@ pub enum ThinkingFormat {
     /// OpenAI-style: `reasoning_effort` field in the request.
     #[serde(rename = "openai")]
     OpenAI,
-    /// DeepSeek-style: `thinking: { type: "enabled" }` block.
+    /// DeepSeek-style: `thinking: { type: "enabled", reasoning_effort: ... }` block.
     #[serde(rename = "deepseek")]
     DeepSeek,
+    /// Xiaomi MiMo-style: `thinking: { type: "enabled" }` — binary on/off only.
+    #[serde(rename = "xiaomi")]
+    XiaomiMiMo,
 }
 
 /// Which field to use for max tokens in the API request.
@@ -55,6 +58,10 @@ pub struct ModelCompat {
     /// tool results and subsequent user messages.
     #[serde(default, rename = "requiresAssistantAfterToolResult")]
     pub requires_assistant_after_tool_result: bool,
+    /// Whether to use `api-key` header instead of `Authorization: Bearer`.
+    /// Xiaomi MiMo uses this.
+    #[serde(default, rename = "usesApiKeyHeader")]
+    pub uses_api_key_header: bool,
 }
 
 impl ModelCompat {
@@ -86,6 +93,19 @@ impl ModelCompat {
             // OpenCode endpoints are OpenAI-compatible adapters and commonly
             // expect the classic `max_tokens` field.
             max_tokens_field: Some(MaxTokensField::MaxTokens),
+            ..Default::default()
+        }
+    }
+
+    pub fn for_xiaomi() -> Self {
+        Self {
+            thinking_format: Some(ThinkingFormat::XiaomiMiMo),
+            requires_reasoning_content_on_assistant: true,
+            // MiMo supports usage in non-streaming responses but the
+            // stream_options.include_usage field is OpenAI-specific.
+            supports_usage_in_streaming: false,
+            max_tokens_field: Some(MaxTokensField::MaxCompletionTokens),
+            uses_api_key_header: true,
             ..Default::default()
         }
     }

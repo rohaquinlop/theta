@@ -15,6 +15,7 @@ Compile-time model definitions plus runtime OpenCode model fetch. Implements the
 | `src/deepseek.rs`            | Static DeepSeek model definitions          |
 | `src/opencode.rs`            | Dynamic OpenCode Zen fetch + fallback      |
 | `src/codex.rs`               | Static Codex model definitions             |
+| `src/xiaomi.rs`              | Dynamic Xiaomi MiMo fetch + fallback       |
 
 ## Current Models
 
@@ -22,6 +23,7 @@ Compile-time model definitions plus runtime OpenCode model fetch. Implements the
 - **OpenAI Codex**: same model IDs as OpenAI
 - **DeepSeek**: `deepseek-v4-pro` (1M ctx), `deepseek-v4-flash` (1M ctx)
 - **OpenCode Zen**: fetched from `opencode.ai/zen/v1/models` at runtime
+- **Xiaomi MiMo**: fetched from `api.xiaomimimo.com/v1/models` at runtime (fallback: `mimo-v2.5-pro`, `mimo-v2-pro`, `mimo-v2.5`, `mimo-v2-omni`, `mimo-v2-flash`)
 
 ## Adding a Model
 

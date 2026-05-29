@@ -16,7 +16,7 @@ Provides the unified LLM abstraction layer: types, provider trait, streaming, re
 
 Two providers in `crates/theta-ai/src/providers/`:
 
-1. **`OpenAiCompatProvider`** — handles OpenAI, DeepSeek, OpenCode via `/v1/chat/completions`.
+1. **`OpenAiCompatProvider`** — handles OpenAI, DeepSeek, OpenCode, Xiaomi MiMo via `/v1/chat/completions`. Models fetched dynamically at runtime.
 2. **`OpenAiCodexProvider`** — ChatGPT Plus session-token auth targeting `chatgpt.com/backend-api`, WebSocket + SSE fallback.
 
 ### Per-Model Compat Flags
