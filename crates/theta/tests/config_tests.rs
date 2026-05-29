@@ -93,7 +93,6 @@ fn test_profile_dev_defaults_are_applied() {
     assert_eq!(ac.retry.max_retries, 1);
     assert_eq!(ac.retry.base_delay_ms, 250);
     assert!(!ac.command_policy_strict);
-    assert_eq!(ac.tool_watchdog.hard_timeout_ms, 180_000);
 }
 
 #[test]
@@ -115,7 +114,6 @@ fn test_profile_overrides_take_precedence() {
         profile_overrides: ProfileOverrides {
             max_retries: Some(7),
             command_policy_strict: Some(false),
-            tool_timeout_ms: Some(2_000),
             ..Default::default()
         },
         ..Default::default()
@@ -123,5 +121,4 @@ fn test_profile_overrides_take_precedence() {
     let ac = to_agent_config(&cfg);
     assert_eq!(ac.retry.max_retries, 7);
     assert!(!ac.command_policy_strict);
-    assert_eq!(ac.tool_watchdog.hard_timeout_ms, 2_000);
 }

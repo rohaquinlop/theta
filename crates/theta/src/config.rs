@@ -140,9 +140,6 @@ pub struct AgentSettings {
     /// Warn if tool stalls this long.
     #[serde(default = "default_tool_stall_warning_ms")]
     pub tool_stall_warning_ms: u64,
-    /// Hard timeout for one tool call.
-    #[serde(default = "default_tool_timeout_ms")]
-    pub tool_timeout_ms: u64,
     /// Optional fallback model IDs in preference order.
     #[serde(default)]
     pub provider_fallback_chain: Vec<String>,
@@ -159,7 +156,6 @@ impl Default for AgentSettings {
         Self {
             max_same_tool_call_repeats: default_max_same_tool_call_repeats(),
             tool_stall_warning_ms: default_tool_stall_warning_ms(),
-            tool_timeout_ms: default_tool_timeout_ms(),
             provider_fallback_chain: Vec::new(),
             provider_failure_threshold: default_provider_failure_threshold(),
             provider_open_cooldown_ms: default_provider_open_cooldown_ms(),
@@ -186,8 +182,6 @@ pub struct ProfileOverrides {
     pub provider_timeout_ms: Option<u64>,
     #[serde(default)]
     pub tool_stall_warning_ms: Option<u64>,
-    #[serde(default)]
-    pub tool_timeout_ms: Option<u64>,
     #[serde(default)]
     pub provider_fallback_chain: Option<Vec<String>>,
     #[serde(default)]
@@ -235,9 +229,6 @@ fn default_max_same_tool_call_repeats() -> u32 {
 }
 fn default_tool_stall_warning_ms() -> u64 {
     8_000
-}
-fn default_tool_timeout_ms() -> u64 {
-    60_000
 }
 fn default_provider_failure_threshold() -> u32 {
     3
@@ -540,7 +531,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
         base_delay_ms: u64,
         provider_timeout_ms: u64,
         tool_stall_warning_ms: u64,
-        tool_timeout_ms: u64,
         provider_fallback_chain: Vec<String>,
         provider_failure_threshold: u32,
         provider_open_cooldown_ms: u64,
@@ -554,7 +544,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             base_delay_ms: 250,
             provider_timeout_ms: 90_000,
             tool_stall_warning_ms: 15_000,
-            tool_timeout_ms: 180_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 6,
             provider_open_cooldown_ms: 5_000,
@@ -566,7 +555,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             base_delay_ms: 1_000,
             provider_timeout_ms: 120_000,
             tool_stall_warning_ms: 8_000,
-            tool_timeout_ms: 60_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 3,
             provider_open_cooldown_ms: 30_000,
@@ -578,7 +566,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             base_delay_ms: 1_500,
             provider_timeout_ms: 120_000,
             tool_stall_warning_ms: 5_000,
-            tool_timeout_ms: 45_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 2,
             provider_open_cooldown_ms: 60_000,
@@ -593,7 +580,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
         base.base_delay_ms = tc.retry.base_delay_ms;
         base.provider_timeout_ms = tc.provider.timeout_ms;
         base.tool_stall_warning_ms = tc.agent.tool_stall_warning_ms;
-        base.tool_timeout_ms = tc.agent.tool_timeout_ms;
         base.provider_fallback_chain = tc.agent.provider_fallback_chain.clone();
         base.provider_failure_threshold = tc.agent.provider_failure_threshold;
         base.provider_open_cooldown_ms = tc.agent.provider_open_cooldown_ms;
@@ -612,9 +598,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
     if let Some(v) = tc.profile_overrides.tool_stall_warning_ms {
         base.tool_stall_warning_ms = v;
     }
-    if let Some(v) = tc.profile_overrides.tool_timeout_ms {
-        base.tool_timeout_ms = v;
-    }
     if let Some(v) = &tc.profile_overrides.provider_fallback_chain {
         base.provider_fallback_chain = v.clone();
     }
@@ -632,10 +615,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
     }
 
     // Validation
-    if base.tool_timeout_ms < 1_000 {
-        tracing::warn!("tool_timeout_ms too low; clamping to 1000ms");
-        base.tool_timeout_ms = 1_000;
-    }
     if base.provider_timeout_ms < 5_000 {
         tracing::warn!("provider_timeout_ms too low; clamping to 5000ms");
         base.provider_timeout_ms = 5_000;
@@ -662,7 +641,6 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
         provider_timeout_ms: Some(base.provider_timeout_ms),
         tool_watchdog: theta_agent_core::ToolWatchdogConfig {
             stall_warning_ms: base.tool_stall_warning_ms,
-            hard_timeout_ms: base.tool_timeout_ms,
         },
         provider_fallback_chain: base.provider_fallback_chain,
         provider_circuit_breaker: theta_agent_core::CircuitBreakerConfig {
