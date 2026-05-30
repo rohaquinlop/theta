@@ -429,22 +429,30 @@ fn file_mentions_empty_query_returns_visible_files() {
 }
 
 #[test]
-fn file_mentions_use_git_exclude_standard_when_available() {
+fn file_mentions_include_gitignored_directory_contents() {
     let root = temp_root("git-aware");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/visible.rs"), "").unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/guide.md"), "").unwrap();
     std::fs::write(root.join("ignored.log"), "").unwrap();
-    std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "*.log\ndocs/\n").unwrap();
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(&root)
         .arg("init")
         .output();
 
+    // General search: gitignored files and dirs are excluded.
     let matches = file_mention_matches(&root, "");
-
     assert!(matches.contains(&"src/visible.rs".to_string()));
     assert!(!matches.contains(&"ignored.log".to_string()));
+    assert!(!matches.contains(&"docs/guide.md".to_string()));
+
+    // Typing exact gitignored directory path: contents are listed.
+    let matches = file_mention_matches(&root, "docs/");
+    assert!(matches.contains(&"docs/guide.md".to_string()));
+
     let _ = std::fs::remove_dir_all(root);
 }
 

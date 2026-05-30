@@ -887,8 +887,16 @@ impl Component for Editor {
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    self.accept_autocomplete();
-                    return None;
+                    if self
+                        .autocomplete
+                        .as_ref()
+                        .is_some_and(|ac| !ac.items.is_empty())
+                    {
+                        self.accept_autocomplete();
+                        return None;
+                    }
+                    // No autocomplete items — dismiss and fall through to send.
+                    self.dismiss_autocomplete();
                 }
                 crossterm::event::KeyEvent {
                     code: KeyCode::Char(c),
@@ -1310,8 +1318,9 @@ pub fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: 
 // Fuzzy file matching
 // ---------------------------------------------------------------------------
 
-/// Return Codex-style file mention matches:
-/// gitignore-aware, recursive, relative paths, fuzzy-ranked.
+/// Return file mention matches: recursive, relative paths, fuzzy-ranked.
+/// Respects .gitignore, but expands into gitignored directories when the
+/// user types an exact directory path (e.g. `docs/`).
 pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
     let mut entries = git_tracked_and_untracked_files(base_dir)
         .unwrap_or_else(|| recursive_file_paths(base_dir, query.starts_with('.')));
@@ -1333,6 +1342,23 @@ pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<Stri
             .filter(|path| path.contains(trimmed))
             .collect();
     }
+
+    // If fuzzy search found nothing and the query resolves to a real
+    // directory on disk, list that directory's contents directly.
+    // This lets users navigate into gitignored directories.
+    if filtered.is_empty() {
+        let dir_candidate = trimmed.trim_end_matches('/');
+        let abs_dir = base_dir.join(dir_candidate);
+        if abs_dir.is_dir() {
+            let include_hidden = trimmed.starts_with('.');
+            let mut dir_entries = Vec::new();
+            collect_file_paths(base_dir, &abs_dir, include_hidden, &mut dir_entries);
+            dir_entries.sort();
+            dir_entries.dedup();
+            return dir_entries.into_iter().take(50).collect();
+        }
+    }
+
     filtered.into_iter().take(50).collect()
 }
 
