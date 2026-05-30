@@ -156,6 +156,8 @@ pub enum ThinkingLevel {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
+    #[serde(rename = "max")]
+    Max,
 }
 
 /// Modality / input type the model supports.

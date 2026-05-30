@@ -472,7 +472,7 @@ fn map_default_effort(level: ThinkingLevel) -> String {
         ThinkingLevel::Low => "low".into(),
         ThinkingLevel::Medium => "medium".into(),
         ThinkingLevel::High => "high".into(),
-        ThinkingLevel::XHigh => "max".into(),
+        _ => "xhigh".into(),
     }
 }
 

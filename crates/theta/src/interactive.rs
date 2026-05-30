@@ -527,6 +527,7 @@ fn thinking_level_to_string(level: theta_ai::ThinkingLevel) -> String {
         theta_ai::ThinkingLevel::Medium => "medium".to_string(),
         theta_ai::ThinkingLevel::High => "high".to_string(),
         theta_ai::ThinkingLevel::XHigh => "xhigh".to_string(),
+        theta_ai::ThinkingLevel::Max => "max".to_string(),
     }
 }
 
@@ -1149,6 +1150,7 @@ async fn handle_tui_action(
                 "medium" => theta_ai::ThinkingLevel::Medium,
                 "high" => theta_ai::ThinkingLevel::High,
                 "xhigh" => theta_ai::ThinkingLevel::XHigh,
+                "max" => theta_ai::ThinkingLevel::Max,
                 _ => {
                     let _ = event_tx.send(TuiEvent::Error(format!(
                         "Invalid thinking level: {level}. Use off/enabled/minimal/low/medium/high/xhigh"
