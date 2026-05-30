@@ -214,11 +214,8 @@ impl StatusBar {
         thinking_dots: &str,
         state_color: Color,
     ) {
-        let model_str = if self.ctx_pct > 0 {
-            short_middle(&self.model, 16)
-        } else {
-            short_middle(&self.model, 28)
-        };
+        let model_max_chars = if self.ctx_pct > 0 { 16 } else { 28 };
+        let model_str = short_middle(&self.model, model_max_chars);
         let thinking_str = short_middle(&self.thinking, 10);
 
         let ctx_color = if self.ctx_pct >= 90 {
