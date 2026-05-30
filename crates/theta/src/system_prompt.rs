@@ -66,8 +66,8 @@ pub async fn build_resource_context(working_dir: &Path) -> Vec<ContentBlock> {
             "## Skills
 
 \
-             When a user message matches a skill's description, read its file and follow \
-             the instructions in it."
+             When a user message matches a skill's description, you MUST read the \
+             skill file before responding. Announce the skill name when loading it."
                 .to_string(),
         );
     }

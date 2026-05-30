@@ -243,16 +243,19 @@ impl Chat {
     }
 
     pub fn finish_last(&mut self, role: ChatRole) {
-        if let Some(last) = self.messages.last_mut()
-            && last.role == role
-        {
-            last.is_streaming = false;
+        // Search backwards — the target message may not be the very last
+        // (e.g. tool/skill messages can follow the assistant message).
+        if let Some(msg) = self.messages.iter_mut().rev().find(|m| m.role == role) {
+            msg.is_streaming = false;
             if role == ChatRole::Tool
-                && let Some(name) = last.tool_name.as_deref()
+                && let Some(name) = msg.tool_name.as_deref()
             {
                 self.active_tool_message_idx.remove(name);
             }
-            self.update_last_in_cache();
+            // Find the index for cache update.
+            if let Some(idx) = self.messages.iter().rposition(|m| m.role == role) {
+                self.update_msg_in_cache(idx);
+            }
         }
     }
 
@@ -643,6 +646,14 @@ impl Chat {
     /// replacing its previous range in-place. Avoids full rebuild on every
     /// streaming token delta.
     fn replace_msg_in_cache(&mut self, msg_idx: usize, inner_width: usize) {
+        // Incremental replacement only works for the last message.
+        // Interior messages have inter-message gap lines that the
+        // drain-splice cycle doesn't preserve, causing cached_msg_ranges
+        // to drift out of sync with the actual cached line positions.
+        if msg_idx + 1 < self.messages.len() {
+            self.cache_dirty = true;
+            return;
+        }
         let Some((start, end)) = self.cached_msg_ranges.get(msg_idx).copied() else {
             self.cache_dirty = true;
             return;

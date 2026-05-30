@@ -231,3 +231,65 @@ fn test_clear_messages() {
     assert_eq!(chat.cached_message_count, 0);
     assert!(chat.cache_dirty);
 }
+
+/// Reproduction of the skill-message-rendering bug:
+/// When ToolStart updates an existing tool message and a Skill message follows,
+/// replace_msg_in_cache consumed the inter-message gap line and corrupted
+/// the skill message's cached range.
+#[test]
+fn tool_start_after_skill_message_preserves_skill_in_cache() {
+    const W: usize = 80;
+    let mut chat = Chat::new(Theme::default());
+
+    // Prime the cache with inner width, then clear to start fresh
+    // while keeping cached_inner_width set so append_last_to_cache works.
+    chat.rebuild_render_cache(W);
+    chat.clear_messages();
+
+    // 1. Assistant message
+    chat.add_message(ChatMessage {
+        role: ChatRole::Assistant,
+        text: "Let me read the skill file.".to_string(),
+        tool_name: None,
+        is_streaming: false,
+    });
+    assert_eq!(chat.messages.len(), 1);
+    assert!(!chat.cache_dirty, "cache should be up to date after add_message");
+
+    // 2. ToolCallPrepared → upsert_tool_message creates streaming tool message
+    let idx = chat.upsert_tool_message("read", "read: (preparing...)", true);
+    assert_eq!(chat.messages.len(), 2);
+    assert_eq!(chat.cached_msg_ranges.len(), 2);
+
+    // 3. SkillActivated → add_message inserts skill message after tool
+    chat.add_message(ChatMessage {
+        role: ChatRole::Skill,
+        text: "git-commit".to_string(),
+        tool_name: None,
+        is_streaming: false,
+    });
+    assert_eq!(chat.messages.len(), 3);
+    assert_eq!(chat.cached_msg_ranges.len(), 3);
+    assert_eq!(chat.messages[2].role, ChatRole::Skill);
+
+    // 4. ToolStart → upsert_tool_message updates the existing tool message in-place
+    //    This is the exact scenario: replace_msg_in_cache on interior message (idx 1)
+    //    with a gap (Tool→Skill) between it and the next message (idx 2).
+    let updated_idx = chat.upsert_tool_message("read", "read: SKILL.md (done)", false);
+    assert_eq!(updated_idx, idx, "should update existing tool message, not create new");
+    assert_eq!(chat.messages.len(), 3, "should still have 3 messages");
+
+    // After fix: cache is dirty (fell back to full rebuild path).
+    // Rebuild and verify all messages still have correct cache entries.
+    chat.rebuild_render_cache(W);
+    assert_eq!(
+        chat.cached_msg_ranges.len(),
+        3,
+        "all 3 messages must have cache entries. Got {} ranges",
+        chat.cached_msg_ranges.len(),
+    );
+
+    // Verify skill message is still there
+    assert_eq!(chat.messages[2].role, ChatRole::Skill);
+    assert_eq!(chat.messages[2].text, "git-commit");
+}
