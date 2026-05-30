@@ -211,13 +211,13 @@ async fn handle_tui(
         .model
         .as_deref()
         .or(config.model.default.as_deref())
-        .or(settings.last_model.as_deref())
+        .or(settings.last_model())
         .unwrap_or("gpt-5.5");
     let thinking = cli
         .thinking
         .as_deref()
         .or(config.thinking.default.as_deref())
-        .or(settings.last_thinking.as_deref())
+        .or(settings.last_thinking())
         .unwrap_or("medium");
 
     let prompt = if args.text.is_empty() {
