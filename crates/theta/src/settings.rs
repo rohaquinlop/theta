@@ -15,10 +15,13 @@ pub struct ThetaSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
 
-    /// Per-model thinking level map: model_id → thinking level.
-    /// Enables restoring the last used thinking level when switching models.
+    /// Per-provider, per-model thinking level map.
+    /// Outer key: provider string ("openai", "deepseek", etc.),
+    /// inner key: model_id, value: thinking level.
+    /// Enables restoring the last used thinking level when switching models
+    /// across different providers that may share model IDs.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub model_thinking_map: HashMap<String, String>,
+    pub model_thinking_map: HashMap<String, HashMap<String, String>>,
 
     /// Last used thinking level (global fallback, kept for backward compat).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,17 +102,20 @@ const fn default_max_context_window() -> Option<u32> {
 }
 
 impl ThetaSettings {
-    /// Get the thinking level for a specific model, falling back to `last_thinking`.
-    pub fn thinking_for_model(&self, model_id: &str) -> Option<&str> {
+    /// Get the thinking level for a specific provider+model, falling back to `last_thinking`.
+    pub fn thinking_for_model(&self, provider: &str, model_id: &str) -> Option<&str> {
         self.model_thinking_map
-            .get(model_id)
+            .get(provider)
+            .and_then(|map| map.get(model_id))
             .map(|s| s.as_str())
             .or(self.last_thinking.as_deref())
     }
 
-    /// Record the thinking level used for a specific model.
-    pub fn set_model_thinking(&mut self, model_id: &str, thinking: &str) {
+    /// Record the thinking level used for a specific provider+model.
+    pub fn set_model_thinking(&mut self, provider: &str, model_id: &str, thinking: &str) {
         self.model_thinking_map
+            .entry(provider.to_string())
+            .or_default()
             .insert(model_id.to_string(), thinking.to_string());
         // Keep last_thinking in sync as a global fallback.
         self.last_thinking = Some(thinking.to_string());

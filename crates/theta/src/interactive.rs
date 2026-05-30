@@ -188,7 +188,7 @@ pub async fn run_tui(
         // Persist the model + thinking for the next session.
         let mut s = crate::settings::load_settings().await;
         s.last_model = Some(model_id.clone());
-        s.set_model_thinking(&model_id, thinking);
+        s.set_model_thinking(&provider_to_string(model.provider), &model_id, thinking);
         crate::settings::save_settings(&s).await.ok();
     }
 
@@ -913,7 +913,11 @@ async fn handle_tui_action(
                                         // Persist model + thinking.
                                         let mut s = crate::settings::load_settings().await;
                                         s.last_model = Some(codex_model.id.clone());
-                                        s.set_model_thinking(&codex_model.id, thinking);
+                                        s.set_model_thinking(
+                                            &provider_to_string(codex_model.provider),
+                                            &codex_model.id,
+                                            thinking,
+                                        );
                                         crate::settings::save_settings(&s).await.ok();
                                     }
                                     Err(e) => {
@@ -987,7 +991,11 @@ async fn handle_tui_action(
                                 // Persist model + thinking.
                                 let mut s = crate::settings::load_settings().await;
                                 s.last_model = Some(model_id.to_string());
-                                s.set_model_thinking(model_id, thinking);
+                                s.set_model_thinking(
+                                    &provider_to_string(model.provider),
+                                    model_id,
+                                    thinking,
+                                );
                                 crate::settings::save_settings(&s).await.ok();
                             }
                             Err(e) => {
@@ -1060,7 +1068,7 @@ async fn handle_tui_action(
                 // falling back to the current agent thinking level.
                 let (saved_thinking, _had_saved) = {
                     let s = crate::settings::load_settings().await;
-                    match s.thinking_for_model(&model_id) {
+                    match s.thinking_for_model(&provider, &model_id) {
                         Some(t) => (t.to_string(), true),
                         None => {
                             let state = agent.state().await;
@@ -1123,7 +1131,7 @@ async fn handle_tui_action(
                 // Persist model + thinking preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
                 s.last_model = Some(model_id.to_string());
-                s.set_model_thinking(&model_id, &current_thinking);
+                s.set_model_thinking(&provider, &model_id, &current_thinking);
                 crate::settings::save_settings(&s).await.ok();
                 acknowledge(event_tx);
             } else {
@@ -1165,7 +1173,11 @@ async fn handle_tui_action(
             // Read current model ID from agent state.
             {
                 let state = agent.state().await;
-                s.set_model_thinking(&state.model.id, &normalized);
+                s.set_model_thinking(
+                    &provider_to_string(state.model.provider),
+                    &state.model.id,
+                    &normalized,
+                );
             }
             crate::settings::save_settings(&s).await.ok();
             let _ = event_tx.send(TuiEvent::ThinkingSet { level: normalized });
