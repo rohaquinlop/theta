@@ -19,15 +19,15 @@ fn response_contract_contains_execution_continuity() {
 }
 
 #[test]
-fn response_contract_contains_analysis_vs_execution() {
-    assert!(RESPONSE_CONTRACT.contains("ANALYZE AND REPORT"));
-    assert!(RESPONSE_CONTRACT.contains("IMPLEMENT"));
+fn response_contract_contains_analysis_guard() {
+    assert!(RESPONSE_CONTRACT.contains("do not implement changes"));
+    assert!(RESPONSE_CONTRACT.contains("Summarize findings"));
 }
 
 #[test]
 fn response_contract_contains_tool_discipline() {
-    assert!(RESPONSE_CONTRACT.contains("3-5 files"));
-    assert!(RESPONSE_CONTRACT.contains("function-calling"));
+    assert!(RESPONSE_CONTRACT.contains("Read files before editing"));
+    assert!(RESPONSE_CONTRACT.contains("Do not repeat identical tool calls"));
 }
 
 #[test]
@@ -59,24 +59,21 @@ fn response_contract_has_resource_section() {
 }
 
 #[test]
-fn extension_guardrails_has_trigger_phrases() {
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("create an extension"));
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("write an extension"));
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("add a tool hook"));
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("add a TUI status"));
+fn extension_guardrails_scopes_to_theta() {
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("their own project"));
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("extend Theta's behavior"));
 }
 
 #[test]
 fn extension_guardrails_rejects_general_language() {
-    assert!(
-        EXTENSION_CREATION_GUARDRAILS
-            .contains("Do NOT create an extension from general task language")
-    );
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("Do not create an extension"));
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("working on their own project"));
 }
 
 #[test]
-fn extension_guardrails_references_rhai_api_docs() {
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("crates/theta-script/AGENTS.md"));
+fn extension_guardrails_has_ambiguity_fallback() {
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("extend theta"));
+    assert!(EXTENSION_CREATION_GUARDRAILS.contains("skill, extension, or code change"));
 }
 
 #[test]
