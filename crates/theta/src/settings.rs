@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Persistent settings stored across sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +20,11 @@ pub struct ThetaSettings {
     /// inner key: model_id, value: thinking level.
     /// Enables restoring the last used thinking level when switching models
     /// across different providers that may share model IDs.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "deserialize_model_thinking_map"
+    )]
     pub model_thinking_map: HashMap<String, HashMap<String, String>>,
 
     /// Last used thinking level (global fallback, kept for backward compat).
@@ -138,6 +142,37 @@ impl ThetaSettings {
     }
 }
 
+/// Custom deserializer for `model_thinking_map` that accepts both:
+/// - New format: `{"openai": {"gpt-5": "high"}}` (provider → model_id → thinking)
+/// - Old format: `{"gpt-5": "high"}` (flat model_id → thinking)
+///
+/// The old format is silently discarded (we can't know the provider),
+/// but critically this does NOT fail the entire struct parse — preserving
+/// favorites, disabled models, and all other settings fields.
+fn deserialize_model_thinking_map<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, HashMap<String, String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Object(map) => {
+            // If the first value is a string, this is the old flat format.
+            // Silently return empty map rather than failing.
+            if map.values().any(|v| v.is_string()) {
+                tracing::warn!(
+                    "settings.json contains old flat model_thinking_map; discarding (re-save will upgrade)"
+                );
+                return Ok(HashMap::new());
+            }
+            // Otherwise deserialize as the new nested format.
+            HashMap::deserialize(serde_json::Value::Object(map)).map_err(serde::de::Error::custom)
+        }
+        _ => Ok(HashMap::new()),
+    }
+}
+
 impl Default for ThetaSettings {
     fn default() -> Self {
         Self {
@@ -163,7 +198,13 @@ impl Default for ThetaSettings {
 pub async fn load_settings() -> ThetaSettings {
     let path = settings_path();
     match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(settings) => settings,
+            Err(e) => {
+                tracing::warn!("Failed to parse settings.json, using defaults: {e}");
+                ThetaSettings::default()
+            }
+        },
         Err(_) => ThetaSettings::default(),
     }
 }
@@ -198,4 +239,67 @@ pub enum SettingsError {
 
     #[error("failed to serialize settings: {0}")]
     Serialize(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_flat_model_thinking_map_does_not_crash() {
+        // Old format (flat model_id → thinking) must not fail the entire struct parse.
+        let json = r#"{
+            "last_model": "gpt-5.5",
+            "model_thinking_map": {
+                "gpt-5.5": "high",
+                "deepseek-v4-pro": "max"
+            },
+            "last_thinking": "medium",
+            "favorite_models": ["gpt-5.5", "o3"],
+            "disabled_models": ["gpt-5-nano"]
+        }"#;
+        let settings: ThetaSettings = serde_json::from_str(json).expect("old format should parse");
+        // Old map is discarded (can't know provider), but nothing else is lost.
+        assert!(settings.model_thinking_map.is_empty());
+        assert_eq!(settings.last_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(settings.last_thinking.as_deref(), Some("medium"));
+        assert_eq!(settings.favorite_models, vec!["gpt-5.5", "o3"]);
+        assert_eq!(settings.disabled_models, vec!["gpt-5-nano"]);
+    }
+
+    #[test]
+    fn new_nested_model_thinking_map_parses_correctly() {
+        let json = r#"{
+            "model_thinking_map": {
+                "openai": {"gpt-5.5": "high"},
+                "deepseek": {"deepseek-v4-pro": "max"}
+            },
+            "favorite_models": ["gpt-5.5"]
+        }"#;
+        let settings: ThetaSettings = serde_json::from_str(json).expect("new format should parse");
+        assert_eq!(
+            settings
+                .model_thinking_map
+                .get("openai")
+                .and_then(|m| m.get("gpt-5.5")),
+            Some(&"high".to_string())
+        );
+        assert_eq!(
+            settings
+                .model_thinking_map
+                .get("deepseek")
+                .and_then(|m| m.get("deepseek-v4-pro")),
+            Some(&"max".to_string())
+        );
+        assert_eq!(settings.favorite_models, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    fn missing_model_thinking_map_defaults_to_empty() {
+        let json = r#"{"last_model": "gpt-5.5", "favorite_models": ["o3"]}"#;
+        let settings: ThetaSettings =
+            serde_json::from_str(json).expect("missing field should parse");
+        assert!(settings.model_thinking_map.is_empty());
+        assert_eq!(settings.favorite_models, vec!["o3"]);
+    }
 }
