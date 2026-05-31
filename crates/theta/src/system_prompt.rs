@@ -264,7 +264,7 @@ pub fn build_tools_prompt(working_dir: &Path) -> String {
         "You have access to these tools via native function-calling. Invoke tools directly, not by writing XML or pseudo-calls in text.\n\n",
     );
     p.push_str(
-        "Use `read`, `write`, and `edit` for all file operations. Use `bash` only for shell commands that these tools cannot handle.\n\n",
+        "**CRITICAL — Tool Discipline:** Use `read`, `write`, and `edit` for ALL file operations (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands that these tools cannot handle: running tests, building, git operations, package managers, etc. Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or manipulate files when the `read`, `write`, or `edit` tools can do the job.\n\n",
     );
 
     for tool in &tools {
@@ -390,7 +390,7 @@ Each reply must be one of:
 
 ## Tool Discipline
 
-- Use `read`, `write`, and `edit` for all file operations. Use `bash` only for shell commands these tools cannot handle.
+- **CRITICAL:** Use `read`, `write`, and `edit` for ALL file operations (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands these tools cannot handle: running tests, builds, git, package managers, etc. Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or manipulate files when the dedicated file tools can do the job.
 - Read files before editing them.
 - When a tool call fails, attempt to fix the issue and retry once before reporting FAILED.
 - Do not repeat identical tool calls in a loop.
