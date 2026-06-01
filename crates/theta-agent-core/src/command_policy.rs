@@ -43,6 +43,10 @@ pub fn evaluate_tool_call(tc: &ToolCall, strict: bool) -> SafetyDecision {
     }
 }
 
+/// Classifies a tool call for user-facing authorization prompts.
+///
+/// Wired into the tool execution path by issue 1.3 (not yet implemented).
+#[allow(dead_code)]
 pub fn required_user_authorization(tc: &ToolCall) -> Option<AuthorizationClass> {
     match tc.name.as_str() {
         "write" | "edit" => Some(AuthorizationClass::FileMutation),
