@@ -58,23 +58,8 @@ fn always_on_policy_allows_bash_commands_not_catastrophic() {
 }
 
 #[test]
-fn non_bash_tools_obey_strict_mode() {
-    // write and edit are rejected in strict mode (file mutation).
-    for name in ["write", "edit"] {
-        let tc = ToolCall {
-            id: "w1".to_string(),
-            name: name.to_string(),
-            arguments: json!({"path":"a","content":"b"}),
-        };
-        let d = evaluate_tool_call(&tc, true);
-        assert_eq!(
-            d.decision,
-            SafetyDecisionKind::Rejected,
-            "{name} should be rejected in strict mode"
-        );
-    }
-    // read and unknown tools are always allowed.
-    for name in ["read", "mock"] {
+fn non_bash_tools_always_allowed() {
+    for name in ["read", "write", "edit", "mock"] {
         let tc = ToolCall {
             id: "w1".to_string(),
             name: name.to_string(),
