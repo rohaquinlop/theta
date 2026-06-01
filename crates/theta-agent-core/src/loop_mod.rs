@@ -680,7 +680,15 @@ async fn run_llm_stream(
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
     emit_events: bool,
-) -> Result<(Message, Option<StopReason>, usize, Vec<theta_ai::UnresolvedToolCall>), AgentError> {
+) -> Result<
+    (
+        Message,
+        Option<StopReason>,
+        usize,
+        Vec<theta_ai::UnresolvedToolCall>,
+    ),
+    AgentError,
+> {
     let retry = &config.retry;
     let fallback_models = resolve_fallback_models(state, config);
     let mut stream = None;
@@ -759,6 +767,9 @@ async fn run_llm_stream(
     };
 
     let mut accumulator = EventAccumulator::new();
+    // Suppress duplicate stream errors: a single transport failure (e.g. decode
+    // error) causes every subsequent SSE read to fail, spamming the TUI.
+    let mut stream_error_emitted = false;
 
     // Consume the stream, emitting events as we go.
     while let Some(event) = stream.next().await {
@@ -806,7 +817,9 @@ async fn run_llm_stream(
             AssistantMessageEvent::ToolCallEnd { id } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallEnd { id: id.clone() });
             }
-            AssistantMessageEvent::Error { code, message } if emit_events => {
+            AssistantMessageEvent::Error { code, message }
+                if emit_events && !std::mem::replace(&mut stream_error_emitted, true) =>
+            {
                 let _ = event_tx.send(AgentEvent::Error {
                     message: format!("provider stream error: code={code}, {message}"),
                 });
@@ -899,10 +912,7 @@ async fn build_context(
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
     messages: &[Message],
-) -> (
-    Context,
-    Option<CompactionStats>,
-) {
+) -> (Context, Option<CompactionStats>) {
     let system = if state.system_prompt.is_empty() {
         None
     } else {
