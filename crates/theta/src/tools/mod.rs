@@ -8,7 +8,7 @@ pub mod edit;
 pub mod read;
 pub mod write;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub use bash::BashTool;
 pub use edit::EditTool;
@@ -108,16 +108,46 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
     }
 }
 
-/// Resolve a path relative to the tool context's working directory.
-/// Sanitizes against path traversal attacks (.. components).
+/// Resolve a tool path against the working directory.
+///
+/// - Absolute paths are honored directly (not clamped to working dir).
+/// - Relative paths are resolved against `working_dir`.
+/// - `..` components are collapsed manually. Symlinks are NOT followed,
+///   so a symlink inside the project pointing to /etc/passwd resolves
+///   as `working_dir/symlink_name`, not the target.
+/// - If `..` traversal escapes `working_dir`, the path is clamped.
 pub fn resolve_path(ctx: &ToolContext, path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    let resolved = if p.is_absolute() {
-        p
+    let p = Path::new(path);
+
+    if p.is_absolute() {
+        // Absolute paths are honored directly — no clamping.
+        return manually_resolve(p);
+    }
+
+    // Resolve relative path against working_dir.
+    let resolved = manually_resolve(&ctx.working_dir.join(p));
+
+    // Security: if .. traversal escaped working_dir, clamp it.
+    if resolved.starts_with(&ctx.working_dir) {
+        resolved
     } else {
-        ctx.working_dir.join(p)
-    };
-    resolved.canonicalize().unwrap_or(resolved)
+        ctx.working_dir.clone()
+    }
+}
+
+/// Resolve `.` and `..` components manually without following symlinks.
+fn manually_resolve(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn classify_io_error(err: &std::io::Error) -> &'static str {
