@@ -206,14 +206,16 @@ impl EventAccumulator {
         }
 
         // Tool call blocks (only completed ones with valid JSON).
-        for tc in &self.tool_calls {
+        // Drain tool_calls so the accumulator is truly single-use:
+        // all three buffers (text, thinking, tool_calls) are cleared.
+        for tc in std::mem::take(&mut self.tool_calls) {
             if tc.done {
                 // Try to parse JSON arguments; fall back to raw string.
                 let arguments = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(tc.arguments.clone()));
+                    .unwrap_or(serde_json::Value::String(tc.arguments));
                 blocks.push(ContentBlock::ToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
+                    id: tc.id,
+                    name: tc.name,
                     arguments,
                 });
             }
