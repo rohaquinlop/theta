@@ -244,6 +244,11 @@ async fn run_single_turn(
     let mut tool_round: u32 = 0;
     let mut empty_assistant_retries: u32 = 0;
 
+    // Sanitized transcript cache: recomputed on first round or when non-tool-result
+    // messages appear (model changes, steering). Subsequent rounds only add tool
+    // results, which don't need ID normalization — just push to cache.
+    let mut sanitized_cache: Vec<Message> = Vec::new();
+
     // Consecutive identical round guard: only triggers when the model produces
     // the same set of tool calls round after round with no variation. A round
     // whose tool calls differ from the previous round resets the counter — the
@@ -286,9 +291,25 @@ async fn run_single_turn(
             return Ok(());
         }
 
-        // Build context (with compaction).
-        let (context, compaction_stats, replay_stats) =
-            build_context(state, provider, config, event_tx).await;
+        // Build context (with compaction). Use cached sanitized transcript —
+        // only recompute on first round or when non-tool-result messages appear.
+        if sanitized_cache.len() < state.messages.len() {
+            let new_start = sanitized_cache.len();
+            let new_msgs = &state.messages[new_start..];
+            let needs_full = sanitized_cache.is_empty()
+                || new_msgs
+                    .iter()
+                    .any(|m| !matches!(m, Message::ToolResult { .. }));
+            if needs_full {
+                let (full, _replay) =
+                    theta_ai::sanitize_messages_for_replay(&state.messages, &state.model);
+                sanitized_cache = full;
+            } else {
+                sanitized_cache.extend(new_msgs.iter().cloned());
+            }
+        }
+        let (context, compaction_stats) =
+            build_context(state, provider, config, event_tx, &sanitized_cache).await;
 
         if let Some(stats) = compaction_stats {
             let _ = event_tx.send(AgentEvent::ContextCompacted {
@@ -297,15 +318,6 @@ async fn run_single_turn(
                 tokens_after: stats.tokens_after,
             });
         }
-        if let Some(stats) = replay_stats {
-            let _ = event_tx.send(AgentEvent::ReplaySanitized {
-                dropped_assistant_messages: stats.dropped_assistant_messages,
-                synthesized_tool_results: stats.synthesized_tool_results,
-                normalized_tool_call_ids: stats.normalized_tool_call_ids,
-                deduped_tool_results: stats.deduped_tool_results,
-            });
-        }
-
         tracing::debug!(
             turn = turn_index,
             round = tool_round,
@@ -847,10 +859,10 @@ async fn build_context(
     provider: &dyn LlmProvider,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
+    messages: &[Message],
 ) -> (
     Context,
     Option<CompactionStats>,
-    Option<theta_ai::ReplaySanitizationStats>,
 ) {
     let system = if state.system_prompt.is_empty() {
         None
@@ -865,15 +877,12 @@ async fn build_context(
     let res_tokens: u32 = state.resource_context_tokens();
     let effective_sys_tokens = sys_tokens + res_tokens;
 
-    let (sanitized_messages, replay_stats) =
-        theta_ai::sanitize_messages_for_replay(&state.messages, &state.model);
-
     // Compaction: only call compact_messages when enabled. When disabled,
-    // use sanitized_messages directly — no clone or token scan needed.
+    // use the cached sanitized messages directly — no clone or token scan needed.
     let (mut messages, compaction_stats) = if config.compaction.enabled {
         let effective_window = config.effective_context_window(state.model.context_window);
         let mut compact_result = crate::compact::compact_messages(
-            &sanitized_messages,
+            messages,
             effective_sys_tokens,
             effective_window,
             &config.compaction,
@@ -911,7 +920,7 @@ async fn build_context(
         });
         (compact_result.messages, stats)
     } else {
-        (sanitized_messages, None)
+        (messages.to_vec(), None)
     };
 
     // Prepend resource context (skills, extensions) — never subject to compaction.
@@ -937,7 +946,6 @@ async fn build_context(
             thinking_level: Some(state.thinking_level),
         },
         compaction_stats,
-        replay_stats.changed().then_some(replay_stats),
     )
 }
 
