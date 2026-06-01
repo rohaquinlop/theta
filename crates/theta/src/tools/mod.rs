@@ -139,11 +139,12 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
             lines.drain(..drop_lines);
 
             let mut remaining: String = lines.join("\n");
-            // Also trim bytes from the head, finding a valid UTF-8 boundary.
-            if bytes_to_drop > 0 && remaining.len() > bytes_to_drop {
-                let byte_start = bytes_to_drop.min(remaining.len());
-                // Walk forward to next char boundary.
-                let mut start = byte_start;
+            // Recalculate byte excess after line-draining, then trim from
+            // the head to hit the exact byte limit. Walk forward to the
+            // next char boundary so the slice is always valid UTF-8.
+            let byte_excess = remaining.len().saturating_sub(limits.max_bytes);
+            if byte_excess > 0 {
+                let mut start = byte_excess.min(remaining.len());
                 while start < remaining.len() && !remaining.is_char_boundary(start) {
                     start += 1;
                 }
