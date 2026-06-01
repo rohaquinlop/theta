@@ -543,7 +543,7 @@ async fn test_agent_stops_repeated_identical_tool_call_loop() {
     loop {
         match rx.recv().await.unwrap() {
             AgentEvent::Error { message } => {
-                if message.contains("repeated identical tool call loop") {
+                if message.contains("stopped repeating") || message.contains("repeated identical") {
                     saw_repeat_guard_error = true;
                 }
             }

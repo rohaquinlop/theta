@@ -1,7 +1,8 @@
 //! Agent state: the mutable transcript and configuration.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use theta_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
 
@@ -42,6 +43,32 @@ pub struct AgentState {
     pub(crate) resource_context_tokens: u32,
     /// Cached theta_ai::Tool list. Cheap clone per turn.
     pub(crate) theta_ai_tools: Vec<Tool>,
+    /// Per-model-id circuit breaker state. Scoped to this agent instance
+    /// so concurrent agents (tests, multi-session) don't share breakers.
+    pub(crate) circuit_breakers: HashMap<String, BreakerState>,
+}
+
+/// Circuit breaker per model key. Tracks consecutive transient failures
+/// and enforces a cooldown period when the breaker opens.
+#[derive(Debug, Clone)]
+pub struct BreakerState {
+    pub consecutive_failures: u32,
+    pub opened_at: Option<Instant>,
+}
+
+impl BreakerState {
+    pub fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            opened_at: None,
+        }
+    }
+}
+
+impl Default for BreakerState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentState {
@@ -64,6 +91,7 @@ impl AgentState {
             system_prompt_tokens: 0,
             resource_context_tokens: 0,
             theta_ai_tools: Vec::new(),
+            circuit_breakers: HashMap::new(),
         }
     }
 

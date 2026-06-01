@@ -45,6 +45,10 @@ pub struct Agent {
 
     /// Steering messages that interrupt the current turn mid-stream.
     steering_queue: Arc<Mutex<Vec<(Message, u64)>>>,
+
+    /// Fast-path flag: true when steering_queue has items. Avoids locking the
+    /// mutex on every inner-loop iteration just to check for pending steering.
+    steering_has_items: Arc<AtomicBool>,
 }
 
 /// Handle for an in-progress agent run.
@@ -71,6 +75,7 @@ impl Agent {
             config: AgentLoopConfig::default(),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_queue: Arc::new(Mutex::new(Vec::new())),
+            steering_has_items: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -381,6 +386,7 @@ impl Agent {
         // and the loop see the same queues.
         let follow_up_queue = self.follow_up_queue.clone();
         let steering_queue = self.steering_queue.clone();
+        let steering_has_items = self.steering_has_items.clone();
 
         {
             let mut state = self.state.write().await;
@@ -394,6 +400,7 @@ impl Agent {
                 abort_token,
                 steering_abort,
                 steering_queue,
+                steering_has_items,
                 follow_up_queue,
             )
             .await?;
@@ -437,6 +444,7 @@ impl Agent {
                 .expect("steering_queue lock poisoned");
             queue.push((msg, now_ms()));
         }
+        self.steering_has_items.store(true, Ordering::Relaxed);
 
         // Signal the per-stream abort so the inner loop restarts.
         if let Ok(run) = self.active_run.lock()

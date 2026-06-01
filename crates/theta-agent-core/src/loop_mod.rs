@@ -9,7 +9,6 @@
 //! Inner loop: LLM call → tool execution → tool results → repeat.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -30,26 +29,9 @@ use crate::error::AgentError;
 use crate::events::{AgentEvent, TurnDecisionReason};
 use crate::hooks::Hooks;
 use crate::state::AgentState;
+use crate::state::BreakerState;
 use crate::tools;
 use crate::types::{AgentLoopConfig, CompactionStrategy, RunReport, ToolCall, TurnEndReason};
-
-#[derive(Debug, Clone)]
-struct BreakerState {
-    consecutive_failures: u32,
-    opened_at: Option<Instant>,
-}
-
-impl BreakerState {
-    fn new() -> Self {
-        Self {
-            consecutive_failures: 0,
-            opened_at: None,
-        }
-    }
-}
-
-static CIRCUIT_BREAKERS: LazyLock<Mutex<HashMap<String, BreakerState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Drain all messages from a shared queue and add them to state.
 fn drain_queue(queue: &Arc<Mutex<Vec<(Message, u64)>>>, state: &mut AgentState) -> bool {
@@ -65,9 +47,8 @@ fn drain_queue(queue: &Arc<Mutex<Vec<(Message, u64)>>>, state: &mut AgentState) 
 
 /// Check if the abort token has been triggered, accounting for steering.
 macro_rules! check_abort {
-    ($token:expr, $steering:expr) => {
-        let has_steering = !$steering.lock().expect("lock").is_empty();
-        if !has_steering {
+    ($token:expr, $has_items:expr) => {
+        if !$has_items.load(Ordering::Relaxed) {
             if let Some(ref token) = $token {
                 if token.is_cancelled() {
                     return Err(AgentError::Aborted);
@@ -89,6 +70,7 @@ pub async fn run_prompt_loop(
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
     steering_queue: Arc<Mutex<Vec<(Message, u64)>>>,
+    steering_has_items: Arc<AtomicBool>,
     follow_up_queue: Arc<Mutex<Vec<(Message, u64)>>>,
 ) -> Result<(), AgentError> {
     let _ = event_tx.send(AgentEvent::AgentStart);
@@ -122,6 +104,7 @@ pub async fn run_prompt_loop(
         abort_token,
         steering_abort,
         steering_queue,
+        steering_has_items,
         follow_up_queue,
     )
     .await;
@@ -171,12 +154,13 @@ async fn run_outer_loop(
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
     steering_queue: Arc<Mutex<Vec<(Message, u64)>>>,
+    steering_has_items: Arc<AtomicBool>,
     follow_up_queue: Arc<Mutex<Vec<(Message, u64)>>>,
 ) -> Result<(), AgentError> {
     let mut turn_index: u32 = 0;
 
     loop {
-        check_abort!(abort_token, steering_queue);
+        check_abort!(abort_token, steering_has_items);
 
         run_single_turn(
             state,
@@ -188,6 +172,7 @@ async fn run_outer_loop(
             abort_token.clone(),
             steering_abort.clone(),
             &steering_queue,
+            &steering_has_items,
         )
         .await?;
 
@@ -209,6 +194,7 @@ async fn run_outer_loop(
         // Drain them into state for the next turn.
         drain_queue(&follow_up_queue, state);
         drain_queue(&steering_queue, state);
+        steering_has_items.store(false, Ordering::Relaxed);
 
         turn_index += 1;
     }
@@ -234,6 +220,7 @@ async fn run_single_turn(
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
     steering_queue: &Arc<Mutex<Vec<(Message, u64)>>>,
+    steering_has_items: &Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
     let _ = event_tx.send(AgentEvent::TurnStart { turn_index });
     let turn_id = format!("turn-{}-{turn_index}", now_ms());
@@ -256,13 +243,20 @@ async fn run_single_turn(
     // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
     let mut empty_assistant_retries: u32 = 0;
-    let mut repeated_tool_signature_counts: HashMap<String, u32> = HashMap::new();
-    let max_same_tool_signature_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
+
+    // Consecutive identical round guard: only triggers when the model produces
+    // the same set of tool calls round after round with no variation. A round
+    // whose tool calls differ from the previous round resets the counter — the
+    // model is trying something different (e.g., edit + re-check).
+    let mut prev_round_signatures: Vec<String> = Vec::new();
+    let mut consecutive_identical_rounds: u32 = 0;
+    let max_same_tool_call_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
 
     loop {
         // Drain any steering messages — they interrupt the current turn.
         drain_queue(steering_queue, state);
-        check_abort!(abort_token, steering_queue);
+        steering_has_items.store(false, Ordering::Relaxed);
+        check_abort!(abort_token, steering_has_items);
 
         if let Some(max_rounds) = config.max_tool_rounds
             && tool_round >= max_rounds
@@ -451,29 +445,43 @@ async fn run_single_turn(
                     });
                 }
 
-                // Repeated tool signature detection.
-                for tc in &tool_calls {
-                    let signature = format!("{}:{}", tc.name, tc.arguments);
-                    let count = repeated_tool_signature_counts
-                        .entry(signature.clone())
-                        .and_modify(|c| *c += 1)
-                        .or_insert(1);
-                    if *count > max_same_tool_signature_repeats {
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: format!(
-                                "agent stopped repeated identical tool call loop: '{}' exceeded {} repeats",
-                                signature, max_same_tool_signature_repeats
-                            ),
-                        });
-                        state.last_turn_end_reason = Some(TurnEndReason::Completed);
-                        let _ = event_tx.send(AgentEvent::TurnTerminated {
-                            reason: TurnEndReason::Completed,
-                            details: "stopped due to repeated tool calls".to_string(),
-                            turn: turn_index,
-                            round: tool_round,
-                        });
-                        return Ok(());
-                    }
+                // Consecutive identical round guard: compare the sorted,
+                // deduplicated set of tool call signatures for this round
+                // against the previous round. Only counts as a repeat if
+                // the model requests exactly the same operations.
+                let mut current_signatures: Vec<String> = tool_calls
+                    .iter()
+                    .map(|tc| format!("{}:{}", tc.name, tc.arguments))
+                    .collect();
+                current_signatures.sort();
+                current_signatures.dedup();
+
+                if current_signatures == prev_round_signatures {
+                    consecutive_identical_rounds += 1;
+                } else {
+                    consecutive_identical_rounds = 1;
+                    prev_round_signatures = current_signatures.clone();
+                }
+
+                if consecutive_identical_rounds > max_same_tool_call_repeats {
+                    let first_sig = current_signatures
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| String::from("<none>"));
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: format!(
+                            "agent stopped repeating identical tool calls: '{}' in {} consecutive rounds (exceeded {} repeats)",
+                            first_sig, consecutive_identical_rounds, max_same_tool_call_repeats
+                        ),
+                    });
+                    state.last_turn_end_reason = Some(TurnEndReason::Completed);
+                    let _ = event_tx.send(AgentEvent::TurnTerminated {
+                        reason: TurnEndReason::Completed,
+                        details: "stopped due to repeated tool calls".to_string(),
+                        turn: turn_index,
+                        round: tool_round,
+                    });
+                    return Ok(());
                 }
 
                 // Execute tools. Command policy runs as always-on safety net:
@@ -545,6 +553,7 @@ async fn run_single_turn(
             Err(AgentError::Aborted) => {
                 state.is_streaming = false;
                 if drain_queue(steering_queue, state) {
+                    steering_has_items.store(false, Ordering::Relaxed);
                     steering_abort.store(false, Ordering::SeqCst);
                     tracing::debug!("aborted for steering, continuing turn");
                     continue;
@@ -613,7 +622,7 @@ async fn run_single_turn(
 /// Includes retry logic with exponential backoff for transient provider errors.
 #[allow(clippy::too_many_arguments)]
 async fn run_llm_stream(
-    state: &AgentState,
+    state: &mut AgentState,
     provider: &dyn LlmProvider,
     context: &Context,
     options: &StreamOptions,
@@ -642,7 +651,7 @@ async fn run_llm_stream(
         }
         selected_model = candidate_model.clone();
         let key = format!("{:?}:{}", selected_model.provider, selected_model.id);
-        if let Some(retry_in_ms) = breaker_retry_in_ms(&key, config) {
+        if let Some(retry_in_ms) = breaker_retry_in_ms(&mut state.circuit_breakers, &key, config) {
             if emit_events {
                 let _ = event_tx.send(AgentEvent::ProviderCircuitOpen { key, retry_in_ms });
             }
@@ -653,7 +662,7 @@ async fn run_llm_stream(
         loop {
             match provider.stream(&selected_model, context, options).await {
                 Ok(s) => {
-                    breaker_record_success(&key);
+                    breaker_record_success(&mut state.circuit_breakers, &key);
                     stream = Some(s);
                     break;
                 }
@@ -661,7 +670,12 @@ async fn run_llm_stream(
                     last_error = Some(e);
                     let err = last_error.as_ref().expect("set above");
                     if !retry.is_retryable(err) || attempt >= retry.max_retries {
-                        breaker_record_failure(&key, err.class(), config);
+                        breaker_record_failure(
+                            &mut state.circuit_breakers,
+                            &key,
+                            err.class(),
+                            config,
+                        );
                         break;
                     }
                     attempt += 1;
@@ -782,11 +796,12 @@ fn resolve_fallback_models(state: &AgentState, config: &AgentLoopConfig) -> Vec<
     models
 }
 
-fn breaker_retry_in_ms(key: &str, config: &AgentLoopConfig) -> Option<u64> {
-    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
-    let state = guard
-        .entry(key.to_string())
-        .or_insert_with(BreakerState::new);
+fn breaker_retry_in_ms(
+    breakers: &mut HashMap<String, BreakerState>,
+    key: &str,
+    config: &AgentLoopConfig,
+) -> Option<u64> {
+    let state = breakers.entry(key.to_string()).or_default();
     let opened_at = state.opened_at?;
     let elapsed = opened_at.elapsed().as_millis() as u64;
     if elapsed >= config.provider_circuit_breaker.open_cooldown_ms {
@@ -797,23 +812,22 @@ fn breaker_retry_in_ms(key: &str, config: &AgentLoopConfig) -> Option<u64> {
     }
 }
 
-fn breaker_record_success(key: &str) {
-    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
-    let state = guard
-        .entry(key.to_string())
-        .or_insert_with(BreakerState::new);
+fn breaker_record_success(breakers: &mut HashMap<String, BreakerState>, key: &str) {
+    let state = breakers.entry(key.to_string()).or_default();
     state.consecutive_failures = 0;
     state.opened_at = None;
 }
 
-fn breaker_record_failure(key: &str, class: ErrorClass, config: &AgentLoopConfig) {
+fn breaker_record_failure(
+    breakers: &mut HashMap<String, BreakerState>,
+    key: &str,
+    class: ErrorClass,
+    config: &AgentLoopConfig,
+) {
     if !matches!(class, ErrorClass::Transient) {
         return;
     }
-    let mut guard = CIRCUIT_BREAKERS.lock().expect("breaker lock poisoned");
-    let state = guard
-        .entry(key.to_string())
-        .or_insert_with(BreakerState::new);
+    let state = breakers.entry(key.to_string()).or_default();
     state.consecutive_failures = state.consecutive_failures.saturating_add(1);
     if state.consecutive_failures >= config.provider_circuit_breaker.failure_threshold {
         state.opened_at = Some(Instant::now());
@@ -829,7 +843,7 @@ struct CompactionStats {
 }
 
 async fn build_context(
-    state: &AgentState,
+    state: &mut AgentState,
     provider: &dyn LlmProvider,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
@@ -868,14 +882,9 @@ async fn build_context(
         if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm
         {
             let trimmed_len = (compact_result.trimmed_count as usize).min(state.messages.len());
-            match summarize_compacted_messages(
-                state,
-                provider,
-                &state.messages[..trimmed_len],
-                config,
-                event_tx,
-            )
-            .await
+            let trimmed_slice = state.messages[..trimmed_len].to_vec();
+            match summarize_compacted_messages(state, provider, &trimmed_slice, config, event_tx)
+                .await
             {
                 Ok(summary) => {
                     if let Some(first) = compact_result.messages.first_mut() {
@@ -933,7 +942,7 @@ async fn build_context(
 }
 
 async fn summarize_compacted_messages(
-    state: &AgentState,
+    state: &mut AgentState,
     provider: &dyn LlmProvider,
     trimmed: &[Message],
     config: &AgentLoopConfig,
