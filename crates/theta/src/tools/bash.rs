@@ -112,10 +112,22 @@ impl AgentTool for BashTool {
         // cancel token fires. process_group(0) above sets the child as its
         // own process group leader, so -pid targets the whole tree.
         let abort_handle = if let (Some(token), Some(pid)) = (signal.clone(), pid) {
-            let kill_cmd = format!("kill -9 -{pid} 2>/dev/null || true");
             Some(tokio::spawn(async move {
                 token.cancelled().await;
-                let _ = Command::new("sh").arg("-c").arg(&kill_cmd).output().await;
+                // Graceful termination first — allows temp-file cleanup and lock release.
+                let _ = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("kill -15 -{pid} 2>/dev/null || true"))
+                    .output()
+                    .await;
+                // Give processes a grace period to exit cleanly.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Force-kill any stragglers.
+                let _ = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("kill -9 -{pid} 2>/dev/null || true"))
+                    .output()
+                    .await;
             }))
         } else {
             None
