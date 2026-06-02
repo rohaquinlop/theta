@@ -835,18 +835,23 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     // Streaming tool-call completion — handled by LLM-side processing.
                 }
                 Ok(AgentEvent::ProviderCircuitOpen { key, retry_in_ms }) => {
-                    let _ = event_tx.send(TuiEvent::Info(format!(
-                        "Provider {key} is temporarily unavailable (retry in {retry_in_ms}ms)"
-                    )));
+                    tracing::debug!(
+                        provider_key = %key,
+                        retry_in_ms = retry_in_ms,
+                        "provider circuit breaker open"
+                    );
                 }
                 Ok(AgentEvent::ProviderFallback {
                     from_model,
                     to_model,
                     reason,
                 }) => {
-                    let _ = event_tx.send(TuiEvent::Info(format!(
-                        "Falling back from {from_model} to {to_model}: {reason}"
-                    )));
+                    tracing::debug!(
+                        from_model = %from_model,
+                        to_model = %to_model,
+                        reason = %reason,
+                        "provider fallback triggered"
+                    );
                 }
                 _ => {}
             }

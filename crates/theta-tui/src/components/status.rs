@@ -428,8 +428,6 @@ fn mode_from_state(state: &str) -> &str {
         "stream"
     } else if state == "Blocked" {
         "blocked"
-    } else if state == "Completed" {
-        "done"
     } else if state == "Failed" {
         "failed"
     } else if state == "Cancelled" || state.starts_with("cancel") {

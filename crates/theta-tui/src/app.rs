@@ -1779,15 +1779,20 @@ impl App {
                 if self.current_tool.is_none() {
                     self.status.set_agent_state("ModelCall");
                 }
-                // Don't set detail — [stream] badge already shows the mode.
+                // Clear lingering retry detail once the model starts responding.
+                if self.status.detail.starts_with("retry attempt") {
+                    self.status.set_detail("");
+                }
             }
             TuiEvent::ThinkingDelta(text) => {
                 self.status.set_agent_state("thinking");
                 if self.show_thinking {
                     self.chat.update_last(&text, ChatRole::Thinking, true);
                 }
-                // Don't set detail — thinking level is already shown in the
-                // [model:thinking] badge on the left.
+                // Clear lingering retry detail once the model starts responding.
+                if self.status.detail.starts_with("retry attempt") {
+                    self.status.set_detail("");
+                }
             }
             TuiEvent::ThinkingStart => {
                 self.status.set_agent_state("thinking");
@@ -1811,6 +1816,9 @@ impl App {
             TuiEvent::ToolStart { name, id, args, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("ToolExec");
+                if self.status.detail.starts_with("retry attempt") {
+                    self.status.set_detail("");
+                }
                 self.tools_in_turn += 1;
                 self.tool_exec_phase = true;
                 // Extract command from args for display.
@@ -1949,20 +1957,13 @@ impl App {
                     "context window {context_window} too small; auto-compaction paused"
                 ));
             }
-            TuiEvent::Retrying { attempt, delay_ms } => {
+            TuiEvent::Retrying {
+                attempt,
+                delay_ms: _,
+            } => {
                 self.retries_in_turn = self.retries_in_turn.max(attempt);
                 self.status.set_agent_state("Retrying");
-                self.status
-                    .set_detail(&format!("provider retry {attempt} in {delay_ms}ms"));
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::System,
-                    text: format!(
-                        "Retrying provider request (attempt {attempt}, waiting {delay_ms}ms)"
-                    ),
-                    tool_call_id: None,
-                    is_streaming: false,
-                    is_error: false,
-                });
+                self.status.set_detail(&format!("retry attempt {attempt}"));
             }
             TuiEvent::SessionPicker(sessions) => {
                 self.session_picker = Some(SessionPicker::new(sessions, self.theme.clone()));
@@ -2009,11 +2010,10 @@ impl App {
                 if aborted {
                     self.status.set_agent_state("Cancelled");
                     self.status.set_detail("execution cancelled");
-                } else if self.status.agent_state != "Completed"
-                    && self.status.agent_state != "Blocked"
+                } else if self.status.agent_state != "Blocked"
                     && self.status.agent_state != "Failed"
                 {
-                    self.status.set_agent_state("Completed");
+                    self.status.set_agent_state("idle");
                     self.status.set_detail("");
                 }
             }
