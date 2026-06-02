@@ -1,5 +1,3 @@
-//! Agent state: the mutable transcript and configuration.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,54 +7,34 @@ use theta_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
 use crate::types::AgentTool;
 use crate::types::{RunReport, RunReportEvent, TurnEndReason};
 
-/// Mutable state of an agent run.
 #[derive(Clone)]
 pub struct AgentState {
     pub system_prompt: Vec<ContentBlock>,
-
     pub model: Model,
-
     pub tools: Vec<Arc<dyn AgentTool>>,
-
-    /// Skills + extensions. Injected at conversation start, not in system prompt.
+    /// Skills + extensions. Injected as a synthetic user message, not in system prompt.
     pub resource_context: Option<Vec<ContentBlock>>,
-
     pub messages: Vec<Message>,
-
     pub is_streaming: bool,
-
     pub thinking_level: ThinkingLevel,
-    /// Available models from catalog for fallback resolution.
     pub available_models: Vec<Model>,
-    /// Last explicit turn terminal reason.
     pub last_turn_end_reason: Option<TurnEndReason>,
-    /// In-progress report for current run.
     pub current_run_report: Option<RunReport>,
     pub last_run_report: Option<RunReport>,
     pub current_run_id: Option<String>,
     pub current_turn_id: Option<String>,
-    /// Tool-call IDs already executed in current turn.
     pub executed_tool_call_ids_in_turn: HashSet<String>,
-    /// Cached token count of system prompt. Computed once on set.
     pub(crate) system_prompt_tokens: u32,
-    /// Cached token count of resource context. Computed once on set.
     pub(crate) resource_context_tokens: u32,
-    /// Cached theta_ai::Tool list. Cheap clone per turn.
     pub(crate) theta_ai_tools: Vec<Tool>,
     /// Per-model-id circuit breaker state. Scoped to this agent instance
     /// so concurrent agents (tests, multi-session) don't share breakers.
     pub(crate) circuit_breakers: HashMap<String, BreakerState>,
-    /// Consecutive turns that triggered compaction. Reset when a turn fits
-    /// without compacting. When this reaches the threshold, auto-compaction
-    /// pauses to prevent cache-cratering loops.
     pub(crate) consecutive_compacts: u32,
-    /// Auto-compaction is paused because the kept tail alone exceeds the
-    /// trigger — compacting every turn would break the prefix cache.
     pub(crate) compaction_paused: bool,
 }
 
-/// Circuit breaker per model key. Tracks consecutive transient failures
-/// and enforces a cooldown period when the breaker opens.
+/// Circuit breaker per model key.
 #[derive(Debug, Clone)]
 pub struct BreakerState {
     pub consecutive_failures: u32,
@@ -130,23 +108,19 @@ impl AgentState {
         }
     }
 
-    /// Add a user message to the transcript.
     pub fn add_user_message(&mut self, content: Vec<ContentBlock>, timestamp: u64) {
         self.messages.push(Message::User { content, timestamp });
     }
 
-    /// Add an assistant message to the transcript.
     pub fn add_assistant_message(&mut self, msg: Message) {
         self.messages.push(msg);
     }
 
-    /// Add a tool result message to the transcript.
     pub fn add_tool_result(&mut self, msg: Message) {
         self.messages.push(msg);
     }
 
     /// Get only the messages that should be sent to the LLM.
-    /// Filters out ModelChange and ThinkingLevelChange events.
     /// Does NOT include resource_context — callers must prepend it separately.
     pub fn llm_messages(&self) -> Vec<Message> {
         self.messages
@@ -161,14 +135,10 @@ impl AgentState {
             .collect()
     }
 
-    /// Approximate token count of the resource context blocks.
-    /// Uses the cached value computed when the resource context was set.
     pub fn resource_context_tokens(&self) -> u32 {
         self.resource_context_tokens
     }
 
-    /// Recompute and cache system prompt and resource context token counts.
-    /// Called by Agent when these fields are set.
     pub fn update_cached_tokens(&mut self) {
         self.system_prompt_tokens = approximate_tokens_for_blocks(&self.system_prompt);
         self.resource_context_tokens = self
@@ -178,8 +148,6 @@ impl AgentState {
             .unwrap_or(0);
     }
 
-    /// Rebuild the cached theta_ai::Tool list from self.tools.
-    /// Called after add_tool().
     pub fn rebuild_theta_ai_tools(&mut self) {
         self.theta_ai_tools = self
             .tools
@@ -192,13 +160,10 @@ impl AgentState {
             .collect();
     }
 
-    /// Load past messages from a session (for continue/resume).
-    /// Preserves system prompt, tools, and model; only replaces the transcript.
     pub fn load_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
     }
 
-    /// Find the model ID from the last assistant message in the transcript, if any.
     pub fn last_model_id(&self) -> Option<&str> {
         self.messages.iter().rev().find_map(|m| match m {
             Message::Assistant { model, .. } => model.as_deref(),
@@ -206,7 +171,6 @@ impl AgentState {
         })
     }
 
-    /// Approximate total token count across all messages.
     pub fn token_count(&self) -> u32 {
         let msg_tokens: u32 = self.messages.iter().map(|m| m.token_count()).sum();
         msg_tokens + self.system_prompt_tokens + self.resource_context_tokens

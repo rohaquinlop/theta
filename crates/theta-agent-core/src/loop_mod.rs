@@ -179,20 +179,17 @@ async fn run_outer_loop(
 
         let _ = event_tx.send(AgentEvent::TurnEnd { turn_index });
 
-        // Check hooks: should we stop?
         if hooks.should_stop_after_turn(state).await {
             tracing::debug!("hooks.should_stop_after_turn returned true");
             break;
         }
 
-        // Check if there are more follow-ups or steering queued.
         let has_follow = !follow_up_queue.lock().expect("lock").is_empty();
         let has_steer = !steering_queue.lock().expect("lock").is_empty();
         if !has_follow && !has_steer {
             break;
         }
 
-        // Drain them into state for the next turn.
         drain_queue(&follow_up_queue, state);
         drain_queue(&steering_queue, state);
         steering_has_items.store(false, Ordering::Relaxed);
@@ -235,35 +232,27 @@ async fn run_single_turn(
         ],
     );
 
-    // Inject any prepare-next-turn messages.
     let prepend = hooks.prepare_next_turn(state).await;
     for msg in prepend {
         state.messages.push(msg);
     }
 
-    // Inner loop: LLM call + tool execution.
     let mut tool_round: u32 = 0;
     let mut empty_assistant_retries: u32 = 0;
 
     // Sanitized transcript cache: recomputed on first round or when non-tool-result
-    // messages appear (model changes, steering). Subsequent rounds only add tool
-    // results, which don't need ID normalization — just push to cache.
-    // sanitized_through tracks the index in state.messages we've processed;
-    // meta-messages (ModelChange, ThinkingLevelChange) are skipped since
-    // sanitize_messages_for_replay filters them out.
+    // messages appear. Subsequent rounds only add tool results, which don't need
+    // ID normalization — just push to cache.
     let mut sanitized_cache: Vec<Message> = Vec::new();
     let mut sanitized_through: usize = 0;
 
-    // Consecutive identical round guard: only triggers when the model produces
-    // the same set of tool calls round after round with no variation. A round
-    // whose tool calls differ from the previous round resets the counter — the
-    // model is trying something different (e.g., edit + re-check).
+    // Consecutive identical round guard: detects when the model repeats
+    // the same tool calls round after round.
     let mut prev_round_signatures: Vec<String> = Vec::new();
     let mut consecutive_identical_rounds: u32 = 0;
     let max_same_tool_call_repeats = config.max_same_tool_call_repeats.unwrap_or(6);
 
     loop {
-        // Drain any steering messages — they interrupt the current turn.
         drain_queue(steering_queue, state);
         steering_has_items.store(false, Ordering::Relaxed);
         check_abort!(abort_token, steering_has_items);
@@ -296,8 +285,7 @@ async fn run_single_turn(
             return Ok(());
         }
 
-        // Build context (with compaction). Use cached sanitized transcript —
-        // only recompute on first round or when non-tool-result messages appear.
+        // Build context (with compaction).
         if sanitized_through < state.messages.len() {
             let new_msgs = &state.messages[sanitized_through..];
             sanitized_through = state.messages.len();
@@ -339,7 +327,6 @@ async fn run_single_turn(
             "calling LLM",
         );
 
-        // Call the LLM.
         let _ = event_tx.send(AgentEvent::MessageStart);
         state.is_streaming = true;
 
@@ -804,7 +791,6 @@ async fn run_llm_stream(
                 }
             }
         }
-        // Out of retries for this model; try next fallback.
     }
 
     // All models and retries exhausted.
@@ -855,26 +841,22 @@ async fn consume_stream(
     StreamConsumeError,
 > {
     let mut accumulator = EventAccumulator::new();
-    // Suppress duplicate stream errors: a single transport failure (e.g. decode
-    // error) causes every subsequent SSE read to fail.
+    // Suppress duplicate stream errors: a single transport failure causes
+    // every subsequent SSE read to fail.
     let mut stream_error_emitted = false;
 
-    // Consume the stream, emitting events as we go.
     while let Some(event) = stream.next().await {
-        // Check permanent abort.
         if let Some(token) = abort_token
             && token.is_cancelled()
         {
             return Err(StreamConsumeError::Aborted);
         }
-        // Check per-stream steering abort.
         if steering_abort.load(Ordering::SeqCst) {
             return Err(StreamConsumeError::Aborted);
         }
 
         accumulator.feed(&event);
 
-        // Emit corresponding agent events.
         match &event {
             AssistantMessageEvent::TextDelta { text } if emit_events => {
                 let _ = event_tx.send(AgentEvent::TextDelta { text: text.clone() });
@@ -920,12 +902,10 @@ async fn consume_stream(
         }
     }
 
-    // If the stream ended with an error, it broke — retryable.
     if accumulator.stop_reason() == Some(StopReason::Error) {
         return Err(StreamConsumeError::StreamBroke);
     }
 
-    // Build the assistant message from accumulated events.
     let unresolved = accumulator.unresolved_tool_calls();
     let assistant_msg = Message::Assistant {
         content: accumulator.content_blocks(),
@@ -1015,20 +995,17 @@ async fn build_context(
         Some(state.system_prompt.clone())
     };
 
-    // Approximate system prompt tokens — uses cached value from AgentState.
     let sys_tokens: u32 = state.system_prompt_tokens;
 
-    // Account for resource context tokens in compaction budget.
     let res_tokens: u32 = state.resource_context_tokens();
     let effective_sys_tokens = sys_tokens + res_tokens;
 
     // Compaction: only call compact_messages when enabled. When disabled,
-    // use the cached sanitized messages directly — no clone or token scan needed.
+    // use the cached sanitized messages directly.
     //
     // Compaction loop guard: if compaction fires on consecutive turns, the kept
-    // tail alone exceeds the trigger — compacting again would just shift the
-    // same messages and crater the prefix cache. Pause auto-compaction until a
-    // turn naturally fits without compacting.
+    // tail alone exceeds the trigger — compacting again would crater the prefix
+    // cache. Pause auto-compaction until a turn naturally fits.
     let pause_threshold = config.compaction.auto_pause_threshold;
 
     let (mut messages, compaction_stats) = if config.compaction.enabled && !state.compaction_paused
@@ -1114,7 +1091,6 @@ async fn build_context(
         (messages.to_vec(), None)
     };
 
-    // Prepend resource context (skills, extensions) — never subject to compaction.
     if let Some(ref res_ctx) = state.resource_context
         && !res_ctx.is_empty()
     {

@@ -71,6 +71,8 @@ Each crate has its own `AGENTS.md` with crate-specific conventions. When working
 
 ## Comment Style
 
+Before writing any comment, ask: **"Can a competent reader infer this from the code alone?"** If yes, delete the comment. Do not rewrite it — remove it.
+
 - Comments explain WHY, not WHAT. The code says what; comments say why.
 - No field-level docs that restate the field name: `/// The text buffer.` for `pub text: String` is noise — remove or add semantic context.
 - No narrative inline comments that walk through code line-by-line. Each comment must add info not visible in the code.
@@ -79,6 +81,42 @@ Each crate has its own `AGENTS.md` with crate-specific conventions. When working
 - Section separator comments (`// ── Section ──`): keep lightweight. One per logical section, no box-drawing.
 - Good comments: why this approach, why not the obvious alternative, invariants, safety, non-obvious side effects, bug references.
 - LLM-facing text (tool descriptions, prompt templates): keep as-is — these are not just comments, they're data.
+
+### Anti-patterns (do NOT write these)
+
+```rust
+// BAD: restates the field name
+/// Input tokens consumed.
+pub input_tokens: u32,
+
+// BAD: narrates what the next line does
+// Call the LLM.
+let response = provider.stream(&model, &context).await?;
+
+// BAD: restates the function name
+/// Set lifecycle hooks.
+pub fn set_hooks(&mut self, hooks: Arc<dyn Hooks>) { ... }
+
+// BAD: restates the module name
+//! Agent-level error types.
+
+// BAD: restates the struct purpose from its name + fields
+/// The agent: holds all state and orchestrates LLM interaction.
+pub struct Agent { ... }
+```
+
+```rust
+// GOOD: explains a non-obvious design choice
+// Write could be parallel but is sequential to avoid race on same file.
+
+// GOOD: explains an invariant that would be lost without the comment
+// Prefix-preserving: keeps earliest messages byte-stable to preserve
+// DeepSeek/MiMo prefix cache across compaction.
+
+// GOOD: explains why this code exists (not what it does)
+// Don't persist error/aborted responses — they cause the replay
+// sanitizer to fire on every subsequent context build.
+```
 
 ## Commands
 

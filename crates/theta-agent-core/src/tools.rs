@@ -14,9 +14,7 @@ use crate::hooks::Hooks;
 use crate::state::AgentState;
 use crate::types::{ToolCall, ToolExecutionMode, ToolResult, ToolUpdate, ToolWatchdogConfig};
 
-/// Execute a batch of tool calls. Handles ordering:
-/// 1. All parallel tools run concurrently.
-/// 2. Sequential tools run one at a time after parallel tools finish.
+/// Execute a batch of tool calls.
 ///
 /// Tool errors are converted to error ToolResult messages, never
 /// propagated as Err — a single tool failure should not abort the turn.
@@ -60,7 +58,7 @@ pub async fn execute_tool_calls(
         }
     }
 
-    // Execute parallel tools concurrently — each gets before/after hooks.
+    // Execute parallel tools concurrently.
     if !parallel.is_empty() {
         let event_tx = event_tx.clone();
         let abort = abort_token.clone();
@@ -136,7 +134,7 @@ pub async fn execute_tool_calls(
         }
     }
 
-    // Execute sequential tools one at a time — with hooks.
+    // Execute sequential tools one at a time.
     for tc in &sequential {
         let result =
             match execute_one(state, tc, abort_token.clone(), event_tx, &**hooks, watchdog).await {
@@ -182,7 +180,6 @@ async fn execute_one(
     hooks: &dyn Hooks,
     watchdog: &ToolWatchdogConfig,
 ) -> Result<ToolResult, AgentError> {
-    // before_tool_call hook.
     hooks
         .before_tool_call(state, tool_call)
         .await
@@ -200,7 +197,6 @@ async fn execute_one(
 
     let result = run_tool(state, tool_call, abort_token, event_tx, watchdog).await;
 
-    // after_tool_call hook.
     if let Ok(ref r) = result {
         let _ = hooks
             .after_tool_call(state, tool_call, r)
@@ -272,7 +268,6 @@ async fn run_tool(
         }
     });
 
-    // Progress callback.
     let tx = event_tx.clone();
     let cid = tool_call.id.clone();
     let progress_clock = Arc::clone(&last_progress_ms);

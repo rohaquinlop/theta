@@ -4,50 +4,36 @@ use serde::{Deserialize, Serialize};
 
 use super::types::*;
 
-/// Events emitted during a streaming LLM request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AssistantMessageEvent {
-    /// Stream has started.
     #[serde(rename = "start")]
     Start,
-    /// Text generation has started (transitioning from thinking to content).
     #[serde(rename = "text_start")]
     TextStart,
-    /// A text delta chunk.
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
-    /// Text generation has ended.
     #[serde(rename = "text_end")]
     TextEnd,
-    /// Thinking/reasoning generation has started.
     #[serde(rename = "thinking_start")]
     ThinkingStart,
-    /// A thinking/reasoning delta chunk.
     #[serde(rename = "thinking_delta")]
     ThinkingDelta { thinking: String },
-    /// Thinking/reasoning generation has ended.
     #[serde(rename = "thinking_end")]
     ThinkingEnd,
-    /// A tool call has started.
     #[serde(rename = "tool_call_start")]
     ToolCallStart { id: String, name: String },
-    /// A tool call arguments delta chunk.
     #[serde(rename = "tool_call_delta")]
     ToolCallDelta { id: String, arguments: String },
-    /// A tool call has ended (all arguments received).
     #[serde(rename = "tool_call_end")]
     ToolCallEnd { id: String },
-    /// Token usage information (may appear mid-stream or at end).
     #[serde(rename = "usage")]
     Usage { usage: Usage },
-    /// Stream completed successfully.
     #[serde(rename = "done")]
     Done {
         stop_reason: StopReason,
         usage: Option<Usage>,
     },
-    /// Stream ended with an error.
     #[serde(rename = "error")]
     Error { code: String, message: String },
 }
@@ -71,26 +57,16 @@ impl AssistantMessageEvent {
     }
 }
 
-/// Accumulate streaming events into final content blocks and usage.
 #[derive(Debug, Default)]
 pub struct EventAccumulator {
-    /// Accumulated text content.
     text_buffer: String,
-    /// Accumulated thinking content.
     thinking_buffer: String,
-    /// Active tool calls being accumulated.
     tool_calls: Vec<ToolCallAccumulator>,
-    /// Latest usage info.
     usage: Option<Usage>,
-    /// Stop reason from final event.
     stop_reason: Option<StopReason>,
-    /// Error message if any.
     error_message: Option<String>,
-    /// Whether we've started text generation.
     in_text: bool,
-    /// Whether we've started thinking.
     in_thinking: bool,
-    /// Whether stream has started.
     started: bool,
 }
 
@@ -124,7 +100,6 @@ impl EventAccumulator {
         Self::default()
     }
 
-    /// Process a single event, updating internal state.
     pub fn feed(&mut self, event: &AssistantMessageEvent) {
         match event {
             AssistantMessageEvent::Start => {
@@ -194,8 +169,6 @@ impl EventAccumulator {
         }
     }
 
-    /// Build the final content blocks from accumulated deltas.
-    /// Clears internal buffers after building (single-use).
     pub fn content_blocks(&mut self) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
 
@@ -247,8 +220,6 @@ impl EventAccumulator {
         self.tool_calls.iter().filter(|tc| !tc.done).count()
     }
 
-    /// Returns the unresolved tool calls (started but never completed).
-    /// Call before `content_blocks()` — that method drains the buffer.
     pub fn unresolved_tool_calls(&self) -> Vec<UnresolvedToolCall> {
         self.tool_calls
             .iter()
@@ -260,7 +231,6 @@ impl EventAccumulator {
             .collect()
     }
 
-    /// Reset for the next stream.
     pub fn reset(&mut self) {
         *self = Self::default();
     }

@@ -1,13 +1,9 @@
-//! Lifecycle hooks for agent customization.
-
 use async_trait::async_trait;
 
 use crate::state::AgentState;
 use crate::types::{ExtensionStatusRow, ToolCall, ToolResult};
 use theta_ai::Message;
 
-/// Hooks allow extensions to intercept and modify agent behavior.
-/// Default implementations are no-ops.
 #[async_trait]
 pub trait Hooks: Send + Sync {
     /// Called before a tool call is executed.
@@ -58,7 +54,6 @@ pub trait Hooks: Send + Sync {
     }
 }
 
-/// A no-op hooks implementation.
 pub struct NoopHooks;
 
 #[async_trait]

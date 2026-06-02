@@ -31,19 +31,15 @@ pub enum MaxTokensField {
     MaxTokens,
 }
 
-/// Provider-specific compatibility flags.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelCompat {
-    /// How thinking/reasoning params are sent.
     #[serde(default)]
     pub thinking_format: Option<ThinkingFormat>,
     /// Whether to use `developer` role for system messages (o-series).
     #[serde(default, rename = "supportsDeveloperRole")]
     pub supports_developer_role: bool,
-    /// Which field to use for max_tokens.
     #[serde(default, rename = "maxTokensField")]
     pub max_tokens_field: Option<MaxTokensField>,
-    /// Whether `stream_options.include_usage` works on this provider.
     #[serde(default, rename = "supportsUsageInStreaming")]
     pub supports_usage_in_streaming: bool,
     /// Whether this provider supports eager tool-call streaming
@@ -105,55 +101,36 @@ impl ModelCompat {
     }
 }
 
-/// A registered LLM model with all its metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
-    /// Unique model identifier (e.g. "gpt-5.5", "deepseek-v4-pro").
     pub id: String,
-    /// Human-readable display name.
     pub name: String,
-    /// Which API this model uses.
     pub api: Api,
-    /// Which provider serves this model.
     pub provider: Provider,
-    /// Base URL for API requests.
     #[serde(rename = "baseUrl")]
     pub base_url: String,
-    /// Whether this model supports thinking/reasoning.
     pub reasoning: bool,
     /// Mapping from thinking levels to provider-specific strings.
     /// e.g., `{"high": "high", "xhigh": "max"}`.
     #[serde(default, rename = "thinkingLevelMap")]
     pub thinking_level_map: HashMap<ThinkingLevel, Option<String>>,
-    /// Input modalities the model supports.
     #[serde(default)]
     pub input: Vec<Modality>,
-    /// Context window size in tokens.
     #[serde(rename = "contextWindow")]
     pub context_window: u32,
-    /// Maximum output tokens.
     #[serde(rename = "maxTokens")]
     pub max_tokens: u32,
-    /// Provider-specific compatibility flags.
     #[serde(default)]
     pub compat: ModelCompat,
 }
 
-/// Trait for model catalogs. Implement this to provide model lookup.
 pub trait ModelCatalog: Send + Sync {
-    /// Find a model by provider and model ID.
     fn find(&self, provider: Provider, model_id: &str) -> Option<&Model>;
-
-    /// List all models in the catalog.
     fn list(&self) -> Vec<&Model>;
-
-    /// List models for a specific provider.
     fn list_by_provider(&self, provider: Provider) -> Vec<&Model>;
 }
 
 impl Model {
-    /// Get the provider-specific thinking param value for a given level.
-    /// Returns `None` if thinking is not supported or the level maps to None.
     pub fn thinking_param(&self, level: ThinkingLevel) -> Option<String> {
         self.thinking_level_map.get(&level).and_then(|v| v.clone())
     }
@@ -169,7 +146,6 @@ impl Model {
         )
     }
 
-    /// The actual JSON field name for max_tokens in the API request body.
     pub fn max_tokens_field_name(&self) -> &str {
         match self.compat.max_tokens_field {
             Some(MaxTokensField::MaxCompletionTokens) | None => "max_completion_tokens",
@@ -177,7 +153,6 @@ impl Model {
         }
     }
 
-    /// The system role name for this model ("system" or "developer").
     pub fn system_role(&self) -> &str {
         if self.compat.supports_developer_role {
             "developer"

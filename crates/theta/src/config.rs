@@ -1,9 +1,4 @@
 //! Configuration and auth storage for theta.
-//!
-//! Loads from:
-//! - `~/.theta/config.toml` — model defaults, thinking level, etc.
-//! - `~/.theta/auth.json` — provider tokens with expiry
-//! - Environment variables — API key fallback (OPENAI_API_KEY, etc.)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -775,14 +770,12 @@ fn default_auth_path() -> PathBuf {
     theta_dir().join("auth.json")
 }
 
-/// ~/.theta directory.
 pub(crate) fn theta_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".theta")
 }
 
-/// Current time in milliseconds.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -790,7 +783,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Configuration errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config: {0}")]

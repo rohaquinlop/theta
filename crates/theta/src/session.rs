@@ -388,9 +388,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Append any state messages that are not already persisted in this session.
-    ///
-    /// Returns the number of newly appended messages.
     pub async fn append_missing_entries(
         &self,
         session: &mut Session,

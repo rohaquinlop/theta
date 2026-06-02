@@ -9,16 +9,11 @@ use theta_ai::Message;
 
 use crate::types::{CompactionConfig, CompactionStrategy};
 
-/// Result of a compaction pass.
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
-    /// The compacted message list.
     pub messages: Vec<Message>,
-    /// How many messages were trimmed (summarized into the middle).
     pub trimmed_count: u32,
-    /// Approximate tokens before compaction.
     pub tokens_before: u32,
-    /// Approximate tokens after compaction.
     pub tokens_after: u32,
     /// Index of the first trimmed message in the ORIGINAL messages slice.
     /// Only set when trimmed_count > 0. Combined with trimmed_count, this
@@ -26,16 +21,6 @@ pub struct CompactionResult {
     pub trim_start: usize,
 }
 
-/// Compact the given messages to fit within `context_window - reserve_tokens`,
-/// accounting for the system prompt token count.
-///
-/// Prefix-preserving layout:
-///   [0..head]     — kept verbatim (system prompt, early messages)
-///   [head]        — summary of trimmed region (replaced in-place)
-///   [head+1..]    — kept verbatim (recent tail)
-///
-/// The early prefix never shifts position, so DeepSeek's automatic prefix
-/// cache stays warm across compaction.
 pub fn compact_messages(
     messages: &[Message],
     system_prompt_tokens: u32,
@@ -241,12 +226,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// Count approximate tokens for all messages.
 pub(crate) fn total_tokens(messages: &[Message]) -> u32 {
     messages.iter().map(msg_token_cost).sum()
 }
 
-/// Approximate token cost for a single message.
 pub(crate) fn msg_token_cost(msg: &Message) -> u32 {
     match msg {
         Message::User { .. } | Message::Assistant { .. } | Message::ToolResult { .. } => {

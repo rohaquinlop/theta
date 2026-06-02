@@ -20,47 +20,28 @@ use crate::loop_mod;
 use crate::state::AgentState;
 use crate::types::{AgentLoopConfig, AgentTool, RunReport};
 
-/// The agent: holds all state and orchestrates LLM interaction.
 pub struct Agent {
-    /// Mutable agent state (transcript, tools, config).
     state: RwLock<AgentState>,
-
-    /// Event broadcaster for TUI/RPC subscribers.
     event_tx: broadcast::Sender<AgentEvent>,
-
-    /// Provider registry for LLM calls.
     provider: Arc<ProviderRegistry>,
-
-    /// Lifecycle hooks.
     hooks: Arc<dyn Hooks>,
-
     /// Active run handle (ensures only one prompt/continue at a time).
     active_run: Mutex<Option<ActiveRun>>,
-
-    /// Loop configuration.
     config: AgentLoopConfig,
-
-    /// Follow-up messages queued for after the current turn.
     follow_up_queue: Arc<Mutex<Vec<(Message, u64)>>>,
-
-    /// Steering messages that interrupt the current turn mid-stream.
     steering_queue: Arc<Mutex<Vec<(Message, u64)>>>,
-
     /// Fast-path flag: true when steering_queue has items. Avoids locking the
     /// mutex on every inner-loop iteration just to check for pending steering.
     steering_has_items: Arc<AtomicBool>,
 }
 
-/// Handle for an in-progress agent run.
 struct ActiveRun {
-    /// Permanent abort: user cancels the entire run.
     abort_token: CancellationToken,
     /// Per-stream abort for steering. Set when `steer()` interrupts.
     steering_abort: Arc<AtomicBool>,
 }
 
 impl Agent {
-    /// Create a new agent with the given model, provider, and available models.
     pub fn new(
         model: Model,
         provider: Arc<ProviderRegistry>,
@@ -81,57 +62,47 @@ impl Agent {
 
     // ── Configuration ──────────────────────────────────────────
 
-    /// Set lifecycle hooks.
     pub fn set_hooks(&mut self, hooks: Arc<dyn Hooks>) {
         self.hooks = hooks;
     }
 
-    /// Get a reference to the hooks.
     pub fn hooks(&self) -> &Arc<dyn Hooks> {
         &self.hooks
     }
 
-    /// Set the agent loop configuration.
     pub fn set_config(&mut self, config: AgentLoopConfig) {
         self.config = config;
     }
 
-    /// Get a reference to the loop config.
     pub fn config(&self) -> &AgentLoopConfig {
         &self.config
     }
 
     // ── State access ───────────────────────────────────────────
 
-    /// Get a read lock on agent state.
     pub async fn state(&self) -> tokio::sync::RwLockReadGuard<'_, AgentState> {
         self.state.read().await
     }
 
-    /// Register a tool with the agent.
     pub async fn add_tool(&self, tool: Arc<dyn AgentTool>) {
         let mut state = self.state.write().await;
         state.tools.push(tool);
         state.rebuild_theta_ai_tools();
     }
 
-    /// Add or replace an authentication token for a provider.
     pub fn set_api_key(&self, provider: ProviderKind, key: impl Into<String>) {
         self.provider.set_api_key(provider, key);
     }
 
-    /// Set the MiMo cluster base URL (from latency test modal).
     pub fn set_mimo_base_url(&self, url: &str) {
         let url = url.to_string();
         self.provider.set_mimo_base_url(&url);
     }
 
-    /// Get the stored API key for a provider.
     pub fn provider_key(&self, provider: ProviderKind) -> Option<String> {
         self.provider.get_api_key(provider)
     }
 
-    /// Set the system prompt.
     pub async fn set_system_prompt(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;
         state.system_prompt = prompt;
@@ -146,8 +117,6 @@ impl Agent {
         state.update_cached_tokens();
     }
 
-    /// Switch the active model.
-    /// Set the model and record a ModelChange in the transcript.
     pub async fn set_model(&self, model: Model) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -162,7 +131,6 @@ impl Agent {
         state.model = model;
     }
 
-    /// Set the thinking level and record a ThinkingLevelChange in the transcript.
     pub async fn set_thinking_level(&self, level: theta_ai::ThinkingLevel) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -176,7 +144,6 @@ impl Agent {
         state.thinking_level = level;
     }
 
-    /// Load past messages from a session (for continue/resume).
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
         let (sanitized, stats) = theta_ai::sanitize_messages_for_replay(&messages, &state.model);
@@ -191,12 +158,10 @@ impl Agent {
         }
     }
 
-    /// Get the number of messages currently in the transcript.
     pub async fn message_count(&self) -> usize {
         self.state.read().await.messages.len()
     }
 
-    /// Live context stats for the TUI.
     pub async fn context_stats(&self) -> (usize, u32, Option<u32>) {
         let state = self.state.read().await;
         let resource_tokens: u32 = state.resource_context_tokens();
@@ -207,14 +172,12 @@ impl Agent {
         )
     }
 
-    /// Last completed run report, if available.
     pub async fn last_run_report(&self) -> Option<RunReport> {
         self.state.read().await.last_run_report.clone()
     }
 
     /// Manual compaction: trim old messages without running a loop.
     /// Forces compaction regardless of the `enabled` config flag.
-    /// Sends ContextCompacted event and returns how many were trimmed.
     pub async fn compact_context(&self) -> Result<u32, AgentError> {
         let (result, _compaction_config) = {
             let state = self.state.read().await;
@@ -291,14 +254,9 @@ impl Agent {
 
     // ── Run control ───────────────────────────────────────────
 
-    /// Start a new agent run with a user prompt.
-    ///
-    /// Adds the user message to the transcript and runs the full
-    /// agent loop (LLM calls + tool execution).
     pub async fn prompt(&self, content: Vec<ContentBlock>) -> Result<(), AgentError> {
         let timestamp = now_ms();
 
-        // Acquire the active run lock.
         let (abort_token, steering_abort) = {
             let mut run = self.active_run.lock().expect("active_run lock poisoned");
             if run.is_some() {
@@ -313,18 +271,15 @@ impl Agent {
             (token, steering_abort)
         };
 
-        // Add user message to state.
         {
             let mut state = self.state.write().await;
             state.add_user_message(content, timestamp);
         }
 
-        // Run the agent loop.
         let result = self
             .run_loop(Some(abort_token.clone()), steering_abort)
             .await;
 
-        // Release the active run.
         {
             let mut run = self.active_run.lock().expect("active_run lock poisoned");
             *run = None;
@@ -333,7 +288,6 @@ impl Agent {
         result
     }
 
-    /// Continue the conversation (e.g., after user abort or from a loaded session).
     pub async fn continue_(&self) -> Result<(), AgentError> {
         let (abort_token, steering_abort) = {
             let mut run = self.active_run.lock().expect("active_run lock poisoned");
@@ -361,13 +315,12 @@ impl Agent {
         result
     }
 
-    /// Run the full outer agent loop.
     async fn run_loop(
         &self,
         abort_token: Option<CancellationToken>,
         steering_abort: Arc<AtomicBool>,
     ) -> Result<(), AgentError> {
-        // Get the provider for the current model (read lock, then drop).
+        // Get the provider for the current model, then drop the read lock.
         let provider_api = {
             let state = self.state.read().await;
             state.model.api
@@ -382,8 +335,6 @@ impl Agent {
                     retry_after_ms: None,
                 })?;
 
-        // Pass shared queue references into the loop so steer()
-        // and the loop see the same queues.
         let follow_up_queue = self.follow_up_queue.clone();
         let steering_queue = self.steering_queue.clone();
         let steering_has_items = self.steering_has_items.clone();
@@ -409,7 +360,6 @@ impl Agent {
         Ok(())
     }
 
-    /// Abort the currently running agent loop.
     pub fn abort(&self) -> Result<(), AgentError> {
         let run = self.active_run.lock().expect("active_run lock poisoned");
         match run.as_ref() {
@@ -424,14 +374,6 @@ impl Agent {
 
     // ── Steering ──────────────────────────────────────────────
 
-    /// Inject a steering message that interrupts the current turn.
-    ///
-    /// If the agent is running, the message is added to the transcript
-    /// before the next inner-loop iteration. The current LLM stream
-    /// is aborted via the per-stream steering flag.
-    ///
-    /// If the agent is not running, the message is queued for the next
-    /// `prompt()` or `continue_()` call.
     pub fn steer(&self, content: Vec<ContentBlock>) {
         let msg = Message::User {
             content,
@@ -446,7 +388,6 @@ impl Agent {
         }
         self.steering_has_items.store(true, Ordering::Relaxed);
 
-        // Signal the per-stream abort so the inner loop restarts.
         if let Ok(run) = self.active_run.lock()
             && let Some(ref active) = *run
         {
@@ -455,7 +396,6 @@ impl Agent {
         }
     }
 
-    /// Queue a follow-up message.
     pub fn follow_up(&self, content: Vec<ContentBlock>) {
         let msg = Message::User {
             content,
@@ -468,7 +408,6 @@ impl Agent {
         queue.push((msg, now_ms()));
     }
 
-    /// Return pending queue lengths: (steering, follow-up).
     pub fn queue_lengths(&self) -> (usize, usize) {
         let steering = self
             .steering_queue
@@ -483,8 +422,6 @@ impl Agent {
 
     // ── Events ────────────────────────────────────────────────
 
-    /// Subscribe to agent events. Returns a receiver that will get all
-    /// future events.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.event_tx.subscribe()
     }

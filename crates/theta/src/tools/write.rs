@@ -51,9 +51,7 @@ impl AgentTool for WriteTool {
     }
 
     fn execution_mode(&self) -> ToolExecutionMode {
-        // Write is sequential: must run after reads for correctness.
-        // Actually, write is independent of reads so could be parallel,
-        // but pi treats it as sequential for safety (avoid race on same file).
+        // Write could be parallel but is sequential to avoid race on same file.
         ToolExecutionMode::Sequential
     }
 
