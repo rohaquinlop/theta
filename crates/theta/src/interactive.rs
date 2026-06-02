@@ -461,6 +461,15 @@ async fn create_agent(
     let settings = crate::settings::load_settings().await;
     loop_config.max_context_window = settings.max_context_window;
     agent.set_config(loop_config);
+
+    // Restore saved MiMo cluster URL so token-plan keys route to the
+    // user's preferred region instead of defaulting to SGP.
+    if model.provider == theta_ai::types::Provider::XiaomiMiMo
+        && let Some(ref cluster_url) = settings.mimo_cluster_url
+    {
+        agent.set_mimo_base_url(cluster_url);
+    }
+
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
