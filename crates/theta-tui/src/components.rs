@@ -11,6 +11,7 @@ pub mod mimo_cluster;
 pub mod model_selector;
 pub mod session_picker;
 pub mod status;
+pub mod theme_selector;
 pub mod thinking_selector;
 pub mod tree_selector;
 

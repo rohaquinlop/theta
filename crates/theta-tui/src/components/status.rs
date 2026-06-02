@@ -328,7 +328,7 @@ impl StatusBar {
         all_spans.push(state_span);
 
         let line = Line::from(all_spans);
-        let para = Paragraph::new(line).style(Style::default().bg(Color::Reset));
+        let para = Paragraph::new(line).style(Style::default().bg(self.theme.bg));
         frame.render_widget(para, area);
     }
 
@@ -341,7 +341,7 @@ impl StatusBar {
         ext_row: Option<&StatusRow>,
     ) {
         let Some(row) = ext_row else {
-            let para = Paragraph::new("").style(Style::default().bg(Color::Reset));
+            let para = Paragraph::new("").style(Style::default().bg(self.theme.bg));
             frame.render_widget(para, area);
             return;
         };
@@ -378,7 +378,7 @@ impl StatusBar {
         }
 
         let line = Line::from(truncate_line_chars(spans, total_width));
-        let para = Paragraph::new(line).style(Style::default().bg(Color::Reset));
+        let para = Paragraph::new(line).style(Style::default().bg(self.theme.bg));
         frame.render_widget(para, area);
     }
 }

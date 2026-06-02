@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem},
+    widgets::{Block, Borders, List, ListItem},
 };
 use tokio::sync::mpsc;
 
@@ -21,6 +21,7 @@ use crate::components::mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
 use crate::components::status::StatusBar;
+use crate::components::theme_selector::ThemeSelector;
 use crate::components::thinking_selector::ThinkingSelector;
 use crate::components::tree_selector::{TreeFilter, TreeSelector};
 use crate::components::{Action, Component};
@@ -79,6 +80,10 @@ pub enum TuiAction {
     /// Select a MiMo cluster URL.
     SelectMimoCluster {
         url: String,
+    },
+    /// Persist a theme selection to config.toml.
+    SetTheme {
+        name: String,
     },
 }
 
@@ -284,6 +289,7 @@ pub struct App {
     model_selector: ModelSelector,
     tree_selector: TreeSelector,
     thinking_selector: ThinkingSelector,
+    theme_selector: ThemeSelector,
     mimo_cluster_selector: MimoClusterSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
@@ -298,6 +304,8 @@ pub struct App {
     pub event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     theme: Theme,
     theme_idx: usize,
+    current_theme_name: String,
+    user_themes: HashMap<String, Theme>,
     streaming: bool,
     /// Set to true when MessageEnd fires — transition from LLM streaming
     /// to tool execution phase. ToolStart events after this flag show a visual cue.
@@ -438,6 +446,8 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
+        user_themes: HashMap<String, Theme>,
+        initial_theme_name: &str,
         model: &str,
         session_id: &str,
         thinking: &str,
@@ -469,13 +479,21 @@ impl App {
             .collect();
         editor.focus(true); // Editor starts focused.
 
+        let theme_names = Theme::all_names(&user_themes);
+
         Self {
             working_dir,
             chat: Chat::new(theme.clone()),
             editor,
             status,
             theme: theme.clone(),
-            theme_idx: 0,
+            theme_idx: theme_names
+                .iter()
+                .position(|n| n == initial_theme_name)
+                .unwrap_or(0),
+            current_theme_name: initial_theme_name.to_string(),
+            theme_selector: ThemeSelector::new(theme_names, user_themes.clone()),
+            user_themes,
             session_picker: None,
             model_selector: ModelSelector::new(models, favorites, theme.clone()),
             tree_selector: TreeSelector::new(theme.clone()),
@@ -584,6 +602,12 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
+        // Fill root background so themes with non-default bg take effect.
+        frame.render_widget(
+            Block::default().style(Style::default().bg(self.theme.bg)),
+            area,
+        );
+
         // Model selector overlay — renders on top of everything.
         self.model_selector.render(area, frame);
         if self.model_selector.visible {
@@ -595,6 +619,10 @@ impl App {
         }
         self.thinking_selector.render(area, frame);
         if self.thinking_selector.visible {
+            return;
+        }
+        self.theme_selector.render(area, frame, &self.theme);
+        if self.theme_selector.visible {
             return;
         }
         self.mimo_cluster_selector.render(area, frame, &self.theme);
@@ -704,7 +732,10 @@ impl App {
             .border_style(border_style)
             .title(title);
         let inner = block.inner(area);
-        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(self.theme.bg)),
+            area,
+        );
         frame.render_widget(block, area);
         if inner.height == 0 || self.queued_messages.is_empty() {
             return;
@@ -756,10 +787,13 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .style(Style::default().bg(Color::Black))
+            .style(Style::default().bg(self.theme.bg))
             .border_style(Style::default().fg(self.theme.border));
         let inner = block.inner(popup);
-        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(self.theme.bg)),
+            popup,
+        );
         frame.render_widget(block, popup);
 
         let visible_count = inner.height as usize;
@@ -776,7 +810,7 @@ impl App {
                 let style = if idx == selected {
                     Style::default().fg(self.theme.accent).bg(Color::DarkGray)
                 } else {
-                    Style::default().bg(Color::Black)
+                    Style::default().bg(self.theme.bg)
                 };
                 ListItem::new(Line::from(Span::styled(text, style)))
             })
@@ -899,6 +933,44 @@ impl App {
                     }
                     crossterm::event::KeyCode::Down => {
                         self.thinking_selector.select_down();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Theme selector mode — handle keys exclusively.
+        if self.theme_selector.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.theme_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(name) = self.theme_selector.selected_theme() {
+                            let name = name.to_string();
+                            if let Some(theme) = self.theme_selector.resolve_selected() {
+                                self.apply_theme(theme, &name);
+                            }
+                            let _ = self
+                                .action_tx
+                                .send(TuiAction::SetTheme { name: name.clone() });
+                            self.chat.add_message(ChatMessage {
+                                role: ChatRole::System,
+                                text: format!("Theme: {name}"),
+                                tool_call_id: None,
+                                is_streaming: false,
+                                is_error: false,
+                            });
+                        }
+                        self.theme_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.theme_selector.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.theme_selector.select_down();
                     }
                     _ => {}
                 }
@@ -1345,21 +1417,14 @@ impl App {
     }
 
     fn cycle_theme(&mut self) {
-        let names = Theme::names();
+        let names = Theme::all_names(&self.user_themes);
+        if names.is_empty() {
+            return;
+        }
         self.theme_idx = (self.theme_idx + 1) % names.len();
-        let name = names[self.theme_idx];
-        let theme = Theme::named(name);
-        self.theme = theme.clone();
-        self.chat.set_theme(theme.clone());
-        self.editor.set_theme(theme.clone());
-        self.status.set_theme(theme.clone());
-        self.model_selector.set_theme(theme.clone());
-        if let Some(ref mut picker) = self.session_picker {
-            picker.set_theme(theme.clone());
-        }
-        if let Some(ref mut login) = self.login_flow {
-            login.set_theme(theme);
-        }
+        let name = names[self.theme_idx].clone();
+        let theme = Theme::named_with_users(&name, &self.user_themes);
+        self.apply_theme(theme, &name);
         self.chat.add_message(ChatMessage {
             role: ChatRole::System,
             text: format!("Theme: {name}"),
@@ -1367,6 +1432,26 @@ impl App {
             is_streaming: false,
             is_error: false,
         });
+    }
+
+    /// Apply a theme to all components and update the active theme name.
+    fn apply_theme(&mut self, theme: Theme, name: &str) {
+        self.theme = theme.clone();
+        self.current_theme_name = name.to_string();
+        self.chat.set_theme(theme.clone());
+        self.editor.set_theme(theme.clone());
+        self.status.set_theme(theme.clone());
+        self.model_selector.set_theme(theme.clone());
+        self.theme_selector.set_themes(
+            Theme::all_names(&self.user_themes),
+            self.user_themes.clone(),
+        );
+        if let Some(ref mut picker) = self.session_picker {
+            picker.set_theme(theme.clone());
+        }
+        if let Some(ref mut login) = self.login_flow {
+            login.set_theme(theme);
+        }
     }
 
     /// Handle a slash command (text after the initial `/`).
@@ -1392,6 +1477,7 @@ impl App {
                     "  /sessions       List recent sessions (in picker press s to sort)",
                     "  /resume         Alias for /sessions",
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
+                    "  /themes         Open theme picker with live preview",
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
                     "  /diag on|off    Toggle diagnostic event stream in chat",
@@ -1415,7 +1501,7 @@ impl App {
                 let keys_text = [
                     "Global shortcuts:",
                     "  Ctrl+P         Open model picker",
-                    "  Ctrl+T         Cycle theme (default / monokai)",
+                    "  Ctrl+T         Cycle theme (default / monokai / user themes)",
                     "  Ctrl+C         Cancel agent execution / quit confirm (press twice)",
                     "  Esc            Same as Ctrl+C",
                     "  Ctrl+U         Focus queued messages (arrows, Enter, Del)",
@@ -1598,6 +1684,9 @@ impl App {
             "tree" => {
                 let filter = if arg.is_empty() { "default" } else { arg };
                 let _ = self.action_tx.send(TuiAction::ShowTree(filter.to_string()));
+            }
+            "themes" | "theme" => {
+                self.theme_selector.show(&self.current_theme_name);
             }
             "skills" => {
                 if self.skill_commands.is_empty() {

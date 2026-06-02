@@ -2170,14 +2170,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "dirs",
  "futures",
  "open",
  "pulldown-cmark",
  "ratatui",
+ "serde",
  "serde_json",
  "syntect",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "unicode-width 0.2.0",
 ]

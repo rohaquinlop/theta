@@ -93,10 +93,9 @@ pub async fn run_tui(
     // Agent populated immediately if auth available, deferred until after login otherwise.
     let agent_cell: AgentCell = Arc::new(RwLock::new(None));
 
-    let theme = match config.theme.as_deref() {
-        Some("monokai") => Theme::monokai(),
-        _ => Theme::default(),
-    };
+    let user_themes = theta_tui::theme::load_user_themes();
+    let initial_theme_name = config.theme.as_deref().unwrap_or("default");
+    let theme = Theme::named_with_users(initial_theme_name, &user_themes);
 
     // ScriptHooks notify after each tool execution to wake up the TUI poller.
     let status_notify = Arc::new(tokio::sync::Notify::new());
@@ -356,6 +355,26 @@ pub async fn run_tui(
             description: "Open session tree selector".into(),
         },
         CommandEntry {
+            name: "themes".into(),
+            description: "Open theme picker with live preview".into(),
+        },
+        CommandEntry {
+            name: "status".into(),
+            description: "Show live runtime status snapshot".into(),
+        },
+        CommandEntry {
+            name: "timeline".into(),
+            description: "Show compact timeline from latest run report".into(),
+        },
+        CommandEntry {
+            name: "diag".into(),
+            description: "Toggle diagnostic event stream (on/off)".into(),
+        },
+        CommandEntry {
+            name: "tools-rate".into(),
+            description: "Set tool progress update rate (1-60 Hz)".into(),
+        },
+        CommandEntry {
             name: "login".into(),
             description: "Log in to a provider".into(),
         },
@@ -384,6 +403,8 @@ pub async fn run_tui(
     let persisted = crate::settings::load_settings().await;
     let mut app = App::new(
         theme.clone(),
+        user_themes,
+        initial_theme_name,
         &model.id,
         "", // session created lazily on first message
         thinking,
@@ -1637,6 +1658,23 @@ async fn handle_tui_action(
             }
 
             let _ = event_tx.send(TuiEvent::Info(format!("MiMo cluster set to {url}")));
+        }
+        TuiAction::SetTheme { name } => {
+            let mut cfg = match crate::config::load_config(None).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = event_tx.send(TuiEvent::Error(format!("Failed to load config: {e}")));
+                    return;
+                }
+            };
+            cfg.theme = Some(name.clone());
+            if let Err(e) = crate::config::save_config(&cfg, None).await {
+                let _ = event_tx.send(TuiEvent::Error(format!("Failed to save theme: {e}")));
+                return;
+            }
+            let _ = event_tx.send(TuiEvent::Info(format!(
+                "Theme '{name}' saved to config.toml"
+            )));
         }
     }
 }

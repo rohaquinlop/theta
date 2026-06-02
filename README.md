@@ -27,15 +27,77 @@ cargo run -- rpc
 - Sending `@path/to/file` appends that file's contents to the prompt context.
 - `/sessions` opens the session picker.
 - `/tree [default|no-tools|user-only|labeled-only|all]` opens branch/session tree picker.
+- `/themes` opens the theme picker with live color preview.
 - `Enter` behavior is configurable via `settings.json` (`enter_behavior: "send" | "newline"`).
 - With `enter_behavior = "send"` (default), `Enter` sends normally when idle; while streaming it queues a steering message.
 - `Shift+Enter` inserts a newline in the editor.
 - `Alt+Enter` inserts a newline (or queues follow-up depending on mode config).
 - `Ctrl+Enter` queues a follow-up message.
 - `Ctrl+P` opens model selector.
-- `Ctrl+T` cycles themes.
+- `Ctrl+T` cycles themes (built-in + user themes).
 - `Ctrl+U` edits the queued (steering/follow-up) message.
 - `Tab` switches focus between input and chat.
+
+## Themes
+
+Theta ships two built-in themes (`default` and `monokai`) and supports user-defined TOML theme files, inspired by Helix.
+
+**Theme locations:**
+
+- `~/.theta/themes/*.toml` — user themes (filename stem becomes the theme name)
+
+**Switching themes:**
+
+- `Ctrl+T` cycles through all available themes (built-in + user).
+- `/themes` opens a picker with a live color preview of each theme before applying.
+- Set `theme = "name"` in `~/.theta/config.toml` to persist a default across sessions. Selecting a theme via `/themes` does this automatically.
+
+**Theme file format:**
+
+```toml
+# ~/.theta/themes/catppuccin_mocha.toml
+
+# Base a new theme on a built-in ("default" or "monokai"). All fields optional.
+inherits = "default"
+
+# UI colors — hex, named ("red", "cyan", "dark_gray"), or rgb tuple.
+accent   = "#cba6f7"
+bg       = "#1e1e2e"
+fg       = "#cdd6f4"
+dim      = "#9399b2"
+border   = "#313244"
+highlight = "#45475a"
+success  = "#a6e3a1"
+error    = "#f38ba8"
+warning  = "#f9e2af"
+
+# Bubbles
+user_bubble      = "#313244"
+assistant_bubble = "#1e1e2e"
+
+# Code blocks
+code_fg = "#a6e3a1"
+code_bg = "#181825"
+
+# Markdown
+md_heading_1    = "#f38ba8"
+md_heading_2    = "#fab387"
+md_list_marker  = "#94e2d5"
+md_quote        = "#f5c2e7"
+md_link         = "#89b4fa"
+md_inline_code  = "#a6e3a1"
+md_rule_border  = "#45475a"
+md_table_header  = "#cba6f7"
+md_task_marker   = "#a6e3a1"
+```
+
+**Color formats:**
+
+- Named: `"red"`, `"green"`, `"cyan"`, `"dark_gray"`, `"reset"`, etc.
+- Hex: `"#ff8800"` or `"ff8800"`
+- RGB: `"rgb(255, 136, 0)"`
+
+An example Dracula theme is shipped at `crates/theta/examples/dracula.toml`.
 
 ## Extensions (Rhai Scripts)
 
@@ -144,7 +206,7 @@ provider_open_cooldown_ms = 30000
 
 Available fields:
 
-- `theme` (string, optional): TUI theme name. Supported built-ins are `default` and `monokai`.
+- `theme` (string, optional): TUI theme name. Built-ins: `default`, `monokai`. User themes placed in `~/.theta/themes/*.toml` are also available (see [Themes](#themes)).
 - `working_dir` (string/path, optional): Working directory override in config. Note: current CLI behavior uses `--working-dir` (or current shell dir) and does not currently read this field.
 - `profile` (string, default: `"safe"`): Runtime hardening profile. Options: `dev` (lenient, permissive), `safe` (default, balanced), `prod` (strict, aggressive limits).
 - `[model].default` (string, optional): default model ID when `--model` is not provided.

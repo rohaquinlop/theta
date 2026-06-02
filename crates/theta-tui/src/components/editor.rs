@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Paragraph},
 };
 use std::path::PathBuf;
 
@@ -669,7 +669,14 @@ impl Editor {
 
     fn select_prev(&mut self) {
         if let Some(ref mut ac) = self.autocomplete {
-            ac.selected = ac.selected.saturating_sub(1);
+            if ac.items.is_empty() {
+                return;
+            }
+            ac.selected = if ac.selected == 0 {
+                ac.items.len() - 1
+            } else {
+                ac.selected - 1
+            };
         }
     }
 
@@ -784,9 +791,13 @@ impl Component for Editor {
             visible_lines.push(Line::from(spans));
         }
 
-        frame.render_widget(Clear, area);
+        let bg_block = Block::default().style(Style::default().bg(self.theme.bg));
+        frame.render_widget(bg_block, area);
         frame.render_widget(block, area);
-        frame.render_widget(Paragraph::new(Text::from(visible_lines)), inner);
+        frame.render_widget(
+            Paragraph::new(Text::from(visible_lines)).style(Style::default().bg(self.theme.bg)),
+            inner,
+        );
 
         if self.focused {
             let (cursor_line, cursor_col) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);

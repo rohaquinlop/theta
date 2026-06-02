@@ -1,0 +1,48 @@
+# ~/.theta/themes/dracula.toml
+#
+# User theme file. Place TOML files in ~/.theta/themes/ to make them
+# available via Ctrl+T cycling and the `theme` field in ~/.theta/config.toml.
+#
+# The filename stem becomes the theme name (e.g. "dracula" for dracula.toml).
+#
+# `inherits` selects a built-in base theme ("default" or "monokai").
+# All other keys are optional overrides.
+#
+# Color formats:
+#   - Named: "red", "green", "cyan", "dark_gray", "reset", etc.
+#   - Hex:   "#ff8800" or "ff8800"
+#   - RGB:   "rgb(136, 68, 255)"
+
+inherits = "default"
+
+# UI colors
+accent   = "#bd93f9"   # purple
+fg       = "#f8f8f2"
+dim      = "#6272a4"
+bg       = "#282a36"
+border   = "#44475a"
+highlight = "#44475a"
+
+# Semantic colors
+success  = "#50fa7b"
+error    = "#ff5555"
+warning  = "#f1fa8c"
+
+# Bubbles
+user_bubble      = "#44475a"
+assistant_bubble = "#282a36"
+
+# Code blocks
+code_fg = "#f1fa8c"
+code_bg = "#1e1f29"
+
+# Markdown
+md_heading_1   = "#bd93f9"
+md_heading_2   = "#8be9fd"
+md_list_marker  = "#f1fa8c"
+md_quote        = "#6272a4"
+md_link         = "#8be9fd"
+md_inline_code  = "#f1fa8c"
+md_rule_border  = "#44475a"
+md_table_header  = "#ff79c6"
+md_task_marker   = "#50fa7b"
