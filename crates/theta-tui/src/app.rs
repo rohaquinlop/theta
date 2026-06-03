@@ -591,6 +591,7 @@ impl App {
                 }
                 _ = redraw_tick.tick() => {
                     self.clear_expired_quit_confirmation();
+                    self.status.clear_expired_detail();
                     self.update_tool_elapsed();
                     let _ = term.draw(|frame| self.draw(frame));
                 }

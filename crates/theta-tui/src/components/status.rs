@@ -37,6 +37,8 @@ pub struct StatusBar {
     extension_row_count: usize,
     spinner_idx: usize,
     last_dot_tick: std::time::Instant,
+    /// When `detail` was last set (non-empty); used to auto-expire transient messages.
+    detail_set_at: Option<std::time::Instant>,
     theme: Theme,
 }
 
@@ -68,6 +70,7 @@ impl StatusBar {
             extension_row_count: 0,
             spinner_idx: 0,
             last_dot_tick: std::time::Instant::now(),
+            detail_set_at: None,
             theme,
         }
     }
@@ -78,6 +81,22 @@ impl StatusBar {
 
     pub fn set_detail(&mut self, detail: &str) {
         self.detail = detail.to_string();
+        self.detail_set_at = if detail.is_empty() {
+            None
+        } else {
+            Some(std::time::Instant::now())
+        };
+    }
+
+    /// Auto-expire transient detail messages after 2 seconds.
+    pub fn clear_expired_detail(&mut self) {
+        const DETAIL_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        if let Some(at) = self.detail_set_at
+            && at.elapsed() >= DETAIL_TTL
+        {
+            self.detail.clear();
+            self.detail_set_at = None;
+        }
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
