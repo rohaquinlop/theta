@@ -6,7 +6,7 @@ pub fn window_title(working_dir: &std::path::Path) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "?".to_string());
-    format!("🐈‍⬛ {dir_name}")
+    format!("🐈‍⬛ - {dir_name}")
 }
 
 pub mod cli;
