@@ -15,17 +15,68 @@ MichiN is a minimal terminal coding-agent harness in Rust, inspired by Pi.
 
 ```bash
 cargo run -- tui
-cargo run -- prompt --new "inspect this repo"
-cargo run -- prompt --continue "follow up"
-cargo run -- continue "next task"
+cargo run -- prompt "inspect this repo"
 cargo run -- rpc
+```
+
+## Print Mode (no TUI)
+
+Print mode runs the agent without the TUI, streaming output directly to stdout.
+Good for scripts, pipes, quick one-shot questions, or when you don't want
+an interactive UI.
+
+### Commands
+
+```bash
+# Start a new session with a prompt
+michin prompt "explain how async rust works"
+
+# Continue the last session (generates autonomously)
+michin continue
+
+# Continue the last session with follow-up text
+michin continue "but why though"
+
+# Resume a specific session by ID
+michin resume <session-id>
+michin resume <session-id> "pick up where we left off"
+```
+
+### Common Flags
+
+All print-mode commands accept these global flags:
+
+| Flag                 | Description                                    |
+|----------------------|------------------------------------------------|
+| `-m`, `--model`      | Override model (e.g. `o4`, `deepseek-v4-pro`)  |
+| `-t`, `--thinking`   | Thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `-C`, `--working-dir` | Working directory override                     |
+| `--config`           | Config file path                               |
+
+### Examples
+
+```bash
+# One-shot with a specific model
+michin prompt -m o4-mini "review this PR diff"
+
+# Continue last session with low thinking
+michin continue -t low
+
+# Resume a session with a different model
+michin resume -m deepseek-v4-pro abc123 "explain the architecture"
+
+# List sessions, then resume one
+michin sessions
+michin resume abc123
 ```
 
 ## Core Commands
 
 - `michin` or `michin tui` starts a fresh TUI chat.
+- `michin prompt <text>` starts a new session in print mode.
+- `michin continue [text]` continues the latest session in print mode.
+- `michin resume <id> [text]` resumes a specific session in print mode.
 - `michin sessions` lists saved sessions.
-- `michin resume <id>` resumes a session.
 - `michin fork <id>` forks an existing session.
 - `michin login <provider>` stores auth.
 - `michin rpc` reads JSON requests from stdin and writes JSON responses to stdout.
