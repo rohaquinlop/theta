@@ -50,7 +50,7 @@ fn deepseek_v4_flash() -> Model {
             (ThinkingLevel::Low, None),
             (ThinkingLevel::Medium, None),
             (ThinkingLevel::High, Some("high".into())),
-            (ThinkingLevel::XHigh, Some("xhigh".into())),
+            (ThinkingLevel::XHigh, Some("max".into())),
         ]
         .into(),
         input: vec![Modality::Text],
