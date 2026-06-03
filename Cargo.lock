@@ -1106,6 +1106,145 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "michin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "clap",
+ "dirs",
+ "futures",
+ "glob",
+ "michin-agent-core",
+ "michin-ai",
+ "michin-ai-net",
+ "michin-models",
+ "michin-script",
+ "michin-tui",
+ "open",
+ "rand 0.8.6",
+ "regex",
+ "reqwest",
+ "rhai",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "michin-agent-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "michin-ai",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "michin-ai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "michin-ai-net"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "http",
+ "michin-ai",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "michin-models"
+version = "0.1.0"
+dependencies = [
+ "michin-ai",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "michin-script"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dirs",
+ "michin-agent-core",
+ "michin-ai",
+ "rhai",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "michin-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "dirs",
+ "futures",
+ "open",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "syntect",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2044,145 +2183,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "theta"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "clap",
- "dirs",
- "futures",
- "glob",
- "open",
- "rand 0.8.6",
- "regex",
- "reqwest",
- "rhai",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "similar",
- "tempfile",
- "theta-agent-core",
- "theta-ai",
- "theta-ai-net",
- "theta-models",
- "theta-script",
- "theta-tui",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "theta-agent-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "theta-ai",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "theta-ai"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "theta-ai-net"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "eventsource-stream",
- "futures",
- "futures-util",
- "http",
- "reqwest",
- "serde",
- "serde_json",
- "theta-ai",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "theta-models"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "theta-ai",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "theta-script"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dirs",
- "rhai",
- "serde",
- "serde_json",
- "tempfile",
- "theta-agent-core",
- "theta-ai",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "theta-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "dirs",
- "futures",
- "open",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "syntect",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "unicode-width 0.2.0",
 ]
 
 [[package]]

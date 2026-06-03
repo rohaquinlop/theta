@@ -1,0 +1,31 @@
+[package]
+name = "michin-ai-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Network-backed LLM provider implementations for MichiN"
+
+[features]
+default = []
+integration-tests = []
+
+[dependencies]
+michin-ai = { workspace = true, features = ["reqwest", "eventsource-stream"] }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,20 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/theta-ai",
-    "crates/theta-ai-net",
-    "crates/theta-agent-core",
-    "crates/theta-tui",
-    "crates/theta-models",
-    "crates/theta-script",
-    "crates/theta",
+    "crates/michin-ai",
+    "crates/michin-ai-net",
+    "crates/michin-agent-core",
+    "crates/michin-tui",
+    "crates/michin-models",
+    "crates/michin-script",
+    "crates/michin",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/rohaquinlop/theta"
+repository = "https://github.com/rohaquinlop/michin"
 
 [workspace.dependencies]
 # Async runtime
@@ -70,9 +70,9 @@ rand = "0.8"
 url = "2"
 
 # Internal crates
-theta-ai = { path = "crates/theta-ai", version = "0.1.0" }
-theta-ai-net = { path = "crates/theta-ai-net", version = "0.1.0" }
-theta-agent-core = { path = "crates/theta-agent-core", version = "0.1.0" }
-theta-tui = { path = "crates/theta-tui", version = "0.1.0" }
-theta-models = { path = "crates/theta-models", version = "0.1.0" }
-theta-script = { path = "crates/theta-script", version = "0.1.0" }
+michin-ai = { path = "crates/michin-ai", version = "0.1.0" }
+michin-ai-net = { path = "crates/michin-ai-net", version = "0.1.0" }
+michin-agent-core = { path = "crates/michin-agent-core", version = "0.1.0" }
+michin-tui = { path = "crates/michin-tui", version = "0.1.0" }
+michin-models = { path = "crates/michin-models", version = "0.1.0" }
+michin-script = { path = "crates/michin-script", version = "0.1.0" }

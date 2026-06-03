@@ -1,6 +1,14 @@
-# Theta
+# MichiN
 
-Theta is a minimal terminal coding-agent harness in Rust, inspired by Pi.
+```
+┌─────────────────┐
+│  /\_/\  ( o.o )  │
+│  > ^ <          │
+│  michin@dev:~$  │
+└─────────────────┘
+```
+
+MichiN is a minimal terminal coding-agent harness in Rust, inspired by Pi.
 
 ## Install / Run
 
@@ -14,12 +22,12 @@ cargo run -- rpc
 
 ## Core Commands
 
-- `theta` or `theta tui` starts a fresh TUI chat.
-- `theta sessions` lists saved sessions.
-- `theta resume <id>` resumes a session.
-- `theta fork <id>` forks an existing session.
-- `theta login <provider>` stores auth.
-- `theta rpc` reads JSON requests from stdin and writes JSON responses to stdout.
+- `michin` or `michin tui` starts a fresh TUI chat.
+- `michin sessions` lists saved sessions.
+- `michin resume <id>` resumes a session.
+- `michin fork <id>` forks an existing session.
+- `michin login <provider>` stores auth.
+- `michin rpc` reads JSON requests from stdin and writes JSON responses to stdout.
 
 ## TUI
 
@@ -40,22 +48,22 @@ cargo run -- rpc
 
 ## Themes
 
-Theta ships two built-in themes (`default` and `monokai`) and supports user-defined TOML theme files, inspired by Helix.
+MichiN ships two built-in themes (`default` and `monokai`) and supports user-defined TOML theme files, inspired by Helix.
 
 **Theme locations:**
 
-- `~/.theta/themes/*.toml` — user themes (filename stem becomes the theme name)
+- `~/.michin/themes/*.toml` — user themes (filename stem becomes the theme name)
 
 **Switching themes:**
 
 - `Ctrl+T` cycles through all available themes (built-in + user).
 - `/themes` opens a picker with a live color preview of each theme before applying.
-- Set `theme = "name"` in `~/.theta/config.toml` to persist a default across sessions. Selecting a theme via `/themes` does this automatically.
+- Set `theme = "name"` in `~/.michin/config.toml` to persist a default across sessions. Selecting a theme via `/themes` does this automatically.
 
 **Theme file format:**
 
 ```toml
-# ~/.theta/themes/catppuccin_mocha.toml
+# ~/.michin/themes/catppuccin_mocha.toml
 
 # Base a new theme on a built-in ("default" or "monokai"). All fields optional.
 inherits = "default"
@@ -97,11 +105,11 @@ md_task_marker   = "#a6e3a1"
 - Hex: `"#ff8800"` or `"ff8800"`
 - RGB: `"rgb(255, 136, 0)"`
 
-An example Dracula theme is shipped at `crates/theta/examples/dracula.toml`.
+An example Dracula theme is shipped at `crates/michin/examples/dracula.toml`.
 
 ## Extensions (Rhai Scripts)
 
-Theta supports scriptable tool hooks via `.rhai` files — no fork, no recompile, no external runtime. The agent can write these for you when you ask.
+MichiN supports scriptable tool hooks via `.rhai` files — no fork, no recompile, no external runtime. The agent can write these for you when you ask.
 
 **Ask the agent:**
 
@@ -111,10 +119,10 @@ Theta supports scriptable tool hooks via `.rhai` files — no fork, no recompile
 
 **Script locations:**
 
-- `~/.theta/extensions/*.rhai` — global (all projects)
-- `./.theta/extensions/*.rhai` — project-local
+- `~/.michin/extensions/*.rhai` — global (all projects)
+- `./.michin/extensions/*.rhai` — project-local
 
-**Example script** (`~/.theta/extensions/guard.rhai`):
+**Example script** (`~/.michin/extensions/guard.rhai`):
 
 ```rhai
 // Block dangerous commands
@@ -136,14 +144,14 @@ Scripts load automatically on next session. Script errors never block the tool t
 
 ## Custom System Prompt
 
-Theta checks for two override files in `~/.theta/` at session start:
+MichiN checks for two override files in `~/.michin/` at session start:
 
-- **`~/.theta/SYSTEM_PROMPT.md`** — if present, replaces the entire system prompt (project context, skills, tools, and response contract). Use for a fully custom prompt.
-- **`~/.theta/APPEND_SYSTEM_PROMPT.md`** — if present and `SYSTEM_PROMPT.md` does not exist, its content is appended to the normal system prompt. Use for adding extra instructions without rebuilding everything.
+- **`~/.michin/SYSTEM_PROMPT.md`** — if present, replaces the entire system prompt (project context, skills, tools, and response contract). Use for a fully custom prompt.
+- **`~/.michin/APPEND_SYSTEM_PROMPT.md`** — if present and `SYSTEM_PROMPT.md` does not exist, its content is appended to the normal system prompt. Use for adding extra instructions without rebuilding everything.
 
 If both files exist, only `SYSTEM_PROMPT.md` is used.
 
-**Example — appending a custom rule** (`~/.theta/APPEND_SYSTEM_PROMPT.md`):
+**Example — appending a custom rule** (`~/.michin/APPEND_SYSTEM_PROMPT.md`):
 
 ```markdown
 ## Custom Rule
@@ -151,7 +159,7 @@ If both files exist, only `SYSTEM_PROMPT.md` is used.
 Always mention the estimated token cost of each operation before executing it.
 ```
 
-**Example — full replacement** (`~/.theta/SYSTEM_PROMPT.md`):
+**Example — full replacement** (`~/.michin/SYSTEM_PROMPT.md`):
 
 ```markdown
 You are a helpful assistant with access to file tools.
@@ -162,7 +170,7 @@ No config changes needed — just drop the file in and start a new session.
 
 ## Config
 
-Config lives at `~/.theta/config.toml`.
+Config lives at `~/.michin/config.toml`.
 
 ```toml
 theme = "default"
@@ -206,7 +214,7 @@ provider_open_cooldown_ms = 30000
 
 Available fields:
 
-- `theme` (string, optional): TUI theme name. Built-ins: `default`, `monokai`. User themes placed in `~/.theta/themes/*.toml` are also available (see [Themes](#themes)).
+- `theme` (string, optional): TUI theme name. Built-ins: `default`, `monokai`. User themes placed in `~/.michin/themes/*.toml` are also available (see [Themes](#themes)).
 - `working_dir` (string/path, optional): Working directory override in config. Note: current CLI behavior uses `--working-dir` (or current shell dir) and does not currently read this field.
 - `profile` (string, default: `"safe"`): Runtime hardening profile. Options: `dev` (lenient, permissive), `safe` (default, balanced), `prod` (strict, aggressive limits).
 - `[model].default` (string, optional): default model ID when `--model` is not provided.
@@ -230,12 +238,12 @@ Available fields:
 
 Auth note:
 
-- API keys and OAuth tokens are persisted in `~/.theta/auth.json` (and can also come from env vars like `OPENAI_API_KEY`, `OPENAI_CODEX_TOKEN`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `MIMO_API_KEY`).
+- API keys and OAuth tokens are persisted in `~/.michin/auth.json` (and can also come from env vars like `OPENAI_API_KEY`, `OPENAI_CODEX_TOKEN`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `MIMO_API_KEY`).
 - The `[auth]` section is part of the internal config struct, but auth is loaded from `auth.json` at runtime.
 
 ## Settings File
 
-Session-level runtime settings are stored in `~/.theta/settings.json` (not in `config.toml`).
+Session-level runtime settings are stored in `~/.michin/settings.json` (not in `config.toml`).
 
 Fields currently persisted there:
 

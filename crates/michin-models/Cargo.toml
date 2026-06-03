@@ -1,0 +1,15 @@
+[package]
+name = "michin-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Built-in model catalog for MichiN"
+
+[dependencies]
+michin-ai = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

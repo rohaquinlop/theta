@@ -1,6 +1,6 @@
-# Theta — Agent Rules
+# MichiN — Agent Rules
 
-> Rules for coding agents working on Theta.
+> Rules for coding agents working on MichiN.
 
 ## Conversational Style
 
@@ -11,15 +11,15 @@
 
 ## Project Philosophy
 
-Theta = minimal terminal coding-agent harness in Rust, inspired by [pi](https://github.com/earendil-works/pi).
+MichiN = minimal terminal coding-agent harness in Rust, inspired by [pi](https://github.com/earendil-works/pi).
 
-> **Adapt theta to your workflows, not the other way around.**
+> **Adapt MichiN to your workflows, not the other way around.**
 
 Extend without forking internals: custom tools via Rust traits, skills via Markdown, prompt templates, Rhai scripts, themes. No sub-agents, no plan mode in core.
 
 ### The model decides, not the code
 
-Theta is an agent **harness** — it provides structure (tools, prompts, events) and gets out of the way.
+MichiN is an agent **harness** — it provides structure (tools, prompts, events) and gets out of the way.
 The LLM drives all behavioral decisions: when to use a skill, what mode to operate in,
 how to interpret user intent. Do not replace this with heuristic Rust code.
 
@@ -38,15 +38,15 @@ in Rust to drive agent behavior — stop. The system prompt is the right place f
 Six crates in Cargo workspace (`edition = "2024"`, `resolver = "3"`):
 
 ```
-crates/theta              — CLI + TUI + sessions + built-in tools + skills + themes + scripts + RPC
-crates/theta-agent-core   — agent runtime: Agent, loop, tool execution, compaction, events, hooks
-crates/theta-ai           — unified LLM API: types, provider trait, streaming, replay, two providers
-crates/theta-tui          — terminal UI (ratatui + crossterm): chat, editor, fuzzy, logins, selectors, status bar
-crates/theta-models       — built-in model catalog (compile-time definitions + runtime OpenCode fetch)
-crates/theta-script       — Rhai-powered hooks: before/after tool calls, TUI status rows
+crates/michin              — CLI + TUI + sessions + built-in tools + skills + themes + scripts + RPC
+crates/michin-agent-core   — agent runtime: Agent, loop, tool execution, compaction, events, hooks
+crates/michin-ai           — unified LLM API: types, provider trait, streaming, replay, two providers
+crates/michin-tui          — terminal UI (ratatui + crossterm): chat, editor, fuzzy, logins, selectors, status bar
+crates/michin-models       — built-in model catalog (compile-time definitions + runtime OpenCode fetch)
+crates/michin-script       — Rhai-powered hooks: before/after tool calls, TUI status rows
 ```
 
-**Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`, `theta-script`)
+**Dependency order:** `michin-ai` ← `michin-agent-core` ← `michin` (+ `michin-tui`, `michin-models`, `michin-script`)
 
 Each crate has its own `AGENTS.md` with crate-specific conventions. When working in a crate's code, load that crate's `AGENTS.md` file for detailed rules.
 
@@ -139,7 +139,7 @@ cargo clippy -- -D warnings
 # Full check before commit
 cargo fmt --check && cargo clippy -- -D warnings && cargo test
 
-# Run theta from source
+# Run michin from source
 cargo run -- <args>
 ```
 
@@ -157,7 +157,7 @@ After code changes (not docs): run `cargo fmt && cargo clippy -- -D warnings && 
 
 ## Tool System
 
-Four built-in tools: `read`, `write`, `edit`, `bash`. Each implements `theta_agent_core::AgentTool`.
+Four built-in tools: `read`, `write`, `edit`, `bash`. Each implements `michin_agent_core::AgentTool`.
 
 - Absolute paths honored directly (not clamped to working dir).
 - Output truncation at 2000 lines / 50KB.
@@ -166,11 +166,11 @@ Four built-in tools: `read`, `write`, `edit`, `bash`. Each implements `theta_age
 
 Three tiers:
 
-1. **Skills** (`SKILL.md` files) — Markdown with YAML frontmatter, discovered from `~/.theta/skills/` and `./.theta/skills/`.
-2. **Rhai Scripts** (`~/.theta/extensions/*.rhai`, `./.theta/extensions/*.rhai`) — Runtime hooks.
-3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Fork Theta, implement traits.
+1. **Skills** (`SKILL.md` files) — Markdown with YAML frontmatter, discovered from `~/.michin/skills/` and `./.michin/skills/`.
+2. **Rhai Scripts** (`~/.michin/extensions/*.rhai`, `./.michin/extensions/*.rhai`) — Runtime hooks.
+3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Fork MichiN, implement traits.
 
-When user says "modify/extend theta" without specifics: ask whether they want skill, script, or Rust change.
+When user says "modify/extend michin" without specifics: ask whether they want skill, script, or Rust change.
 
 ## Non-Goals
 

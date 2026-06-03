@@ -1,0 +1,1027 @@
+//! OpenAI Codex provider — ChatGPT Plus subscription authentication.
+//!
+//! Codex uses the **Responses API** at `chatgpt.com/backend-api/codex/responses`.
+//! Transport: WebSocket (primary) with SSE fallback.
+//!
+//! ## Headers
+//! - `OpenAI-Beta: responses=experimental` — required
+//! - `chatgpt-account-id` — extracted from JWT
+//! - `originator: theta` — request origin
+//! - `x-client-request-id` — per-request trace ID
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use futures_util::SinkExt;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::RwLock;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use michin_ai::error::MichiNError;
+use michin_ai::event::AssistantMessageEvent;
+use michin_ai::model::Model;
+use michin_ai::provider::{EventStream, Provider};
+use michin_ai::types::{
+    ContentBlock, Context, SimpleStreamOptions, StopReason, StreamOptions, ThinkingLevel, Tool,
+    Usage,
+};
+
+const CODEX_TOKEN_ENV: &str = "OPENAI_CODEX_TOKEN";
+
+pub struct OpenAiCodexProvider {
+    client: reqwest::Client,
+    token: RwLock<Option<String>>,
+}
+
+impl OpenAiCodexProvider {
+    pub fn new() -> Self {
+        let env_token = std::env::var(CODEX_TOKEN_ENV).ok();
+        // Codex uses WebSocket (tokio-tungstenite) for the streaming chat API
+        // and reqwest only for preliminary REST calls (auth, token refresh).
+        // The key setting here is connect_timeout — the rest (keepalive,
+        // pool_idle_timeout) affect the WebSocket-managed transport layer
+        // minimally but are harmless to keep for consistency with the
+        // OpenAiCompat provider configuration.
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest Client builder should not fail with default settings");
+        Self {
+            client,
+            token: RwLock::new(env_token),
+        }
+    }
+}
+
+impl Default for OpenAiCodexProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCodexProvider {
+    fn set_token(&self, token: &str) {
+        if let Ok(mut stored_token) = self.token.write() {
+            *stored_token = Some(token.to_string());
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn stream<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        options: &StreamOptions,
+    ) -> Result<EventStream<'a>, MichiNError> {
+        let token = self
+            .token
+            .read()
+            .ok()
+            .and_then(|stored_token| stored_token.clone())
+            .ok_or_else(|| MichiNError::MissingApiKey {
+                provider: michin_ai::types::Provider::OpenAiCodex,
+            })?;
+
+        let http_url = codex_url(&model.base_url);
+        let ws_url = codex_ws_url(&model.base_url);
+        let body = build_request_body(model, context, options);
+        let account_id = extract_account_id(&token).unwrap_or_default();
+
+        tracing::debug!(
+            "Codex model={} messages={}",
+            model.id,
+            context.messages.len(),
+        );
+
+        // Try WebSocket first (lower latency), fall back to SSE.
+        match ws_stream(&ws_url, &body, &account_id, &token, options.timeout_ms).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                tracing::warn!("Codex WebSocket failed, falling back to SSE: {e}");
+            }
+        }
+
+        sse_stream(
+            &self.client,
+            &http_url,
+            &body,
+            &account_id,
+            &token,
+            options.timeout_ms,
+        )
+        .await
+    }
+
+    async fn stream_simple<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<EventStream<'a>, MichiNError> {
+        let opts = StreamOptions {
+            max_tokens: options.max_tokens,
+            temperature: options.temperature,
+            top_p: None,
+            stop: None,
+            thinking_level: None,
+            include_usage: false,
+            json_mode: false,
+            seed: None,
+            service_tier: None,
+            timeout_ms: None,
+        };
+        self.stream(model, context, &opts).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL construction
+// ---------------------------------------------------------------------------
+
+pub fn codex_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/codex/responses") {
+        return base.to_string();
+    }
+    if base.ends_with("/codex") {
+        return format!("{base}/responses");
+    }
+    format!("{base}/codex/responses")
+}
+
+pub fn codex_ws_url(base_url: &str) -> String {
+    let http = codex_url(base_url);
+    if let Some(rest) = http.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = http.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        http
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE transport (fallback)
+// ---------------------------------------------------------------------------
+
+async fn sse_stream(
+    client: &reqwest::Client,
+    url: &str,
+    body: &Value,
+    account_id: &str,
+    token: &str,
+    timeout_ms: Option<u64>,
+) -> Result<EventStream<'static>, MichiNError> {
+    let mut req = client
+        .post(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("accept", "text/event-stream")
+        .header("originator", "theta");
+
+    if !account_id.is_empty() {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+
+    if let Some(timeout_ms) = timeout_ms {
+        req = req.timeout(std::time::Duration::from_millis(timeout_ms));
+    }
+
+    let response = req.json(body).send().await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let retry_ms = response
+            .headers()
+            .get("retry-after-ms")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+        let body_text = response.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            return Err(MichiNError::ApiError {
+                status: 401,
+                message: "ChatGPT session token expired. Re-authenticate with `theta login`."
+                    .into(),
+                retry_after_ms: None,
+            });
+        }
+        return Err(MichiNError::ApiError {
+            status: status.as_u16(),
+            message: body_text,
+            retry_after_ms: retry_ms,
+        });
+    }
+
+    let stream = byte_stream_to_events(response.bytes_stream());
+    Ok(stream)
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket transport (primary)
+// ---------------------------------------------------------------------------
+
+pub async fn ws_stream(
+    url: &str,
+    body: &Value,
+    account_id: &str,
+    token: &str,
+    timeout_ms: Option<u64>,
+) -> Result<EventStream<'static>, MichiNError> {
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    let mut req_builder = http::Request::builder()
+        .uri(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("originator", "theta");
+
+    if !account_id.is_empty() {
+        req_builder = req_builder.header("chatgpt-account-id", account_id);
+    }
+
+    let req = req_builder.body(()).map_err(|e| MichiNError::ApiError {
+        status: 500,
+        message: format!("WebSocket request build failed: {e}"),
+        retry_after_ms: None,
+    })?;
+
+    let connect = tokio_tungstenite::connect_async(req);
+    let (ws_stream, _) = if let Some(timeout_ms) = timeout_ms {
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), connect)
+            .await
+            .map_err(|_| MichiNError::ApiError {
+                status: 408,
+                message: "WebSocket connect timed out".into(),
+                retry_after_ms: None,
+            })?
+    } else {
+        connect.await
+    }
+    .map_err(|e| MichiNError::ApiError {
+        status: 500,
+        message: format!("WebSocket connect failed: {e}"),
+        retry_after_ms: None,
+    })?;
+    let (mut write, read) = ws_stream.split();
+
+    // Send the JSON body as a text frame.
+    let payload = serde_json::to_string(body).map_err(MichiNError::Json)?;
+    write
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|e| MichiNError::ApiError {
+            status: 500,
+            message: format!("WebSocket send failed: {e}"),
+            retry_after_ms: None,
+        })?;
+
+    // Read frames — each text frame is a complete JSON event.
+    let events = futures::stream::unfold(
+        (read, CodexEventParser::default(), VecDeque::new(), false),
+        |(mut read, mut parser, mut pending, mut done_emitted)| async move {
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    if matches!(event, AssistantMessageEvent::Done { .. }) {
+                        done_emitted = true;
+                    }
+                    return Some((event, (read, parser, pending, done_emitted)));
+                }
+
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        pending.extend(parser.parse_json_str(&text));
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        if !done_emitted && !parser.done_emitted() {
+                            done_emitted = true;
+                            return Some((done_event(), (read, parser, pending, done_emitted)));
+                        }
+                        return None;
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            AssistantMessageEvent::Error {
+                                code: "ws".into(),
+                                message: e.to_string(),
+                            },
+                            (read, parser, pending, done_emitted),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        },
+    )
+    .boxed();
+
+    Ok(events)
+}
+
+// ---------------------------------------------------------------------------
+// Shared stream processing
+// ---------------------------------------------------------------------------
+
+/// Convert a byte stream into buffered, newline-delimited events.
+fn byte_stream_to_events(
+    byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+    + Send
+    + Unpin
+    + 'static,
+) -> EventStream<'static> {
+    futures::stream::unfold(
+        (
+            byte_stream,
+            String::new(),
+            false,
+            CodexEventParser::default(),
+            VecDeque::new(),
+            false,
+        ),
+        |(mut stream, mut buf, mut exhausted, mut parser, mut pending, mut done_emitted)| async move {
+            if exhausted {
+                return None;
+            }
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    if matches!(event, AssistantMessageEvent::Done { .. }) {
+                        done_emitted = true;
+                    }
+                    return Some((event, (stream, buf, exhausted, parser, pending, done_emitted)));
+                }
+
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].to_string();
+                    buf = buf[pos + 1..].to_string();
+                    pending.extend(parser.parse_sse_line(&line));
+                    if let Some(event) = pending.pop_front() {
+                        if matches!(event, AssistantMessageEvent::Done { .. }) {
+                            done_emitted = true;
+                        }
+                        return Some((event, (stream, buf, exhausted, parser, pending, done_emitted)));
+                    }
+                }
+
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Some(Err(e)) => {
+                        exhausted = true;
+                        return Some((
+                            AssistantMessageEvent::Error {
+                                code: "stream".into(),
+                                message: e.to_string(),
+                            },
+                            (stream, buf, exhausted, parser, pending, done_emitted),
+                        ));
+                    }
+                    None => {
+                        exhausted = true;
+                        if !done_emitted && !parser.done_emitted() {
+                            done_emitted = true;
+                            return Some((done_event(), (stream, buf, exhausted, parser, pending, done_emitted)));
+                        }
+                        return None;
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+pub fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
+    let (sanitized_messages, _stats) =
+        michin_ai::sanitize_messages_for_replay(&context.messages, model);
+    let sanitized_context = Context {
+        system: context.system.clone(),
+        messages: sanitized_messages,
+        tools: context.tools.clone(),
+        thinking_level: context.thinking_level,
+    };
+    let messages = convert_messages(model, &sanitized_context);
+    let instructions = extract_system_text(&context.system)
+        .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+
+    let mut body = serde_json::json!({
+        "model": model.id,
+        "store": false,
+        "stream": true,
+        "instructions": instructions,
+        "input": messages,
+        "text": { "verbosity": "low" },
+        "include": ["reasoning.encrypted_content"],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+    });
+
+    if !sanitized_context.tools.is_empty() {
+        body["tools"] = serde_json::json!(convert_tools(&sanitized_context.tools));
+    }
+    if let Some(max_tokens) = options.max_tokens {
+        body["max_output_tokens"] = serde_json::json!(max_tokens);
+    }
+    if let Some(temp) = options.temperature {
+        body["temperature"] = serde_json::json!(temp);
+    }
+    if let Some(ref tier) = options.service_tier {
+        body["service_tier"] = serde_json::json!(tier);
+    }
+
+    let effort_level = options.thinking_level.or(context.thinking_level);
+    if let Some(level) = effort_level {
+        let effort = resolve_reasoning_effort(model, level);
+        if let Some(e) = effort {
+            body["reasoning"] = serde_json::json!({
+                "effort": e,
+                "summary": "auto",
+            });
+        }
+    }
+
+    body
+}
+
+fn extract_system_text(system: &Option<Vec<ContentBlock>>) -> Option<String> {
+    system.as_ref().and_then(|blocks| {
+        blocks.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn resolve_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
+    if level == ThinkingLevel::Off {
+        return None;
+    }
+    if let Some(mapped) = model.thinking_level_map.get(&level) {
+        return mapped.clone();
+    }
+    let fallback = map_default_effort(level);
+    if fallback.is_empty() {
+        None
+    } else {
+        Some(fallback)
+    }
+}
+
+fn map_default_effort(level: ThinkingLevel) -> String {
+    match level {
+        ThinkingLevel::Off => String::new(),
+        ThinkingLevel::Minimal => "minimal".into(),
+        ThinkingLevel::Low => "low".into(),
+        ThinkingLevel::Medium => "medium".into(),
+        ThinkingLevel::High => "high".into(),
+        _ => "xhigh".into(),
+    }
+}
+
+pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
+    let mut items = Vec::new();
+
+    if model.compat.supports_developer_role
+        && let Some(sp) = extract_system_text(&context.system)
+    {
+        items.push(serde_json::json!({
+            "type": "message",
+            "role": "developer",
+            "content": sp,
+        }));
+    }
+
+    for msg in &context.messages {
+        match msg {
+            michin_ai::types::Message::User { content, .. } => {
+                let text = blocks_to_text(content);
+                items.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }],
+                }));
+            }
+            michin_ai::types::Message::Assistant { content, .. } => {
+                for block in content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": text,
+                                    "annotations": [],
+                                }],
+                                "status": "completed",
+                            }));
+                        }
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let (call_id, item_id) = split_tool_call_id(id);
+                            let item_id = if item_id.is_empty() {
+                                "item_0"
+                            } else {
+                                item_id
+                            };
+                            let args_str =
+                                serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+                            items.push(serde_json::json!({
+                                "type": "function_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": args_str,
+                            }));
+                        }
+                        ContentBlock::Thinking { .. } => {}
+                        _ => {}
+                    }
+                }
+            }
+            michin_ai::types::Message::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                let text = blocks_to_text(content);
+                let call_id = tool_call_id.split('|').next().unwrap_or(tool_call_id);
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": text,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    items
+}
+
+fn blocks_to_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn split_tool_call_id(id: &str) -> (&str, &str) {
+    let parts: Vec<&str> = id.splitn(2, '|').collect();
+    if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        (id, "")
+    }
+}
+
+pub fn stable_tool_call_id(call_id: &str, item_id: &str) -> String {
+    if !call_id.is_empty() || !item_id.is_empty() {
+        return format!("{call_id}|{item_id}");
+    }
+    "tool_call_0".to_string()
+}
+
+fn convert_tools(tools: &[Tool]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": false,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// SSE / JSON parsing
+// ---------------------------------------------------------------------------
+
+fn done_event() -> AssistantMessageEvent {
+    AssistantMessageEvent::Done {
+        stop_reason: StopReason::Stop,
+        usage: None,
+    }
+}
+
+/// Parse usage from a Codex/OpenAI Responses API usage block.
+/// Format: {"input_tokens": N, "output_tokens": N, "total_tokens": N,
+///          "input_tokens_details": {"cached_tokens": N}}
+fn parse_codex_usage(usage: &Value) -> Usage {
+    Usage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        cache_write_tokens: 0,
+        cache_read_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+    }
+}
+
+#[derive(Default)]
+pub struct CodexEventParser {
+    text_started: bool,
+    text_emitted: bool,
+    text_delta_seen_by_item: HashMap<String, bool>,
+    text_end_emitted_by_item: HashSet<String>,
+    tool_call_ids: HashMap<String, String>,
+    tool_call_started: HashSet<String>,
+    tool_call_ended: HashSet<String>,
+    tool_call_received_delta: HashSet<String>,
+    done_seen: bool,
+}
+
+impl CodexEventParser {
+    pub fn done_emitted(&self) -> bool {
+        self.done_seen
+    }
+
+    pub fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                return Vec::new();
+            }
+            return self.parse_json_str(data);
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim_start();
+            if data == "[DONE]" {
+                return Vec::new();
+            }
+            return self.parse_json_str(data);
+        }
+        Vec::new()
+    }
+
+    fn parse_json_str(&mut self, json_str: &str) -> Vec<AssistantMessageEvent> {
+        let Ok(data) = serde_json::from_str::<Value>(json_str) else {
+            return Vec::new();
+        };
+        self.parse_event(&data)
+    }
+
+    pub fn parse_event(&mut self, data: &Value) -> Vec<AssistantMessageEvent> {
+        let mut out = Vec::new();
+        let Some(event_type) = data["type"].as_str() else {
+            return out;
+        };
+
+        match event_type {
+            "response.created" => {}
+            "response.output_item.added" => {
+                let item = &data["item"];
+                let item_type = item["type"].as_str().unwrap_or("");
+                match item_type {
+                    "reasoning" => out.push(AssistantMessageEvent::ThinkingStart),
+                    "message" => {
+                        if !self.text_started {
+                            self.text_started = true;
+                            out.push(AssistantMessageEvent::TextStart);
+                        }
+                        let key = output_item_key(item, data);
+                        self.text_delta_seen_by_item.entry(key).or_insert(false);
+                    }
+                    "function_call" => {
+                        let name = item["name"].as_str().unwrap_or("unknown");
+                        let call_id = item["call_id"].as_str().unwrap_or("");
+                        let item_id = item["id"].as_str().unwrap_or("");
+                        let full_id = stable_tool_call_id(call_id, item_id);
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id,
+                                arguments,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "response.output_text.delta" => {
+                let key = output_item_key(data, data);
+                self.text_delta_seen_by_item.insert(key, true);
+                self.text_emitted = true;
+                let delta = data["delta"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::TextDelta {
+                    text: delta.to_string(),
+                });
+            }
+            "response.output_text.done" => {
+                let key = output_item_key(data, data);
+                let saw_delta = *self.text_delta_seen_by_item.get(&key).unwrap_or(&false);
+                if !saw_delta {
+                    let text = data["text"].as_str().unwrap_or("");
+                    if !text.is_empty() {
+                        self.text_emitted = true;
+                        out.push(AssistantMessageEvent::TextDelta {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                if self.text_end_emitted_by_item.insert(key) {
+                    out.push(AssistantMessageEvent::TextEnd);
+                }
+            }
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                let delta = data["delta"].as_str().unwrap_or("");
+                out.push(AssistantMessageEvent::ThinkingDelta {
+                    thinking: delta.to_string(),
+                });
+            }
+            "response.function_call_arguments.delta" => {
+                let delta = data["delta"].as_str().unwrap_or("");
+                let call_id = data["call_id"].as_str().unwrap_or("");
+                let full_id = self
+                    .tool_call_ids
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| call_id.to_string());
+                self.tool_call_received_delta.insert(full_id.clone());
+                out.push(AssistantMessageEvent::ToolCallDelta {
+                    id: full_id,
+                    arguments: delta.to_string(),
+                });
+            }
+            "response.function_call_arguments.done" => {
+                let call_id = data["call_id"].as_str().unwrap_or("");
+                let item_id = data["id"].as_str().unwrap_or("");
+                let full_id = self
+                    .tool_call_ids
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| stable_tool_call_id(call_id, item_id));
+                if self.tool_call_ended.insert(full_id.clone()) {
+                    out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                }
+            }
+            "response.output_item.done" => {
+                let item = &data["item"];
+                match item["type"].as_str() {
+                    Some("reasoning") => out.push(AssistantMessageEvent::ThinkingEnd),
+                    Some("message") => {
+                        let key = output_item_key(item, data);
+                        if self.text_end_emitted_by_item.insert(key) {
+                            out.push(AssistantMessageEvent::TextEnd);
+                        }
+                    }
+                    Some("function_call") => {
+                        let name = item["name"].as_str().unwrap_or("unknown");
+                        let call_id = item["call_id"].as_str().unwrap_or("");
+                        let item_id = item["id"].as_str().unwrap_or("");
+                        let full_id = stable_tool_call_id(call_id, item_id);
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id.clone(),
+                                arguments,
+                            });
+                        }
+                        if self.tool_call_ended.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "response.completed" | "response.done" => {
+                let output = data
+                    .get("response")
+                    .and_then(|r| r.get("output"))
+                    .and_then(|o| o.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Parse usage from the top-level response if available.
+                let usage = data
+                    .get("response")
+                    .and_then(|r| r.get("usage"))
+                    .map(parse_codex_usage);
+                for item in &output {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let full_id = stable_tool_call_id(call_id, item_id);
+                        if !call_id.is_empty() {
+                            self.tool_call_ids
+                                .insert(call_id.to_string(), full_id.clone());
+                        }
+                        if self.tool_call_started.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallStart {
+                                id: full_id.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        if let Some(arguments) =
+                            parse_function_call_arguments(item.get("arguments"))
+                            && !arguments.is_empty()
+                            && !self.tool_call_received_delta.contains(&full_id)
+                        {
+                            self.tool_call_received_delta.insert(full_id.clone());
+                            out.push(AssistantMessageEvent::ToolCallDelta {
+                                id: full_id.clone(),
+                                arguments,
+                            });
+                        }
+                        if self.tool_call_ended.insert(full_id.clone()) {
+                            out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
+                        }
+                    }
+                }
+                if !self.text_emitted {
+                    let final_text = extract_text_from_response_output(&output);
+                    if !final_text.is_empty() {
+                        if !self.text_started {
+                            self.text_started = true;
+                            out.push(AssistantMessageEvent::TextStart);
+                        }
+                        out.push(AssistantMessageEvent::TextDelta { text: final_text });
+                        out.push(AssistantMessageEvent::TextEnd);
+                        self.text_emitted = true;
+                    }
+                }
+                let has_function_call = output
+                    .iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+                    || !self.tool_call_started.is_empty();
+
+                out.push(AssistantMessageEvent::Done {
+                    stop_reason: if has_function_call {
+                        StopReason::ToolUse
+                    } else {
+                        StopReason::Stop
+                    },
+                    usage,
+                });
+                self.done_seen = true;
+            }
+            "error" => {
+                let code = data["code"].as_str().unwrap_or("unknown");
+                let message = data["message"].as_str().unwrap_or("unknown error");
+                out.push(AssistantMessageEvent::Error {
+                    code: code.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        out
+    }
+}
+
+fn extract_text_from_response_output(output: &[Value]) -> String {
+    let mut parts = Vec::new();
+    for item in output {
+        if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+            for part in content {
+                match part.get("type").and_then(|t| t.as_str()) {
+                    Some("output_text") => {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            parts.push(text.to_string());
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            parts.push(text.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn parse_function_call_arguments(value: Option<&Value>) -> Option<String> {
+    let v = value?;
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    serde_json::to_string(v).ok()
+}
+
+fn output_item_key(primary: &Value, fallback: &Value) -> String {
+    if let Some(item_id) = primary["item_id"]
+        .as_str()
+        .or_else(|| primary["id"].as_str())
+    {
+        return item_id.to_string();
+    }
+    if let Some(index) = primary["output_index"].as_u64() {
+        return format!("output_index:{index}");
+    }
+    if let Some(item_id) = fallback["item"]["id"].as_str() {
+        return item_id.to_string();
+    }
+    if let Some(index) = fallback["output_index"].as_u64() {
+        return format!("output_index:{index}");
+    }
+    "default".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// JWT account ID
+// ---------------------------------------------------------------------------
+
+fn extract_account_id(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = base64_url_decode(parts[1])?;
+    let parsed: Value = serde_json::from_str(&payload).ok()?;
+    parsed
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn base64_url_decode(input: &str) -> Option<String> {
+    let mut padded = input.to_string();
+    while !padded.len().is_multiple_of(4) {
+        padded.push('=');
+    }
+    let standard = padded.replace('-', "+").replace('_', "/");
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&standard)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
