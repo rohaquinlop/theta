@@ -50,6 +50,7 @@ pub struct Chat {
     pub theme: Theme,
     focused: bool,
     last_visible_lines: Vec<VisibleLine>,
+    last_visible_user_line_flags: Vec<bool>,
     last_inner_area: Option<Rect>,
     select_anchor: Option<(usize, usize)>,
     select_head: Option<(usize, usize)>,
@@ -58,6 +59,7 @@ pub struct Chat {
     cached_inner_width: Option<usize>,
     cached_wrapped_lines: Vec<Line<'static>>,
     cached_visible_line_texts: Vec<String>,
+    cached_user_line_flags: Vec<bool>,
     pub cached_msg_ranges: Vec<(usize, usize)>,
     pub cached_message_count: usize,
     pub cache_dirty: bool,
@@ -92,6 +94,7 @@ impl Chat {
         self.messages.clear();
         self.active_tool_message_idx.clear();
         self.cached_msg_ranges.clear();
+        self.cached_user_line_flags.clear();
         self.cached_message_count = 0;
         self.cache_dirty = true;
         self.select_anchor = None;
@@ -107,6 +110,7 @@ impl Chat {
             theme,
             focused: false,
             last_visible_lines: Vec::new(),
+            last_visible_user_line_flags: Vec::new(),
             last_inner_area: None,
             select_anchor: None,
             select_head: None,
@@ -115,6 +119,7 @@ impl Chat {
             cached_inner_width: None,
             cached_wrapped_lines: Vec::new(),
             cached_visible_line_texts: Vec::new(),
+            cached_user_line_flags: Vec::new(),
             cached_msg_ranges: Vec::new(),
             cached_message_count: 0,
             cache_dirty: true,
@@ -271,7 +276,7 @@ impl Chat {
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
             ChatRole::User => (
-                "",
+                "> ",
                 Style::default()
                     .fg(self.theme.accent)
                     .add_modifier(ratatui::style::Modifier::BOLD),
@@ -380,27 +385,18 @@ fn wrap_user_bubble(
         return lines;
     }
 
-    let max_line_width = lines
-        .iter()
-        .map(|line| {
-            let text = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>();
-            UnicodeWidthStr::width(text.as_str())
-        })
-        .max()
-        .unwrap_or(0);
-
     let min_inner_width = inner_pad * 2 + 1;
-    let bubble_inner_width = (max_line_width + inner_pad * 2)
-        .min(usable_width)
-        .max(min_inner_width);
+    let bubble_inner_width = usable_width.max(min_inner_width);
     let bubble_style = Style::default().bg(bg);
     let margin = " ".repeat(outer_margin);
 
-    let mut out = Vec::with_capacity(lines.len());
+    let mut out = Vec::with_capacity(lines.len() + 2);
+
+    // Full-width bubble bar above.
+    out.push(Line::from(vec![
+        Span::raw(margin.clone()),
+        Span::styled(" ".repeat(bubble_inner_width), bubble_style),
+    ]));
 
     for line in &mut lines {
         for span in &mut line.spans {
@@ -422,6 +418,12 @@ fn wrap_user_bubble(
         spans.push(Span::styled(" ".repeat(inner_pad), bubble_style));
         out.push(Line::from(spans));
     }
+
+    // Full-width bubble bar below.
+    out.push(Line::from(vec![
+        Span::raw(margin.clone()),
+        Span::styled(" ".repeat(bubble_inner_width), bubble_style),
+    ]));
 
     out
 }
@@ -492,6 +494,7 @@ impl Component for Chat {
                 url_ranges: extract_url_ranges(text),
             })
             .collect();
+        self.last_visible_user_line_flags = self.cached_user_line_flags[start..end].to_vec();
         self.last_inner_area = Some(inner);
         tracing::debug!(
             elapsed_ms = render_start.elapsed().as_millis(),
@@ -616,12 +619,15 @@ impl Chat {
                 && should_insert_gap(prev.role.clone(), msg.role.clone())
             {
                 self.cached_visible_line_texts.push(String::new());
+                self.cached_user_line_flags.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
             let start_line = self.cached_wrapped_lines.len();
+            let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_user_line_flags.push(is_user);
                 self.cached_wrapped_lines.push(line);
             }
             let end_line = self.cached_wrapped_lines.len();
@@ -638,6 +644,7 @@ impl Chat {
         self.cached_inner_width = Some(inner_width);
         self.cached_wrapped_lines.clear();
         self.cached_visible_line_texts.clear();
+        self.cached_user_line_flags.clear();
         self.cached_msg_ranges.clear();
         if inner_width == 0 {
             self.cache_dirty = false;
@@ -651,12 +658,15 @@ impl Chat {
             {
                 let _line_idx = self.cached_wrapped_lines.len();
                 self.cached_visible_line_texts.push(String::new());
+                self.cached_user_line_flags.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
             let start_line = self.cached_wrapped_lines.len();
+            let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_user_line_flags.push(is_user);
                 self.cached_wrapped_lines.push(line);
             }
             let end_line = self.cached_wrapped_lines.len();
@@ -694,8 +704,11 @@ impl Chat {
                 .drain(start..end.min(self.cached_wrapped_lines.len()));
             self.cached_visible_line_texts
                 .drain(start..end.min(self.cached_visible_line_texts.len()));
+            self.cached_user_line_flags
+                .drain(start..end.min(self.cached_user_line_flags.len()));
         }
         let msg = &self.messages[msg_idx];
+        let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
         let new_lines: Vec<Line<'static>> = wrap_styled_lines(&lines, inner_width);
         let new_texts: Vec<String> = new_lines.iter().map(line_text).collect();
@@ -718,6 +731,14 @@ impl Chat {
                 self.cached_visible_line_texts.push(text);
             }
         }
+        for i in 0..new_count {
+            let pos = insert_pos + i;
+            if pos < self.cached_user_line_flags.len() {
+                self.cached_user_line_flags[pos] = is_user;
+            } else {
+                self.cached_user_line_flags.push(is_user);
+            }
+        }
         // If the new message is shorter (fewer lines), remove stale
         // lines left over from the old message that the overwrite
         // loop didn't consume.
@@ -726,9 +747,11 @@ impl Chat {
             let drain_start = insert_pos + new_count;
             let drain_end = (drain_start + overflow)
                 .min(self.cached_wrapped_lines.len())
-                .min(self.cached_visible_line_texts.len());
+                .min(self.cached_visible_line_texts.len())
+                .min(self.cached_user_line_flags.len());
             self.cached_wrapped_lines.drain(drain_start..drain_end);
             self.cached_visible_line_texts.drain(drain_start..drain_end);
+            self.cached_user_line_flags.drain(drain_start..drain_end);
         }
         // Update the range for this message
         self.cached_msg_ranges[msg_idx] = (insert_pos, insert_pos + new_count);
@@ -765,12 +788,15 @@ impl Chat {
         };
         if insert_gap {
             self.cached_visible_line_texts.push(String::new());
+            self.cached_user_line_flags.push(false);
             self.cached_wrapped_lines.push(Line::raw(""));
         }
         let start_line = self.cached_wrapped_lines.len();
+        let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
         for line in wrap_styled_lines(&lines, inner_width) {
             self.cached_visible_line_texts.push(line_text(&line));
+            self.cached_user_line_flags.push(is_user);
             self.cached_wrapped_lines.push(line);
         }
         let end_line = self.cached_wrapped_lines.len();
@@ -835,14 +861,29 @@ impl Chat {
                 .get(line_idx)
                 .map(|l| l.text.as_str())
                 .unwrap_or("");
-            let chars: Vec<char> = line.chars().collect();
+            let is_user = self
+                .last_visible_user_line_flags
+                .get(line_idx)
+                .copied()
+                .unwrap_or(false);
+            // Strip "> " prefix from user lines for selection copy.
+            // Skip decorative bubble bars (all-space user lines).
+            if is_user && line.chars().all(|c| c == ' ') {
+                continue;
+            }
+            let prefix_skip = if is_user && line.starts_with("> ") {
+                2usize
+            } else {
+                0usize
+            };
+            let chars: Vec<char> = line[prefix_skip..].chars().collect();
             let from = if line_idx == start.0 {
-                start.1.min(chars.len())
+                start.1.saturating_sub(prefix_skip).min(chars.len())
             } else {
                 0
             };
             let to = if line_idx == end.0 {
-                end.1.min(chars.len())
+                end.1.saturating_sub(prefix_skip).min(chars.len())
             } else {
                 chars.len()
             };
