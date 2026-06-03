@@ -852,7 +852,9 @@ impl App {
                 } else {
                     Style::default().bg(self.theme.bg)
                 };
-                ListItem::new(Line::from(Span::styled(text, style)))
+                // Pad to full row width so background fills entire row.
+                let padded = format!("{:<width$}", text, width = inner.width as usize);
+                ListItem::new(Line::from(Span::styled(padded, style)))
             })
             .collect();
 

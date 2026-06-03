@@ -113,6 +113,7 @@ impl SettingsSelector {
                 Block::default()
                     .title("Settings (Enter/Space toggle, Esc save+close)")
                     .borders(Borders::ALL)
+                    .style(Style::default().bg(self.theme.bg))
                     .border_style(Style::default().fg(self.theme.border)),
             )
             .highlight_style(Style::default().fg(self.theme.accent));

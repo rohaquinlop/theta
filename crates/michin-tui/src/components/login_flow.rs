@@ -255,6 +255,7 @@ impl Component for LoginFlow {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .style(Style::default().bg(self.theme.bg))
             .border_style(Style::default().fg(self.theme.border))
             .title(match self.step {
                 LoginStep::AuthType => " Login — choose auth type ",

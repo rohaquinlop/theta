@@ -120,6 +120,7 @@ impl MimoClusterSelector {
         let block = Block::default()
             .title("MiMo Cluster Selector")
             .borders(Borders::ALL)
+            .style(Style::default().bg(theme.bg))
             .border_style(Style::default().fg(theme.highlight));
 
         if self.measuring {

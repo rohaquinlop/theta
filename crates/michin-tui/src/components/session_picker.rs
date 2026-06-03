@@ -229,6 +229,7 @@ impl SessionPicker {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .style(Style::default().bg(self.theme.bg))
                     .border_style(Style::default().fg(self.theme.dim))
                     .title(format!("sort: {}", self.sort_mode_label())),
             )

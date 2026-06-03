@@ -123,6 +123,7 @@ impl ThemeSelector {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .style(Style::default().bg(preview_theme.bg))
             .border_style(Style::default().fg(preview_theme.accent))
             .title(format!(" Themes — {} ", self.names[self.selected]));
 

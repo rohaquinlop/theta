@@ -102,6 +102,7 @@ impl TreeSelector {
                 Block::default()
                     .title("Sessions")
                     .borders(Borders::ALL)
+                    .style(Style::default().bg(self.theme.bg))
                     .border_style(Style::default().fg(self.theme.border)),
             )
             .highlight_style(Style::default().fg(self.theme.accent).bg(Color::DarkGray))
