@@ -383,6 +383,11 @@ pub async fn run_tui(
             description: "List available skills".into(),
         },
         CommandEntry {
+            name: "settings".into(),
+            description: "Open settings panel (steering, thinking, diffs, context cap, etc.)"
+                .into(),
+        },
+        CommandEntry {
             name: "exit".into(),
             description: "Exit MichiN".into(),
         },
@@ -1676,6 +1681,38 @@ async fn handle_tui_action(
             let _ = event_tx.send(TuiEvent::Info(format!(
                 "Theme '{name}' saved to config.toml"
             )));
+        }
+        TuiAction::UpdateSettings {
+            steering_mode,
+            follow_up_mode,
+            transport_preference,
+            show_thinking,
+            show_tool_diffs,
+            tool_progress_hz,
+            enter_behavior,
+            max_context_window,
+        } => {
+            let mut settings = crate::settings::load_settings().await;
+            settings.steering_mode = steering_mode.clone();
+            settings.follow_up_mode = follow_up_mode.clone();
+            settings.transport_preference = transport_preference;
+            settings.show_thinking = show_thinking;
+            settings.show_tool_diffs = show_tool_diffs;
+            settings.tool_progress_hz = tool_progress_hz;
+            settings.enter_behavior = enter_behavior;
+            settings.max_context_window = max_context_window;
+            if let Err(e) = crate::settings::save_settings(&settings).await {
+                let _ = event_tx.send(TuiEvent::Error(format!("Failed to save settings: {e}")));
+                return;
+            }
+            let _ = event_tx.send(TuiEvent::SettingsApplied {
+                steering_mode: steering_mode.clone(),
+                follow_up_mode: follow_up_mode.clone(),
+                show_thinking,
+                show_tool_diffs,
+                tool_progress_hz,
+            });
+            let _ = event_tx.send(TuiEvent::Info("Settings saved to settings.json".into()));
         }
     }
 }

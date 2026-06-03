@@ -20,6 +20,7 @@ use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
+use crate::components::settings_selector::{SettingsSelector, SettingsView};
 use crate::components::status::StatusBar;
 use crate::components::theme_selector::ThemeSelector;
 use crate::components::thinking_selector::ThinkingSelector;
@@ -84,6 +85,17 @@ pub enum TuiAction {
     /// Persist a theme selection to config.toml.
     SetTheme {
         name: String,
+    },
+    /// Persist settings changes to settings.json and apply live.
+    UpdateSettings {
+        steering_mode: String,
+        follow_up_mode: String,
+        transport_preference: String,
+        show_thinking: bool,
+        show_tool_diffs: bool,
+        tool_progress_hz: u64,
+        enter_behavior: String,
+        max_context_window: Option<u32>,
     },
 }
 
@@ -226,6 +238,14 @@ pub enum TuiEvent {
         clusters: Vec<MimoClusterEntry>,
         current_url: Option<String>,
     },
+    /// Settings were saved and should be applied live to the TUI.
+    SettingsApplied {
+        steering_mode: String,
+        follow_up_mode: String,
+        show_thinking: bool,
+        show_tool_diffs: bool,
+        tool_progress_hz: u64,
+    },
 }
 
 /// Structured status-bar data from extensions (Rhai scripts).
@@ -291,6 +311,7 @@ pub struct App {
     thinking_selector: ThinkingSelector,
     theme_selector: ThemeSelector,
     mimo_cluster_selector: MimoClusterSelector,
+    settings_selector: SettingsSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
@@ -467,11 +488,12 @@ impl App {
         status.thinking = thinking.to_string();
         status.set_agent_state("idle");
 
+        let enter_behavior = settings.enter_behavior.clone();
         let mut editor = Editor::new(
             theme.clone(),
             working_dir.clone(),
             commands.iter().map(|c| c.name.clone()).collect(),
-            settings.enter_behavior,
+            enter_behavior,
         );
         let skill_commands = commands
             .iter()
@@ -499,6 +521,19 @@ impl App {
             tree_selector: TreeSelector::new(theme.clone()),
             thinking_selector: ThinkingSelector::new(theme.clone()),
             mimo_cluster_selector: MimoClusterSelector::new(),
+            settings_selector: SettingsSelector::new(
+                theme.clone(),
+                SettingsView {
+                    steering_mode: settings.steering_mode.clone(),
+                    follow_up_mode: settings.follow_up_mode.clone(),
+                    transport_preference: settings.transport_preference.clone(),
+                    show_thinking: settings.show_thinking,
+                    show_tool_diffs: settings.show_tool_diffs,
+                    tool_progress_hz: settings.tool_progress_hz,
+                    enter_behavior: settings.enter_behavior.clone(),
+                    max_context_window: settings.max_context_window,
+                },
+            ),
             commands,
             skill_commands,
             keybindings: default_bindings(),
@@ -628,6 +663,10 @@ impl App {
         }
         self.mimo_cluster_selector.render(area, frame, &self.theme);
         if self.mimo_cluster_selector.visible {
+            return;
+        }
+        self.settings_selector.render(area, frame);
+        if self.settings_selector.visible {
             return;
         }
 
@@ -999,6 +1038,32 @@ impl App {
                         self.mimo_cluster_selector.close();
                     }
                     _ => {}
+                }
+            }
+            return;
+        }
+
+        // Settings selector mode — handle keys exclusively.
+        if self.settings_selector.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        let view = self.settings_selector.current_view();
+                        let _ = self.action_tx.send(TuiAction::UpdateSettings {
+                            steering_mode: view.steering_mode,
+                            follow_up_mode: view.follow_up_mode,
+                            transport_preference: view.transport_preference,
+                            show_thinking: view.show_thinking,
+                            show_tool_diffs: view.show_tool_diffs,
+                            tool_progress_hz: view.tool_progress_hz,
+                            enter_behavior: view.enter_behavior,
+                            max_context_window: view.max_context_window,
+                        });
+                        self.settings_selector.hide();
+                    }
+                    _ => {
+                        self.settings_selector.handle_event(event);
+                    }
                 }
             }
             return;
@@ -1480,6 +1545,7 @@ impl App {
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
                     "  /themes         Open theme picker with live preview",
                     "  /skills         List available skills",
+                    "  /settings       Open settings panel (UI behavior, prefs)",
                     "  /model <id>     Switch model directly by id",
                     "  /diag on|off    Toggle diagnostic event stream in chat",
                     "  /tools-rate <hz> Set tool progress update rate (1-60)",
@@ -1719,6 +1785,9 @@ impl App {
                         is_error: false,
                     });
                 }
+            }
+            "settings" => {
+                self.settings_selector.show();
             }
             "diag" => match arg {
                 "on" => {
@@ -2319,6 +2388,19 @@ impl App {
                     self.mimo_cluster_selector
                         .open(clusters, current_url.as_deref());
                 }
+            }
+            TuiEvent::SettingsApplied {
+                steering_mode,
+                follow_up_mode,
+                show_thinking,
+                show_tool_diffs,
+                tool_progress_hz,
+            } => {
+                self.steering_mode = steering_mode;
+                self.follow_up_mode = follow_up_mode;
+                self.show_thinking = show_thinking;
+                self.show_tool_diffs = show_tool_diffs;
+                self.tool_progress_hz = tool_progress_hz;
             }
         }
     }

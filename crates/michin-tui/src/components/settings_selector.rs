@@ -16,6 +16,8 @@ pub struct SettingsView {
     pub transport_preference: String,
     pub show_thinking: bool,
     pub show_tool_diffs: bool,
+    pub tool_progress_hz: u64,
+    pub enter_behavior: String,
     pub max_context_window: Option<u32>,
 }
 
@@ -47,6 +49,8 @@ impl SettingsSelector {
         self.visible = false;
     }
 
+    const ITEM_COUNT: usize = 8;
+
     pub fn render(&mut self, area: Rect, frame: &mut Frame) {
         if !self.visible {
             return;
@@ -77,9 +81,21 @@ impl SettingsSelector {
             ListItem::new(vec![
                 Line::from(format!(
                     "showToolDiffs: {}",
-                    if self.view.show_tool_diffs { "on" } else { "off" }
+                    if self.view.show_tool_diffs {
+                        "on"
+                    } else {
+                        "off"
+                    }
                 )),
                 Line::from("  Show edit diffs in tool output (off by default)"),
+            ]),
+            ListItem::new(vec![
+                Line::from(format!("toolProgressHz: {}", self.view.tool_progress_hz)),
+                Line::from("  Tool progress update frequency (1-60)"),
+            ]),
+            ListItem::new(vec![
+                Line::from(format!("enterBehavior: {}", self.view.enter_behavior)),
+                Line::from("  Enter key in editor: send or insert newline"),
             ]),
             ListItem::new(vec![
                 Line::from(format!(
@@ -89,7 +105,7 @@ impl SettingsSelector {
                         None => "off (model default)".to_string(),
                     }
                 )),
-                Line::from("  Max context token cap (250K default, off=model limit)"),
+                Line::from("  Max context token cap (off=model limit)"),
             ]),
         ];
         let list = List::new(list_items)
@@ -117,7 +133,7 @@ impl SettingsSelector {
                 self.state.select(Some(self.selected));
             }
             KeyCode::Down => {
-                self.selected = (self.selected + 1).min(5);
+                self.selected = (self.selected + 1).min(Self::ITEM_COUNT - 1);
                 self.state.select(Some(self.selected));
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected(),
@@ -152,6 +168,23 @@ impl SettingsSelector {
             3 => self.view.show_thinking = !self.view.show_thinking,
             4 => self.view.show_tool_diffs = !self.view.show_tool_diffs,
             5 => {
+                self.view.tool_progress_hz = match self.view.tool_progress_hz {
+                    1 => 5,
+                    5 => 10,
+                    10 => 20,
+                    20 => 30,
+                    30 => 60,
+                    _ => 1,
+                };
+            }
+            6 => {
+                self.view.enter_behavior = if self.view.enter_behavior == "send" {
+                    "newline".into()
+                } else {
+                    "send".into()
+                };
+            }
+            7 => {
                 self.view.max_context_window = match self.view.max_context_window {
                     None => Some(50_000),
                     Some(50_000) => Some(100_000),
@@ -160,7 +193,7 @@ impl SettingsSelector {
                     Some(200_000) => Some(250_000),
                     Some(250_000) => Some(300_000),
                     Some(300_000) => None,
-                    Some(n) => Some(250_000),
+                    Some(_) => Some(250_000),
                 }
             }
             _ => {}

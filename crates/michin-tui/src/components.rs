@@ -10,6 +10,7 @@ pub mod login_flow;
 pub mod mimo_cluster;
 pub mod model_selector;
 pub mod session_picker;
+pub mod settings_selector;
 pub mod status;
 pub mod theme_selector;
 pub mod thinking_selector;
@@ -19,6 +20,7 @@ pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 pub use model_selector::{ModelEntry, ModelSelector};
 pub use session_picker::{SessionInfo, SessionPicker};
+pub use settings_selector::{SettingsSelector, SettingsView};
 pub use thinking_selector::ThinkingSelector;
 
 /// A command or skill entry for autocomplete.
