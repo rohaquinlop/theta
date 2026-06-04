@@ -989,11 +989,19 @@ async fn build_context(
     event_tx: &broadcast::Sender<AgentEvent>,
     messages: &[Message],
 ) -> (Context, Option<CompactionStats>) {
-    let system = if state.system_prompt.is_empty() {
+    // Prepend resource context (skills + extensions) to the system prompt
+    // so the model sees it as system-level instructions, not a user message.
+    let mut system = if state.system_prompt.is_empty() {
         None
     } else {
         Some(state.system_prompt.clone())
     };
+    if let Some(ref res_ctx) = state.resource_context
+        && !res_ctx.is_empty()
+    {
+        let blocks = system.get_or_insert_with(Vec::new);
+        blocks.extend(res_ctx.iter().cloned());
+    }
 
     let sys_tokens: u32 = state.system_prompt_tokens;
 
@@ -1008,8 +1016,7 @@ async fn build_context(
     // cache. Pause auto-compaction until a turn naturally fits.
     let pause_threshold = config.compaction.auto_pause_threshold;
 
-    let (mut messages, compaction_stats) = if config.compaction.enabled && !state.compaction_paused
-    {
+    let (messages, compaction_stats) = if config.compaction.enabled && !state.compaction_paused {
         let effective_window = config.effective_context_window(state.model.context_window);
         let mut compact_result = crate::compact::compact_messages(
             messages,
@@ -1090,18 +1097,6 @@ async fn build_context(
         }
         (messages.to_vec(), None)
     };
-
-    if let Some(ref res_ctx) = state.resource_context
-        && !res_ctx.is_empty()
-    {
-        messages.insert(
-            0,
-            Message::User {
-                content: res_ctx.clone(),
-                timestamp: 0,
-            },
-        );
-    }
 
     let tools: Vec<michin_ai::Tool> = state.michin_ai_tools.clone();
 

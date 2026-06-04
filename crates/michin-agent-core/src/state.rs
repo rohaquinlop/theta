@@ -12,7 +12,7 @@ pub struct AgentState {
     pub system_prompt: Vec<ContentBlock>,
     pub model: Model,
     pub tools: Vec<Arc<dyn AgentTool>>,
-    /// Skills + extensions. Injected as a synthetic user message, not in system prompt.
+    /// Skills + extensions. Appended to the system prompt before each LLM call.
     pub resource_context: Option<Vec<ContentBlock>>,
     pub messages: Vec<Message>,
     pub is_streaming: bool,

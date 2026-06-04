@@ -110,7 +110,7 @@ impl Agent {
     }
 
     /// Set the resource context (skills, extensions).
-    /// This is injected as a synthetic user message, NOT in the system prompt.
+    /// Appended to the system prompt before each LLM call.
     pub async fn set_resource_context(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;
         state.resource_context = Some(prompt);

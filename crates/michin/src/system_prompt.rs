@@ -5,8 +5,8 @@
 //!   tools, runtime, response contract). Set via `agent.set_system_prompt()`.
 //! - `build_resource_context()` — available resources (skills, extensions, auto-loading directive). Set via `agent.set_resource_context()`.
 //!
-//! This split keeps system instructions lean and moves resource listings
-//! into the conversation where the model sees them as context, not mandates.
+//! Both are sent as `system` role: the resource context is appended to the
+//! system prompt before each LLM call.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,7 +53,7 @@ pub async fn build_system_prompt(
 }
 
 /// Build the resource context: skills + extensions + auto-loading.
-/// This gets injected as a synthetic user message, NOT the system prompt.
+/// This gets appended to the system prompt before each LLM call.
 pub async fn build_resource_context(working_dir: &Path) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
