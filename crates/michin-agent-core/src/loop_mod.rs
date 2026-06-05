@@ -727,11 +727,8 @@ async fn run_llm_stream(
                         break;
                     }
                     attempt += 1;
-                    let delay_ms = err.retry_after_ms().unwrap_or_else(|| {
-                        retry
-                            .base_delay_ms
-                            .saturating_mul(2u64.pow(attempt.saturating_sub(1)))
-                    });
+                    let delay_ms =
+                        retry_backoff_delay(retry.base_delay_ms, attempt, err.retry_after_ms());
                     if emit_events {
                         let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
                     }
@@ -784,9 +781,7 @@ async fn run_llm_stream(
                         ));
                         break;
                     }
-                    let delay_ms = retry
-                        .base_delay_ms
-                        .saturating_mul(2u64.pow(stream_breaks.saturating_sub(1)));
+                    let delay_ms = retry_backoff_delay(retry.base_delay_ms, stream_breaks, None);
                     if emit_events {
                         let _ = event_tx.send(AgentEvent::Retrying {
                             attempt: attempt + stream_breaks,
@@ -1276,4 +1271,45 @@ fn format_agent_error_chain(error: &AgentError) -> String {
         source = err.source();
     }
     out
+}
+
+/// Compute a retry backoff delay.
+///
+/// If the server provided `retry_after_ms`, honor it as-is — no capping,
+/// no jitter. The server knows its rate limits.
+///
+/// Otherwise: capped exponential backoff `base * 2^(attempt-1)` with
+/// a 15 s cap and uniform jitter [-125, +125] ms to desynchronize retry
+/// storms.
+fn retry_backoff_delay(base_delay_ms: u64, attempt: u32, retry_after_ms: Option<u64>) -> u64 {
+    if let Some(ra) = retry_after_ms
+        && ra > 0
+    {
+        ra
+    } else {
+        let raw = base_delay_ms.saturating_mul(2u64.pow(attempt.saturating_sub(1)));
+        let capped = raw.min(15_000);
+        add_jitter(capped)
+    }
+}
+
+/// Uniform jitter in [-125, +125] ms via murmur3 fmix64 finalizer
+/// seeded from microsecond tick — no `rand` dep needed.
+fn add_jitter(delay_ms: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    let mut rng = now ^ (now >> 33);
+    rng = rng.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    rng ^= rng >> 33;
+    rng = rng.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    rng ^= rng >> 33;
+    let offset = (rng % 251) as i64 - 125; // range: [-125, +125]
+    let adjusted = delay_ms as i64 + offset;
+    if adjusted <= 0 {
+        delay_ms
+    } else {
+        adjusted as u64
+    }
 }
