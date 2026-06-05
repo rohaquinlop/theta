@@ -114,6 +114,13 @@ pub enum AgentEvent {
         to_model: String,
         reason: String,
     },
+
+    /// Prefix-cache shape diagnostics, emitted each turn after context is built.
+    /// Only emitted on cache miss — hits are silent.
+    CacheShapeReport {
+        bust_reason: String,
+        per_tool_tokens: Vec<(String, u32)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

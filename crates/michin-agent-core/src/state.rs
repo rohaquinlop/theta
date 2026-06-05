@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use michin_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
 
+use crate::cache_shape::CacheShape;
 use crate::types::AgentTool;
 use crate::types::{RunReport, RunReportEvent, TurnEndReason};
 
@@ -32,6 +33,8 @@ pub struct AgentState {
     pub(crate) circuit_breakers: HashMap<String, BreakerState>,
     pub(crate) consecutive_compacts: u32,
     pub(crate) compaction_paused: bool,
+    /// Prefix-cache shape from the previous turn (for diff diagnostics).
+    pub(crate) prev_cache_shape: Option<CacheShape>,
 }
 
 /// Circuit breaker per model key.
@@ -79,6 +82,7 @@ impl AgentState {
             circuit_breakers: HashMap::new(),
             consecutive_compacts: 0,
             compaction_paused: false,
+            prev_cache_shape: None,
         }
     }
 
@@ -149,7 +153,7 @@ impl AgentState {
     }
 
     pub fn rebuild_michin_ai_tools(&mut self) {
-        self.michin_ai_tools = self
+        let mut tools: Vec<Tool> = self
             .tools
             .iter()
             .map(|t| Tool {
@@ -158,6 +162,10 @@ impl AgentState {
                 parameters: t.parameters(),
             })
             .collect();
+        // Sort by name for byte-stable prefix serialization — prevents
+        // spurious cache busts when tool registration order changes.
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        self.michin_ai_tools = tools;
     }
 
     pub fn load_messages(&mut self, messages: Vec<Message>) {

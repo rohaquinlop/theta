@@ -25,6 +25,7 @@ use michin_ai::{
     StopReason, StreamOptions, ThinkingLevel,
 };
 
+use crate::cache_shape;
 use crate::command_policy;
 use crate::error::AgentError;
 use crate::events::{AgentEvent, TurnDecisionReason};
@@ -313,6 +314,8 @@ async fn run_single_turn(
         let (context, compaction_stats) =
             build_context(state, provider, config, event_tx, &sanitized_cache).await;
 
+        let compaction_used = compaction_stats.is_some();
+
         if let Some(stats) = compaction_stats {
             let _ = event_tx.send(AgentEvent::ContextCompacted {
                 trimmed_count: stats.trimmed_count,
@@ -320,6 +323,14 @@ async fn run_single_turn(
                 tokens_after: stats.tokens_after,
             });
         }
+
+        // Cache-shape diagnostics: hash system prompt + tool schemas,
+        // diff against previous turn, emit CacheShapeReport once per turn
+        // (first round only). Includes compaction presence as "log_rewrite".
+        if tool_round == 0 {
+            emit_cache_shape_report(state, event_tx, compaction_used);
+        }
+
         tracing::debug!(
             turn = turn_index,
             round = tool_round,
@@ -1271,6 +1282,35 @@ fn format_agent_error_chain(error: &AgentError) -> String {
         source = err.source();
     }
     out
+}
+
+/// Compute and emit a CacheShapeReport once per turn (first round).
+/// Skips emission when the shape is unchanged (no cache miss).
+fn emit_cache_shape_report(
+    state: &mut AgentState,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    log_rewritten: bool,
+) {
+    let system_hash = cache_shape::hash_system_prompt(&state.system_prompt);
+    let tools_hash = cache_shape::hash_tool_schemas(&state.michin_ai_tools);
+    let current = cache_shape::CacheShape {
+        system_hash,
+        tools_hash,
+    };
+    let diff = cache_shape::diff_shapes(
+        state.prev_cache_shape.as_ref(),
+        &current,
+        &state.michin_ai_tools,
+        log_rewritten,
+    );
+    state.prev_cache_shape = Some(current);
+    if !diff.cache_busted() {
+        return;
+    }
+    let _ = event_tx.send(AgentEvent::CacheShapeReport {
+        bust_reason: diff.reason(),
+        per_tool_tokens: diff.per_tool_tokens,
+    });
 }
 
 /// Compute a retry backoff delay.

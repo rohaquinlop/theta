@@ -4,6 +4,7 @@
 //! event emission, and the nested prompt/continue loop.
 
 pub mod agent;
+pub mod cache_shape;
 pub mod command_policy;
 pub mod compact;
 pub mod error;

@@ -907,6 +907,16 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         "provider fallback triggered"
                     );
                 }
+                Ok(AgentEvent::CacheShapeReport {
+                    bust_reason,
+                    per_tool_tokens: _,
+                }) => {
+                    // Only emitted on cache miss — hits are silent.
+                    tracing::debug!(
+                        bust_reason = %bust_reason,
+                        "prefix cache miss"
+                    );
+                }
                 _ => {}
             }
         }
