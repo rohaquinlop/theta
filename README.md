@@ -280,13 +280,14 @@ Available fields:
 - `[compaction].auto_pause_threshold` (u32, default: `2`): consecutive compactions before auto-pausing. When the kept tail alone overflows the context trigger, compacting every turn degrades prefix cache. Set to `u32::MAX` to never auto-pause.
 - `[retry].max_retries` (u32, default: `2`): retry attempts for retryable provider errors.
 - `[retry].base_delay_ms` (u64, default: `1000`): exponential backoff base delay in milliseconds.
-- `[provider].timeout_ms` (u64, default: `120000`): provider request timeout in milliseconds.
+- `[provider].timeout_ms` (u64, default: `120000`): bounds request setup only (connect + response headers), in milliseconds. It does **not** cap total stream duration — long generations may legitimately run past it.
 - `[agent].max_same_tool_call_repeats` (u32, default: `6`): primary loop guard; maximum repeated identical tool-call signatures in one turn before aborting that loop.
 - `[agent].tool_stall_warning_ms` (u64, default: `8000`): warn if a tool execution stalls longer than this.
 - `[agent].provider_fallback_chain` (string[], default: `[]`): optional fallback model IDs in preference order.
 - `[agent].provider_failure_threshold` (u32, default: `3`): circuit breaker failure threshold.
 - `[agent].provider_open_cooldown_ms` (u64, default: `30000`): circuit breaker open cooldown in ms.
-- `[profile_overrides]` (table, optional): override individual profile defaults. All fields optional: `max_retries`, `base_delay_ms`, `provider_timeout_ms`, `tool_stall_warning_ms`, `provider_fallback_chain`, `provider_failure_threshold`, `provider_open_cooldown_ms`, `max_same_tool_call_repeats`, `command_policy_strict`.
+- `[profile_overrides]` (table, optional): override individual profile defaults. All fields optional: `max_retries`, `base_delay_ms`, `provider_timeout_ms`, `stream_idle_timeout_ms`, `tool_stall_warning_ms`, `provider_fallback_chain`, `provider_failure_threshold`, `provider_open_cooldown_ms`, `max_same_tool_call_repeats`, `command_policy_strict`.
+- `stream_idle_timeout_ms` (u64, default: `90000`, via `[profile_overrides]`): max gap between stream events once a response is streaming. A healthy stream emits deltas continuously while generating; a gap this long means a dead connection and triggers a retry. Raise it if a provider legitimately pauses the stream longer without keep-alives.
 
 Auth note:
 

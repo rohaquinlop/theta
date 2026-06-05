@@ -709,10 +709,11 @@ async fn run_llm_stream(
         let mut stream_breaks: u32 = 0;
         loop {
             let stream = match provider.stream(&selected_model, context, options).await {
-                Ok(s) => {
-                    breaker_record_success(&mut state.circuit_breakers, &key);
-                    s
-                }
+                // Note: success is recorded only after the stream *completes*
+                // (in the consume_stream Ok arm below) — headers arriving is
+                // not enough; a model that always dies mid-stream must not
+                // look healthy to the breaker.
+                Ok(s) => s,
                 Err(e) => {
                     last_error = Some(e);
                     let err = last_error.as_ref().expect("set above");
@@ -754,16 +755,28 @@ async fn run_llm_stream(
                 &abort_token,
                 &steering_abort,
                 emit_events,
+                config.stream_idle_timeout_ms,
             )
             .await
             {
-                Ok(ok) => return Ok(ok),
+                Ok(ok) => {
+                    breaker_record_success(&mut state.circuit_breakers, &key);
+                    return Ok(ok);
+                }
                 Err(consume_err) => {
                     // Aborts propagate immediately.
                     if matches!(consume_err, StreamConsumeError::Aborted) {
                         return Err(AgentError::Aborted);
                     }
-                    // Stream broke mid-response: retry the same request.
+                    // Stream broke mid-response: count it against the breaker
+                    // so flapping endpoints eventually open and fail over,
+                    // then retry the same request.
+                    breaker_record_failure(
+                        &mut state.circuit_breakers,
+                        &key,
+                        ErrorClass::Transient,
+                        config,
+                    );
                     stream_breaks += 1;
                     if stream_breaks > MAX_STREAM_BREAKS {
                         last_error = Some(michin_ai::MichiNError::Stream(
@@ -823,7 +836,9 @@ enum StreamConsumeError {
 /// Consume an LLM event stream, emitting events and building the accumulator.
 ///
 /// Returns the accumulated message + stop reason on success, or
-/// `StreamConsumeError` if the stream broke or was aborted.
+/// `StreamConsumeError` if the stream broke, stalled past
+/// `idle_timeout_ms`, or was aborted.
+#[allow(clippy::too_many_arguments)]
 async fn consume_stream(
     mut stream: EventStream<'_>,
     selected_model: &Model,
@@ -831,6 +846,7 @@ async fn consume_stream(
     abort_token: &Option<CancellationToken>,
     steering_abort: &Arc<AtomicBool>,
     emit_events: bool,
+    idle_timeout_ms: Option<u64>,
 ) -> Result<
     (
         Message,
@@ -845,7 +861,29 @@ async fn consume_stream(
     // every subsequent SSE read to fail.
     let mut stream_error_emitted = false;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        // Idle watchdog: bound the gap *between* stream events, not total
+        // stream duration. A healthy stream emits deltas continuously while
+        // generating; a long silence means a dead connection.
+        let next = match idle_timeout_ms {
+            Some(ms) => {
+                match tokio::time::timeout(std::time::Duration::from_millis(ms), stream.next())
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(_) => {
+                        tracing::warn!(
+                            model = %selected_model.id,
+                            idle_timeout_ms = ms,
+                            "stream stalled: no events within idle timeout, treating as broken"
+                        );
+                        return Err(StreamConsumeError::StreamBroke);
+                    }
+                }
+            }
+            None => stream.next().await,
+        };
+        let Some(event) = next else { break };
         if let Some(token) = abort_token
             && token.is_cancelled()
         {
@@ -890,7 +928,7 @@ async fn consume_stream(
             AssistantMessageEvent::Error { code, message }
                 if !std::mem::replace(&mut stream_error_emitted, true) =>
             {
-                tracing::debug!(
+                tracing::warn!(
                     stream_error_code = %code,
                     stream_error_message = %message,
                     model = %selected_model.id,

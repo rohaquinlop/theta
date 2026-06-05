@@ -1632,3 +1632,123 @@ async fn test_mid_stream_break_retries_same_model() {
     );
     assert!(got_response, "should get text response after retry");
 }
+
+/// A provider whose stream emits one delta then stalls forever.
+/// Exercises the consumer-side idle watchdog.
+struct StallProvider;
+
+#[async_trait]
+impl LlmProvider for StallProvider {
+    async fn stream<'a>(
+        &'a self,
+        _model: &Model,
+        _context: &Context,
+        _options: &StreamOptions,
+    ) -> Result<EventStream<'a>, MichiNError> {
+        use futures::StreamExt as _;
+        let head = futures::stream::iter(vec![AssistantMessageEvent::text_delta("partial")]);
+        Ok(Box::pin(head.chain(futures::stream::pending())))
+    }
+
+    async fn stream_simple<'a>(
+        &'a self,
+        model: &Model,
+        context: &Context,
+        _options: &SimpleStreamOptions,
+    ) -> Result<EventStream<'a>, MichiNError> {
+        self.stream(model, context, &StreamOptions::default()).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn test_stalled_stream_trips_idle_watchdog() {
+    let model = test_model();
+    let mut reg = ProviderRegistry::new();
+    reg.register(Api::OpenAiCompletions, Box::new(StallProvider));
+    let registry = Arc::new(reg);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+
+    let mut agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
+    let mut cfg = AgentLoopConfig {
+        stream_idle_timeout_ms: Some(100),
+        ..Default::default()
+    };
+    cfg.retry.base_delay_ms = 10;
+    agent.set_config(cfg);
+
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        agent.prompt(vec![ContentBlock::text("test")]),
+    )
+    .await
+    .expect("stalled stream must not hang the agent loop");
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_err(),
+        "a permanently stalled stream should exhaust retries and fail"
+    );
+    // 3 attempts × 100ms idle timeout + small backoffs — far below a
+    // 120s-total-timeout regime.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "watchdog should fire at ~idle_timeout per attempt, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_stream_breaks_open_circuit_breaker() {
+    let model = test_model_with_id("flappy-model");
+    // Every attempt: headers arrive fine, then the stream dies mid-response.
+    // Before the fix, success was recorded at headers-time, masking the
+    // failures from the breaker forever.
+    let broke = || {
+        vec![AssistantMessageEvent::Error {
+            code: "connection_error".into(),
+            message: "connection reset by peer".into(),
+        }]
+    };
+    let mock = MockProvider::new(vec![broke(), broke(), broke(), broke(), broke(), broke()]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+
+    let mut agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
+    let mut cfg = AgentLoopConfig::default();
+    cfg.retry.max_retries = 0;
+    cfg.retry.base_delay_ms = 10;
+    cfg.provider_circuit_breaker.failure_threshold = 1;
+    cfg.provider_circuit_breaker.open_cooldown_ms = 60_000;
+    agent.set_config(cfg);
+
+    let _ = agent.prompt(vec![ContentBlock::text("attempt one")]).await;
+    let mut rx = agent.subscribe();
+    let _ = agent.prompt(vec![ContentBlock::text("attempt two")]).await;
+
+    let mut saw_circuit_open = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::ProviderCircuitOpen { .. }) {
+            saw_circuit_open = true;
+        }
+    }
+    assert!(
+        saw_circuit_open,
+        "repeated mid-stream breaks should open the circuit breaker"
+    );
+}

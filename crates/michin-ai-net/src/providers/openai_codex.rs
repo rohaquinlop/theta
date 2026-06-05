@@ -49,6 +49,9 @@ impl OpenAiCodexProvider {
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(4)
             .connect_timeout(Duration::from_secs(30))
+            // Idle timeout between reads on the SSE response body. Bounds
+            // gaps between chunks without capping total stream duration.
+            .read_timeout(Duration::from_secs(90))
             .build()
             .expect("reqwest Client builder should not fail with default settings");
         Self {
@@ -193,11 +196,20 @@ async fn sse_stream(
         req = req.header("chatgpt-account-id", account_id);
     }
 
-    if let Some(timeout_ms) = timeout_ms {
-        req = req.timeout(std::time::Duration::from_millis(timeout_ms));
-    }
-
-    let response = req.json(body).send().await?;
+    // Bound request setup (connect + response headers) only — a total request
+    // timeout would kill long streaming generations mid-body. Mirrors the
+    // connect-only bound on the WebSocket path.
+    let send = req.json(body).send();
+    let response = match timeout_ms {
+        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), send)
+            .await
+            .map_err(|_| MichiNError::ApiError {
+                status: 408,
+                message: "request timed out waiting for response headers".into(),
+                retry_after_ms: None,
+            })??,
+        None => send.await?,
+    };
 
     let status = response.status();
     if !status.is_success() {

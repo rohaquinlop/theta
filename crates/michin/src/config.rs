@@ -184,6 +184,8 @@ pub struct ProfileOverrides {
     #[serde(default)]
     pub provider_timeout_ms: Option<u64>,
     #[serde(default)]
+    pub stream_idle_timeout_ms: Option<u64>,
+    #[serde(default)]
     pub tool_stall_warning_ms: Option<u64>,
     #[serde(default)]
     pub provider_fallback_chain: Option<Vec<String>>,
@@ -533,6 +535,7 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
         max_retries: u32,
         base_delay_ms: u64,
         provider_timeout_ms: u64,
+        stream_idle_timeout_ms: u64,
         tool_stall_warning_ms: u64,
         provider_fallback_chain: Vec<String>,
         provider_failure_threshold: u32,
@@ -546,6 +549,7 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
             max_retries: 1,
             base_delay_ms: 250,
             provider_timeout_ms: 90_000,
+            stream_idle_timeout_ms: 90_000,
             tool_stall_warning_ms: 15_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 6,
@@ -557,6 +561,7 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
             max_retries: 2,
             base_delay_ms: 1_000,
             provider_timeout_ms: 120_000,
+            stream_idle_timeout_ms: 90_000,
             tool_stall_warning_ms: 8_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 3,
@@ -568,6 +573,7 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
             max_retries: 4,
             base_delay_ms: 1_500,
             provider_timeout_ms: 120_000,
+            stream_idle_timeout_ms: 90_000,
             tool_stall_warning_ms: 5_000,
             provider_fallback_chain: vec![],
             provider_failure_threshold: 2,
@@ -598,6 +604,9 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
     if let Some(v) = tc.profile_overrides.provider_timeout_ms {
         base.provider_timeout_ms = v;
     }
+    if let Some(v) = tc.profile_overrides.stream_idle_timeout_ms {
+        base.stream_idle_timeout_ms = v;
+    }
     if let Some(v) = tc.profile_overrides.tool_stall_warning_ms {
         base.tool_stall_warning_ms = v;
     }
@@ -622,6 +631,10 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
         tracing::warn!("provider_timeout_ms too low; clamping to 5000ms");
         base.provider_timeout_ms = 5_000;
     }
+    if base.stream_idle_timeout_ms < 5_000 {
+        tracing::warn!("stream_idle_timeout_ms too low; clamping to 5000ms");
+        base.stream_idle_timeout_ms = 5_000;
+    }
     if base.provider_failure_threshold == 0 {
         tracing::warn!("provider_failure_threshold=0 is invalid; clamping to 1");
         base.provider_failure_threshold = 1;
@@ -643,6 +656,7 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
             base_delay_ms: base.base_delay_ms,
         },
         provider_timeout_ms: Some(base.provider_timeout_ms),
+        stream_idle_timeout_ms: Some(base.stream_idle_timeout_ms),
         tool_watchdog: michin_agent_core::ToolWatchdogConfig {
             stall_warning_ms: base.tool_stall_warning_ms,
         },

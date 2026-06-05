@@ -86,7 +86,13 @@ pub struct AgentLoopConfig {
     pub include_usage: bool,
     pub compaction: CompactionConfig,
     pub retry: RetryConfig,
+    /// Bounds request setup (connect + response headers). Does NOT cap total
+    /// stream duration — long generations may legitimately exceed it.
     pub provider_timeout_ms: Option<u64>,
+    /// Max gap between stream events once the stream is open. A healthy
+    /// stream emits deltas continuously; a gap this long means a dead
+    /// connection. `None` disables the idle watchdog.
+    pub stream_idle_timeout_ms: Option<u64>,
     pub tool_watchdog: ToolWatchdogConfig,
     pub provider_fallback_chain: Vec<String>,
     pub provider_circuit_breaker: CircuitBreakerConfig,
@@ -116,6 +122,7 @@ impl Default for AgentLoopConfig {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
             provider_timeout_ms: Some(120_000),
+            stream_idle_timeout_ms: Some(90_000),
             tool_watchdog: ToolWatchdogConfig::default(),
             provider_fallback_chain: Vec::new(),
             provider_circuit_breaker: CircuitBreakerConfig::default(),

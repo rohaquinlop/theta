@@ -45,6 +45,10 @@ impl OpenAiCompatProvider {
             .pool_max_idle_per_host(4)
             // Fail fast on connection establishment issues.
             .connect_timeout(Duration::from_secs(30))
+            // Idle timeout between reads on the response body. Bounds gaps
+            // between SSE chunks without capping total stream duration (long
+            // generations legitimately exceed any total timeout).
+            .read_timeout(Duration::from_secs(90))
             .build()
             .expect("reqwest Client builder should not fail with default settings");
         Self {
@@ -134,11 +138,20 @@ impl Provider for OpenAiCompatProvider {
             request = request.header("Authorization", format!("Bearer {api_key}"));
         }
 
-        if let Some(timeout_ms) = options.timeout_ms {
-            request = request.timeout(std::time::Duration::from_millis(timeout_ms));
-        }
-
-        let response = request.send().await?;
+        // Bound request setup (connect + response headers) only. A total
+        // request timeout would abort the SSE body mid-stream on long
+        // generations; stalls after headers are caught by the client-level
+        // read_timeout and the consumer-side idle watchdog.
+        let response = match options.timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), request.send())
+                .await
+                .map_err(|_| MichiNError::ApiError {
+                    status: 408,
+                    message: "request timed out waiting for response headers".into(),
+                    retry_after_ms: None,
+                })??,
+            None => request.send().await?,
+        };
 
         let status = response.status();
         if !status.is_success() {
