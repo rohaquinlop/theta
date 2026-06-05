@@ -20,7 +20,7 @@ Terminal UI built with ratatui + crossterm. Chat view, multi-line editor with @-
 | `src/components/session_picker.rs`           | `/sessions` command                    |
 | `src/components/tree_selector.rs`            | `/tree` branch/session tree            |
 | `src/components/settings_selector.rs`        | Settings overlay                       |
-| `src/components/thinking_selector.rs`        | Thinking level selector                |
+| `src/components/caveman_selector.rs`         | Caveman mode level picker              |
 | `src/components/mimo_cluster.rs`             | MiMo cluster region picker             |
 | `src/components/status.rs`                   | Bottom status bar                      |
 | `src/theme.rs`                               | `Theme` — `default` and `monokai`      |

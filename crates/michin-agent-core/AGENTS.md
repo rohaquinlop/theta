@@ -9,7 +9,7 @@ Agent runtime: `Agent` struct, nested loop, tool execution, compaction, command 
 ## Public API
 
 - `Agent` — prompt, continue, steer, follow_up, subscribe, hooks.
-- `AgentEvent` enum — includes `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`, `CompactionPaused`, `AgentEnd`.
+- `AgentEvent` enum — includes `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`, `CavemanModeToggled`, `CompactionPaused`, `AgentEnd`.
 - `Hooks` trait — `beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`, `tui_status_lines()`, `tui_status_rows()`.
 - `AgentTool` trait — `name()`, `description()`, `label()`, `parameters()`, `execution_mode()`, `execute()`.
 
@@ -25,7 +25,7 @@ Agent runtime: `Agent` struct, nested loop, tool execution, compaction, command 
 | `src/types.rs`                       | All config types, traits, enums                 |
 | `src/events.rs`                      | AgentEvent enum                                 |
 | `src/hooks.rs`                       | Hooks trait                                     |
-| `src/state.rs`                       | Agent mutable state (RwLock-protected)          |
+| `src/state.rs`                       | Agent mutable state (RwLock-protected, includes `caveman_mode`)          |
 | `src/tools.rs`                       | AgentTool trait definition                      |
 | `src/error.rs`                       | AgentError enum                                 |
 

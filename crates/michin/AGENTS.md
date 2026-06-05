@@ -15,7 +15,7 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 | `src/config.rs`                       | `MichiNConfig`, `AuthConfig` with env fallback               |
 | `src/settings.rs`                     | Persistent settings.json                                    |
 | `src/interactive.rs`                  | TUI mode glue: agent ↔ TUI bridge                           |
-| `src/system_prompt.rs`                | System prompt builder (AGENTS.md, CLAUDE.md, skills, tools) |
+| `src/system_prompt.rs`                | System prompt builder (`SystemPromptConfig`, AGENTS.md, CLAUDE.md, skills, tools) |
 | `src/skills.rs`                       | Skill discovery, YAML frontmatter, XML generation           |
 | `src/scripts.rs`                      | Extension script discovery                                  |
 | `src/session.rs`                      | `SessionManager` — pi-compatible JSONL                      |

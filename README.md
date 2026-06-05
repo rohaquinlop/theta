@@ -51,6 +51,7 @@ All print-mode commands accept these global flags:
 | `-m`, `--model`      | Override model (e.g. `o4`, `deepseek-v4-pro`)  |
 | `-t`, `--thinking`   | Thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `-C`, `--working-dir` | Working directory override                     |
+| `--caveman`          | Caveman compression level (`off`, `lite`, `full`, `ultra`, `wenyan-lite`, `wenyan-full`, `wenyan-ultra`) |
 | `--config`           | Config file path                               |
 
 ### Examples
@@ -93,6 +94,7 @@ michin resume abc123
 | `/thinking [lvl]` | Set thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `/effort [lvl]` | Alias for `/thinking` |
 | `/plan` | Toggle plan mode |
+| `/caveman [lvl]` | Open selector or set caveman compression level |
 | `/clear` | Clear the chat display |
 | `/session` | Show session info (tokens, context window, compaction) |
 | `/status` | Show live runtime status snapshot |
@@ -166,6 +168,36 @@ The plan model is stored in `~/.michin/settings.json` under `plan_session`:
 
 Each session tracks its own `provider`, `model`, and `thinking` level.
 Both are independent — changing one never affects the other.
+
+## Caveman Mode
+
+Caveman mode compresses the model's output to save tokens — ~75% reduction at `ultra`
+level. All technical substance stays; filler, articles, and pleasantries are stripped.
+Persists across sessions via `settings.json`.
+
+### Levels
+
+| Level | Behavior |
+|-------|----------|
+| `off` | Normal verbose responses |
+| `lite` | No filler/hedging, keep articles + full sentences |
+| `full` | Drop articles, fragments OK, short synonyms |
+| `ultra` | Abbreviate prose words, arrows for causality. Never abbreviate code |
+| `wenyan-lite` | Semi-classical Chinese register, drop filler |
+| `wenyan-full` | Maximum classical Chinese terseness, 之/乃/為/其 particles |
+| `wenyan-ultra` | Extreme abbreviation with classical Chinese feel |
+
+### Usage
+
+```
+/caveman          # open level selector modal
+/caveman ultra    # set directly (bypasses modal)
+--caveman ultra   # CLI flag for print mode or TUI startup
+```
+
+The status bar shows a `[caveman:ultra]` badge when active. Caveman mode
+works in TUI, print mode, and RPC mode.
+
 ## Themes
 
 MichiN ships two built-in themes (`default` and `monokai`) and supports user-defined TOML theme files, inspired by Helix.
@@ -382,6 +414,7 @@ Fields currently persisted there:
 - `favorite_models` (string[], default: `[]`): model IDs pinned at the top of the model selector.
 - `mimo_cluster_url` (string or null, default: `null`): MiMo token-plan cluster base URL (region endpoint). Overrides `MIMO_BASE_URL` env var when set.
 - `plan_session` (object, optional): plan mode model reference, same shape as `last_session` — `{"provider": "...", "model": "...", "thinking": "..."}`. Set automatically when you toggle plan mode on or switch models while in plan mode.
+- `caveman_mode` (string or null, default: `null`): persisted caveman compression level. Set via `/caveman` or `--caveman` CLI flag.
 
 RPC examples:
 
