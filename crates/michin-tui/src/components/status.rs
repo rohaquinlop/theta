@@ -284,10 +284,11 @@ impl StatusBar {
         let ext_left = ext_row.map(|r| join_parts(&r.left)).unwrap_or_default();
         let ext_right = ext_row.map(|r| join_parts(&r.right)).unwrap_or_default();
 
-        // Caveman badge: shown between model section and ext-left when active.
+        // Caveman badge: hidden when disabled (`off` or `None`).
         let cav_badge = self
             .caveman_mode
             .as_ref()
+            .filter(|l| *l != "off")
             .map(|l| format!("caveman:{l}"))
             .unwrap_or_default();
 
@@ -303,7 +304,7 @@ impl StatusBar {
         let model_text: String = model_spans.iter().map(|s| s.content.as_ref()).collect();
         let fixed = model_text.len()
             + cav_badge.len()
-            + if cav_badge.is_empty() { 0 } else { 1 } // leading space
+            + if cav_badge.is_empty() { 0 } else { 3 } // " [" + "]"
             + ext_left.len()
             + detail_str.len()
             + ext_right.len()
@@ -317,8 +318,13 @@ impl StatusBar {
         let mut spans = model_spans;
         if !cav_badge.is_empty() {
             spans.push(Span::styled(
-                format!(" [{cav_badge}]"),
-                Style::default().fg(self.theme.dim),
+                " [".to_string(),
+                Style::default().fg(self.theme.border),
+            ));
+            spans.push(Span::styled(cav_badge, Style::default().fg(self.theme.dim)));
+            spans.push(Span::styled(
+                "]".to_string(),
+                Style::default().fg(self.theme.border),
             ));
         }
         if !ext_left.is_empty() {
