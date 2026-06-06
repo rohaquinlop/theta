@@ -294,6 +294,41 @@ tool.before("write", |ctx| {
 
 Scripts load automatically on next session. Script errors never block the tool they're guarding.
 
+## Project Context
+
+MichiN auto-loads project instructions via `AGENTS.md` — the [open standard](https://agents.md/) for coding agent configuration.
+
+### AGENTS.md
+
+Place an `AGENTS.md` at the root of your repository. MichiN walks up the directory tree to find it, then recursively discovers nested `AGENTS.md` files in subdirectories (e.g. per-crate instructions).
+
+```text
+repo/
+├── AGENTS.md          # loaded as "Project Context"
+├── crates/
+│   ├── api/AGENTS.md   # loaded as "Crate Context: crates/api"
+│   └── core/AGENTS.md  # loaded as "Crate Context: crates/core"
+```
+
+### Skills
+
+Skills are reusable Markdown instructions with YAML frontmatter — loaded on demand via [progressive disclosure](https://agentskills.io/specification). MichiN follows the [Agent Skills spec](https://agentskills.io/specification).
+
+**Skill locations:**
+
+- `~/.michin/skills/<name>/SKILL.md` — global (priority)
+- `~/.agents/skills/<name>/SKILL.md` — global
+- `./.michin/skills/<name>/SKILL.md` — project-local (priority)
+- `./.agents/skills/<name>/SKILL.md` — project-local
+
+`.michin/` takes priority over `.agents/` — if two skills share a name, the `.michin/` version wins.
+
+Each skill is a directory whose name matches the `name` in SKILL.md frontmatter. The name must be 1-64 lowercase alphanumeric characters and hyphens, no leading/trailing/consecutive hyphens.
+
+### MichiN Context
+
+Drop a `.michin/context.md` in the working directory for extra project-specific instructions — appended after AGENTS.md.
+
 ## Custom System Prompt
 
 MichiN checks for two override files in `~/.michin/` at session start:
