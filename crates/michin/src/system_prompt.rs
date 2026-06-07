@@ -66,17 +66,29 @@ pub async fn build_system_prompt(
         config.thinking_level,
         config.max_context_window,
     ));
-    parts.push(RESPONSE_CONTRACT.to_string());
-
     if let Some(level) = config.caveman_mode {
+        parts.push(
+            "Project Context \"Conversational Style\" directives \
+             (\"short, concise answers\", \"technical prose only\") \
+             are inactive. They are replaced by:"
+                .to_string(),
+        );
         parts.push(format!(
             "{CAVEMAN_CONTRACT}\n\nCurrent caveman level: {level}."
         ));
+        parts.push(
+            "ACTIVE EVERY RESPONSE. No revert. No filler drift. \
+             ALL output — explanations, summaries, test results, \
+             diff analysis, structured lists — follows these rules."
+                .to_string(),
+        );
     }
 
     if config.plan_mode {
         parts.push(PLAN_MODE_CONTRACT.to_string());
     }
+
+    parts.push(RESPONSE_CONTRACT.to_string());
 
     let text = parts.join("\n\n");
 
@@ -422,11 +434,9 @@ Summarize findings and ask before modifying code.
 Skills and extensions are listed in the conversation context. When a message
 matches a skill's trigger, read its file and follow its instructions."#;
 
-/// Caveman communication mode contract — injected after RESPONSE_CONTRACT.
-/// Forces the model to compress all responses according to the selected level.
 pub const CAVEMAN_CONTRACT: &str = r#"# Caveman Mode
 
-You are in ultra-compressed communication mode. All technical substance stays. Only fluff dies.
+Caveman mode ACTIVE. All output compressed per rules below.
 
 ## Rules
 
