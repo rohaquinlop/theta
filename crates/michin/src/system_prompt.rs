@@ -9,9 +9,22 @@
 //! system prompt before each LLM call.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use michin_ai::ContentBlock;
+
+/// Compute the date string once, frozen at process start.
+/// Prevents spurious DeepSeek prefix cache misses when a session spans
+/// midnight — the date in the system prompt stays byte-identical.
+static SESSION_DATE: LazyLock<String> = LazyLock::new(|| {
+    chrono_now(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+});
 
 use crate::scripts;
 use crate::skills;
@@ -48,6 +61,7 @@ pub async fn build_system_prompt(
 
     parts.push(build_runtime_context(
         working_dir,
+        &SESSION_DATE,
         config.model_id,
         config.thinking_level,
         config.max_context_window,
@@ -311,16 +325,11 @@ pub fn build_tools_prompt(working_dir: &Path) -> String {
 
 fn build_runtime_context(
     working_dir: &Path,
+    date: &str,
     model_id: &str,
     thinking_level: Option<&str>,
     max_context_window: Option<u32>,
 ) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let date = chrono_now(now);
     let cwd_display = working_dir.display();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".into());
     let os = std::env::consts::OS;
