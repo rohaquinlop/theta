@@ -271,6 +271,30 @@ fn is_destructive_command(segment: &CommandSegment) -> bool {
     }
 }
 
+/// Evaluate an `exec()` command from Rhai scripts for safety.
+///
+/// Checks for destructive operations (same rules as `evaluate_bash`).
+pub fn evaluate_exec_command(command: &str, args: &[String]) -> SafetyDecision {
+    let mut argv = vec![command.to_string()];
+    argv.extend(args.iter().cloned());
+    let segment = CommandSegment {
+        raw: format!("{} {}", command, args.join(" ").trim()),
+        argv,
+    };
+
+    if is_destructive_command(&segment) {
+        return SafetyDecision {
+            decision: SafetyDecisionKind::Rejected,
+            details: format!("destructive command blocked: '{}'", segment.raw),
+        };
+    }
+
+    SafetyDecision {
+        decision: SafetyDecisionKind::Allowed,
+        details: "command allowed".to_string(),
+    }
+}
+
 /// Check if raw command segment has an output redirect (writing to a file).
 fn has_output_redirect(raw: &str) -> bool {
     let raw = raw.trim();

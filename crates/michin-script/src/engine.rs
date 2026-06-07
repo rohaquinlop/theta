@@ -8,7 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use rhai::{AST, Dynamic, Engine, EvalAltResult, FnPtr, Position, Scope};
 
+use michin_agent_core::command_policy;
 use michin_agent_core::types::{ExtensionStatusRow, ToolExecutionMode};
+
+/// Maximum bytes to capture from exec() stdout/stderr before truncating.
+const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 use crate::loader::ScriptDef;
 
@@ -45,6 +49,8 @@ struct ToolHandler {
     ast: AST,
     /// Rhai callback for the hook.
     callable: FnPtr,
+    /// Script name for state namespace.
+    script_name: String,
 }
 
 #[derive(Clone)]
@@ -72,11 +78,14 @@ pub struct ScriptEngine {
     /// suppressed. Prevents duplicate handlers when re-evaluating the AST during
     /// `eval_tool_execute`.
     suppress_registration: Arc<Mutex<bool>>,
+    /// Namespace prefix for set_state/get_state keys during script load.
+    state_namespace: Arc<Mutex<Option<String>>>,
 }
 
 impl ScriptEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
+        engine.set_max_operations(1_000_000);
         let handlers = Arc::new(Mutex::new(HashMap::new()));
         let registration_context = Arc::new(Mutex::new(None));
         let tui_status_handlers = Arc::new(Mutex::new(HashMap::new()));
@@ -85,13 +94,17 @@ impl ScriptEngine {
         let suppress_registration = Arc::new(Mutex::new(false));
         let shared_state: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let state_namespace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // Register set_state(key, value) — accessible from all Rhai scripts.
         {
             let ss = Arc::clone(&shared_state);
+            let sn_state = Arc::clone(&state_namespace);
             engine.register_fn("set_state", move |key: &str, value: &str| {
+                let prefix = sn_state.lock().unwrap().clone().unwrap_or_default();
+                let full_key = format!("{prefix}:{key}");
                 if let Ok(mut guard) = ss.lock() {
-                    guard.insert(key.to_string(), value.to_string());
+                    guard.insert(full_key, value.to_string());
                 }
             });
         }
@@ -99,9 +112,12 @@ impl ScriptEngine {
         // Register get_state(key) -> String — returns "" if not found.
         {
             let ss = Arc::clone(&shared_state);
+            let sn_state = Arc::clone(&state_namespace);
             engine.register_fn("get_state", move |key: &str| -> String {
+                let prefix = sn_state.lock().unwrap().clone().unwrap_or_default();
+                let full_key = format!("{prefix}:{key}");
                 ss.lock()
-                    .map(|guard| guard.get(key).cloned().unwrap_or_default())
+                    .map(|guard| guard.get(&full_key).cloned().unwrap_or_default())
                     .unwrap_or_default()
             });
         }
@@ -138,6 +154,7 @@ impl ScriptEngine {
                     let handler = ToolHandler {
                         ast: ctx.ast,
                         callable: callback,
+                        script_name: ctx.script_name.clone(),
                     };
                     handlers
                         .lock()
@@ -169,6 +186,7 @@ impl ScriptEngine {
                     let handler = ToolHandler {
                         ast: ctx.ast,
                         callable: callback,
+                        script_name: ctx.script_name.clone(),
                     };
                     handlers
                         .lock()
@@ -199,6 +217,7 @@ impl ScriptEngine {
                     let handler = ToolHandler {
                         ast: ctx.ast,
                         callable: callback,
+                        script_name: ctx.script_name.clone(),
                     };
                     tui_handlers
                         .lock()
@@ -214,13 +233,38 @@ impl ScriptEngine {
         // Kills the subprocess after 30 seconds to prevent hanging.
         engine.register_fn("exec", |command: &str, args: rhai::Array| -> Dynamic {
             let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+
+            // Check command safety policy.
+            let decision = command_policy::evaluate_exec_command(command, &arg_strings);
+            if decision.decision == michin_agent_core::SafetyDecisionKind::Rejected {
+                let mut map = rhai::Map::new();
+                map.insert("stdout".into(), Dynamic::from(String::new()));
+                map.insert("stderr".into(), Dynamic::from(decision.details));
+                map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+                return Dynamic::from(map);
+            }
+
             let output = std::process::Command::new(command)
                 .args(&arg_strings)
                 .output();
             match output {
                 Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    let mut truncated = false;
+                    if stdout.len() > MAX_OUTPUT_BYTES {
+                        let cap = cap_bytes(&stdout, MAX_OUTPUT_BYTES);
+                        truncated |= stdout.len() != cap.len();
+                        stdout = cap;
+                    }
+                    if stderr.len() > MAX_OUTPUT_BYTES {
+                        let cap = cap_bytes(&stderr, MAX_OUTPUT_BYTES);
+                        truncated |= stderr.len() != cap.len();
+                        stderr = cap;
+                    }
+                    if truncated {
+                        stderr.push_str("\n[output truncated at 256KB]");
+                    }
                     let exit_code = out.status.code().unwrap_or(-1) as rhai::INT;
                     let mut map = rhai::Map::new();
                     map.insert("stdout".into(), Dynamic::from(stdout));
@@ -245,6 +289,17 @@ impl ScriptEngine {
             "exec_with_timeout",
             |command: &str, args: rhai::Array, timeout_secs: i64| -> Dynamic {
                 let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+
+                // Check command safety policy.
+                let decision = command_policy::evaluate_exec_command(command, &arg_strings);
+                if decision.decision == michin_agent_core::SafetyDecisionKind::Rejected {
+                    let mut map = rhai::Map::new();
+                    map.insert("stdout".into(), Dynamic::from(String::new()));
+                    map.insert("stderr".into(), Dynamic::from(decision.details));
+                    map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+                    return Dynamic::from(map);
+                }
+
                 let mut child = match std::process::Command::new(command)
                     .args(&arg_strings)
                     .stdout(std::process::Stdio::piped())
@@ -292,8 +347,22 @@ impl ScriptEngine {
                     }
                 }
                 let result = child.wait_with_output().unwrap();
-                let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+                let mut stdout = String::from_utf8_lossy(&result.stdout).to_string();
+                let mut stderr = String::from_utf8_lossy(&result.stderr).to_string();
+                let mut truncated = false;
+                if stdout.len() > MAX_OUTPUT_BYTES {
+                    let cap = cap_bytes(&stdout, MAX_OUTPUT_BYTES);
+                    truncated |= stdout.len() != cap.len();
+                    stdout = cap;
+                }
+                if stderr.len() > MAX_OUTPUT_BYTES {
+                    let cap = cap_bytes(&stderr, MAX_OUTPUT_BYTES);
+                    truncated |= stderr.len() != cap.len();
+                    stderr = cap;
+                }
+                if truncated {
+                    stderr.push_str("\n[output truncated at 256KB]");
+                }
                 let exit_code = result.status.code().unwrap_or(-1) as rhai::INT;
                 let mut map = rhai::Map::new();
                 map.insert("stdout".into(), Dynamic::from(stdout));
@@ -355,6 +424,7 @@ impl ScriptEngine {
                     let handler = ToolHandler {
                         ast: ctx.ast,
                         callable: callback,
+                        script_name: ctx.script_name.clone(),
                     };
                     row_handlers.lock().unwrap().insert(idx, handler);
                     tracing::info!(script = %ctx.script_name, row_idx = idx, "registered tui.row");
@@ -374,6 +444,15 @@ impl ScriptEngine {
                 move |_tool: rhai::Map, name: &str, schema: rhai::Map| {
                     // Skip if registration is suppressed (re-eval during execute).
                     if *suppress.lock().unwrap() {
+                        return Dynamic::UNIT;
+                    }
+                    // Reject built-in tool names.
+                    const BUILT_IN_NAMES: &[&str] = &["read", "write", "edit", "bash"];
+                    if BUILT_IN_NAMES.contains(&name) {
+                        tracing::warn!(
+                            tool_name = name,
+                            "custom tool rejected: name shadows built-in"
+                        );
                         return Dynamic::UNIT;
                     }
                     let Some(ctx) = registration_context.lock().unwrap().clone() else {
@@ -428,6 +507,7 @@ impl ScriptEngine {
             tui_row_handlers,
             registered_tools,
             suppress_registration,
+            state_namespace,
         }
     }
 
@@ -459,6 +539,9 @@ impl ScriptEngine {
             scope.push("ctx", Dynamic::from(ctx_map));
         }
 
+        // Set shared state namespace to this script's name.
+        *self.state_namespace.lock().unwrap() = Some(def.name.clone());
+
         *self.registration_context.lock().unwrap() = Some(RegistrationContext {
             script_name: def.name.clone(),
             ast: ast.clone(),
@@ -472,6 +555,7 @@ impl ScriptEngine {
             .map_err(|e| format!("Runtime error in {}: {e}", def.name));
 
         *self.registration_context.lock().unwrap() = None;
+        *self.state_namespace.lock().unwrap() = None;
 
         let _ = eval_result?;
 
@@ -568,10 +652,12 @@ impl ScriptEngine {
     /// Evaluate all registered TUI status callbacks.
     /// Returns key → text pairs for display in the TUI status area.
     pub fn eval_tui_statuses(&self) -> Vec<(String, String)> {
-        let engine = self.engine.lock().unwrap();
         let guard = self.tui_status_handlers.lock().unwrap();
         let mut out = Vec::with_capacity(guard.len());
         for (key, handler) in guard.iter() {
+            // Set namespace so set_state/get_state in callbacks use the correct prefix.
+            *self.state_namespace.lock().unwrap() = Some(handler.script_name.clone());
+            let engine = self.engine.lock().unwrap();
             // Call with empty context — status callbacks take no args.
             let call_dyn = Dynamic::from(rhai::Map::new());
             match handler
@@ -588,6 +674,8 @@ impl ScriptEngine {
                     tracing::warn!(key, error = %e, "tui.status eval error");
                 }
             }
+            drop(engine);
+            *self.state_namespace.lock().unwrap() = None;
         }
         // Sort by key for stable ordering.
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -598,7 +686,6 @@ impl ScriptEngine {
     /// Returns vec of ExtensionStatusRow with left/center/right text slots,
     /// ordered by row index.
     pub fn eval_tui_rows(&self) -> Vec<ExtensionStatusRow> {
-        let engine = self.engine.lock().unwrap();
         let guard = self.tui_row_handlers.lock().unwrap();
         if guard.is_empty() {
             return vec![];
@@ -610,6 +697,9 @@ impl ScriptEngine {
         let mut rows: Vec<ExtensionStatusRow> = Vec::new();
         for idx in indices {
             if let Some(handler) = guard.get(&idx) {
+                // Set namespace so set_state/get_state in callbacks use the correct prefix.
+                *self.state_namespace.lock().unwrap() = Some(handler.script_name.clone());
+                let engine = self.engine.lock().unwrap();
                 let call_dyn = Dynamic::from(rhai::Map::new());
                 match handler
                     .callable
@@ -627,6 +717,8 @@ impl ScriptEngine {
                         tracing::warn!(row_idx = idx, error = %e, "tui.row eval error");
                     }
                 }
+                drop(engine);
+                *self.state_namespace.lock().unwrap() = None;
             }
         }
         rows
@@ -671,6 +763,9 @@ impl ScriptEngine {
         args: &serde_json::Value,
         result: Option<&str>,
     ) -> Result<Dynamic, String> {
+        // Set namespace so set_state/get_state callbacks use the correct prefix.
+        *self.state_namespace.lock().unwrap() = Some(handler.script_name.clone());
+
         let engine = self.engine.lock().unwrap();
         let args_str = serde_json::to_string(args).unwrap_or_else(|_| "null".into());
         let args_dyn: Dynamic = engine
@@ -682,7 +777,7 @@ impl ScriptEngine {
         call_map.insert("args".into(), args_dyn);
         let call_dyn = Dynamic::from(call_map);
 
-        if let Some(r) = result {
+        let res = if let Some(r) = result {
             handler
                 .callable
                 .call::<Dynamic>(&engine, &handler.ast, (call_dyn, r.to_string()))
@@ -692,7 +787,10 @@ impl ScriptEngine {
                 .callable
                 .call::<Dynamic>(&engine, &handler.ast, (call_dyn,))
                 .map_err(|e| format!("hook error: {e}"))
-        }
+        };
+
+        *self.state_namespace.lock().unwrap() = None;
+        res
     }
 
     fn parse_block_result(&self, val: &Dynamic) -> Option<String> {
@@ -716,6 +814,20 @@ impl Default for ScriptEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Cap a string at `limit` bytes, preserving UTF-8 validity.
+/// Returns the original if within limit.
+fn cap_bytes(s: &str, limit: usize) -> String {
+    if s.len() <= limit {
+        return s.to_string();
+    }
+    let mut capped = s.as_bytes()[..limit].to_vec();
+    // Chop off trailing partial UTF-8 byte.
+    while !capped.is_empty() && capped.last().copied().unwrap() & 0b1100_0000 == 0b1000_0000 {
+        capped.pop();
+    }
+    String::from_utf8(capped).unwrap_or_else(|_| s[..limit].to_string())
 }
 
 /// Convert a Rhai map to a `serde_json::Value`.

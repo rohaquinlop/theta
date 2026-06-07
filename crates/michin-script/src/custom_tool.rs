@@ -52,7 +52,7 @@ impl AgentTool for RhaiCustomTool {
         &self,
         tool_call_id: &str,
         args: serde_json::Value,
-        _signal: Option<CancellationToken>,
+        signal: Option<CancellationToken>,
         _on_update: Option<ToolUpdateSender>,
     ) -> Result<ToolResult, AgentError> {
         let engine = Arc::clone(&self.engine);
@@ -68,6 +68,13 @@ impl AgentTool for RhaiCustomTool {
                 tool_name: self.def.name.clone(),
                 message: e,
             })?;
+
+        // If cancellation was requested while spawn_blocking ran, discard result.
+        if let Some(ref sig) = signal
+            && sig.is_cancelled()
+        {
+            return Err(AgentError::Aborted);
+        }
 
         Ok(ToolResult {
             tool_call_id: tool_call_id.to_string(),
