@@ -42,6 +42,12 @@ pub enum ChatRole {
     System,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragEdge {
+    Top,
+    Bottom,
+}
+
 /// Scrollable chat message list.
 pub struct Chat {
     pub messages: Vec<ChatMessage>,
@@ -55,6 +61,11 @@ pub struct Chat {
     select_anchor: Option<(usize, usize)>,
     select_head: Option<(usize, usize)>,
     selecting: bool,
+    drag_edge: Option<DragEdge>,
+    scrollbar_dragging: bool,
+    scrollbar_drag_origin_y: u16,
+    scrollbar_drag_origin_top: usize,
+    scrollbar_zone: Option<Rect>,
     pub active_tool_message_idx: HashMap<String, usize>,
     cached_inner_width: Option<usize>,
     cached_wrapped_lines: Vec<Line<'static>>,
@@ -64,6 +75,8 @@ pub struct Chat {
     pub cached_message_count: usize,
     pub cache_dirty: bool,
 }
+
+const SCROLLBAR_WIDTH: u16 = 2;
 
 #[derive(Debug, Clone)]
 struct VisibleLine {
@@ -100,6 +113,8 @@ impl Chat {
         self.select_anchor = None;
         self.select_head = None;
         self.selecting = false;
+        self.drag_edge = None;
+        self.scrollbar_dragging = false;
     }
 
     pub fn new(theme: Theme) -> Self {
@@ -115,6 +130,11 @@ impl Chat {
             select_anchor: None,
             select_head: None,
             selecting: false,
+            drag_edge: None,
+            scrollbar_dragging: false,
+            scrollbar_drag_origin_y: 0,
+            scrollbar_drag_origin_top: 0,
+            scrollbar_zone: None,
             active_tool_message_idx: HashMap::new(),
             cached_inner_width: None,
             cached_wrapped_lines: Vec::new(),
@@ -443,20 +463,56 @@ fn wrap_user_bubble(
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let render_start = std::time::Instant::now();
-        let block = Block::default()
-            .borders(Borders::NONE)
-            .padding(Padding::horizontal(1));
-        let inner = block.inner(area);
-        let inner_width = area.width.saturating_sub(2) as usize;
+        // Split area: scrollbar strip on far right, content to its left
+        let scrollbar_rect = Rect {
+            x: area.x + area.width.saturating_sub(SCROLLBAR_WIDTH),
+            y: area.y,
+            width: SCROLLBAR_WIDTH,
+            height: area.height,
+        };
+        let content_area = Rect {
+            width: area.width.saturating_sub(SCROLLBAR_WIDTH),
+            ..area
+        };
+        let padding = Padding::horizontal(1);
+        let block = Block::default().borders(Borders::NONE).padding(padding);
+        let inner = block.inner(content_area);
+        let inner_width = inner.width as usize;
         self.rebuild_render_cache(inner_width);
 
-        let viewport_height = area.height as usize;
+        let viewport_height = inner.height as usize;
         let total_visual_rows = self.cached_wrapped_lines.len();
         let max_scroll = total_visual_rows.saturating_sub(viewport_height);
         if self.auto_follow_tail {
             self.scroll_top = max_scroll;
         }
         self.clamp_scroll_to_bounds(max_scroll);
+
+        // Re-enable auto-follow when scrolled to bottom
+        if !self.auto_follow_tail && total_visual_rows > 0 && self.scroll_top >= max_scroll {
+            self.auto_follow_tail = true;
+        }
+
+        // Render-driven auto-scroll: drag edge repeats at 30fps.
+        if self.selecting {
+            match self.drag_edge {
+                Some(DragEdge::Top) if self.scroll_top > 0 => {
+                    self.scroll_top = self.scroll_top.saturating_sub(1);
+                    self.auto_follow_tail = false;
+                    self.select_head = Some((self.scroll_top, usize::MAX));
+                }
+                Some(DragEdge::Bottom) if self.scroll_top < max_scroll => {
+                    self.scroll_top = self.scroll_top.saturating_add(1);
+                    let last_abs = self.scroll_top + viewport_height.saturating_sub(1);
+                    self.select_head = Some((
+                        last_abs.min(total_visual_rows.saturating_sub(1)),
+                        usize::MAX,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         let scroll_top = self.scroll_top;
 
         let mut visible = self
@@ -471,21 +527,15 @@ impl Component for Chat {
             && let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head)
         {
             let (start, end) = ordered_selection(anchor, head);
-            let visible_last = visible.len().saturating_sub(1);
-            let from_line = start.0.min(visible_last);
-            let to_line = end.0.min(visible_last);
-            for visible_line_idx in from_line..=to_line {
-                if let Some(line) = visible.get_mut(visible_line_idx) {
-                    let from = if visible_line_idx == start.0 {
-                        start.1
-                    } else {
-                        0
-                    };
-                    let to = if visible_line_idx == end.0 {
-                        end.1
-                    } else {
-                        usize::MAX
-                    };
+            let vh = visible.len();
+            for vli in 0..vh {
+                let abs_line = scroll_top + vli;
+                if abs_line < start.0 || abs_line > end.0 {
+                    continue;
+                }
+                if let Some(line) = visible.get_mut(vli) {
+                    let from = if abs_line == start.0 { start.1 } else { 0 };
+                    let to = if abs_line == end.0 { end.1 } else { usize::MAX };
                     highlight_line_range(line, from, to, self.theme.highlight);
                 }
             }
@@ -495,7 +545,38 @@ impl Component for Chat {
             .block(block)
             .scroll((0, 0));
 
-        frame.render_widget(para, area);
+        frame.render_widget(para, content_area);
+
+        // ── Scroll bar (independent right strip) ──
+        if total_visual_rows > viewport_height {
+            self.scrollbar_zone = Some(scrollbar_rect);
+            let thumb_height = (viewport_height * viewport_height / total_visual_rows).max(2);
+            let max_thumb_pos = viewport_height.saturating_sub(thumb_height);
+            let thumb_pos = (scroll_top * max_thumb_pos)
+                .checked_div(max_scroll)
+                .unwrap_or(0);
+            for row in 0..viewport_height {
+                let is_thumb = row >= thumb_pos && row < thumb_pos + thumb_height;
+                let ch = if is_thumb { "\u{2588}" } else { "\u{2591}" };
+                let style = if is_thumb {
+                    Style::default().fg(self.theme.scrollbar_thumb)
+                } else {
+                    Style::default().fg(self.theme.scrollbar_track)
+                };
+                let span = ratatui::text::Span::styled(ch.repeat(SCROLLBAR_WIDTH as usize), style);
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(span),
+                    Rect::new(
+                        scrollbar_rect.x,
+                        scrollbar_rect.y + row as u16,
+                        SCROLLBAR_WIDTH,
+                        1,
+                    ),
+                );
+            }
+        } else {
+            self.scrollbar_zone = None;
+        }
 
         let start = scroll_top.min(self.cached_visible_line_texts.len());
         let end = (start + inner.height as usize).min(self.cached_visible_line_texts.len());
@@ -516,6 +597,10 @@ impl Component for Chat {
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
+        let viewport_height = self
+            .last_inner_area
+            .map(|a| a.height as usize)
+            .unwrap_or(10);
         match event {
             Event::Key(key) if self.focused => match key.code {
                 KeyCode::Up => {
@@ -524,32 +609,54 @@ impl Component for Chat {
                 }
                 KeyCode::Down => {
                     self.scroll_top = self.scroll_top.saturating_add(1);
+                    self.auto_follow_tail = false;
                 }
                 KeyCode::PageUp => {
-                    self.scroll_top = self.scroll_top.saturating_sub(10);
+                    self.scroll_top = self
+                        .scroll_top
+                        .saturating_sub(viewport_height.saturating_sub(1));
                     self.auto_follow_tail = false;
                 }
                 KeyCode::PageDown => {
-                    self.scroll_top = self.scroll_top.saturating_add(10);
+                    self.scroll_top = self
+                        .scroll_top
+                        .saturating_add(viewport_height.saturating_sub(1));
+                    self.auto_follow_tail = false;
                 }
                 KeyCode::Home => {
                     self.scroll_top = 0;
                     self.auto_follow_tail = false;
                 }
                 KeyCode::End => {
+                    self.scroll_top = usize::MAX;
                     self.auto_follow_tail = true;
                 }
                 _ => {}
             },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.scroll_top = self.scroll_top.saturating_sub(3);
+                    self.scroll_top = self.scroll_top.saturating_sub(1);
                     self.auto_follow_tail = false;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_top = self.scroll_top.saturating_add(3);
+                    self.scroll_top = self.scroll_top.saturating_add(1);
+                    self.auto_follow_tail = false;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
+                    // Check scroll bar click — init drag without jump
+                    if let Some(sb_area) = self.scrollbar_zone
+                        && mouse.column >= sb_area.x
+                        && mouse.column < sb_area.x + sb_area.width
+                    {
+                        self.auto_follow_tail = false;
+                        self.selecting = false;
+                        self.select_anchor = None;
+                        self.select_head = None;
+                        self.scrollbar_dragging = true;
+                        self.scrollbar_drag_origin_y = mouse.row;
+                        self.scrollbar_drag_origin_top = self.scroll_top;
+                        return None;
+                    }
                     if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
                         if mouse
                             .modifiers
@@ -559,45 +666,85 @@ impl Component for Chat {
                             self.selecting = false;
                             return Some(Action::OpenUrl(url));
                         }
-                        self.select_anchor = Some(pos);
-                        self.select_head = Some(pos);
+                        let abs = (self.scroll_top + pos.0, pos.1);
+                        self.select_anchor = Some(abs);
+                        self.select_head = Some(abs);
                         self.selecting = true;
-                        if let Some(text) = self.selection_text(pos) {
+                        if let Some(text) = self.selection_text_from_abs(abs) {
                             return Some(Action::CopySelection(text));
                         }
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                    {
-                        self.select_head = Some(pos);
+                    // Scrollbar dragging: relative to drag start position
+                    if self.scrollbar_dragging {
+                        if let Some(sb) = self.scrollbar_zone {
+                            let total = self.cached_wrapped_lines.len();
+                            let vh = sb.height as usize;
+                            let max_scroll = total.saturating_sub(vh);
+                            if vh > 0 {
+                                let delta = mouse.row as i16 - self.scrollbar_drag_origin_y as i16;
+                                let delta_scroll =
+                                    (delta as f64 * max_scroll as f64 / vh as f64) as isize;
+                                self.scroll_top = (self.scrollbar_drag_origin_top as isize
+                                    + delta_scroll)
+                                    .max(0)
+                                    .min(max_scroll as isize)
+                                    as usize;
+                            }
+                            self.auto_follow_tail = false;
+                        }
+                        return None;
                     }
-                    if self.selecting
-                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                        && let Some(text) = self.selection_text(pos)
-                    {
-                        return Some(Action::CopySelection(text));
+                    if !self.selecting {
+                        return None;
+                    }
+                    if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
+                        let abs = (self.scroll_top + pos.0, pos.1);
+                        self.select_head = Some(abs);
+                    }
+                    // Auto-scroll when dragging past viewport edges.
+                    // Set a persistent edge flag so the render tick continues scrolling.
+                    if let Some(area) = self.last_inner_area {
+                        if mouse.row == area.y && self.scroll_top > 0 {
+                            self.drag_edge = Some(DragEdge::Top);
+                        } else if mouse.row >= area.y + area.height - 1 {
+                            self.drag_edge = Some(DragEdge::Bottom);
+                        } else {
+                            self.drag_edge = None;
+                        }
+                    }
+                    if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
+                        let abs = (self.scroll_top + pos.0, pos.1);
+                        if let Some(text) = self.selection_text_from_abs(abs) {
+                            return Some(Action::CopySelection(text));
+                        }
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
+                    self.scrollbar_dragging = false;
                     if self.selecting
                         && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
                     {
-                        self.select_head = Some(pos);
+                        let abs = (self.scroll_top + pos.0, pos.1);
+                        self.select_head = Some(abs);
                     }
                     if self.selecting
                         && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
-                        && let Some(text) = self.selection_text(pos)
                     {
-                        self.selecting = false;
-                        self.select_anchor = None;
-                        self.select_head = None;
-                        return Some(Action::CopySelection(text));
+                        let abs = (self.scroll_top + pos.0, pos.1);
+                        if let Some(text) = self.selection_text_from_abs(abs) {
+                            self.selecting = false;
+                            self.select_anchor = None;
+                            self.select_head = None;
+                            return Some(Action::CopySelection(text));
+                        }
                     }
                     self.selecting = false;
                     self.select_anchor = None;
                     self.select_head = None;
+                    self.drag_edge = None;
+                    self.scrollbar_dragging = false;
                 }
                 _ => {}
             },
@@ -856,30 +1003,28 @@ impl Chat {
         Some((line, col))
     }
 
-    fn selection_text(&self, head: (usize, usize)) -> Option<String> {
+    fn selection_text_from_abs(&self, head: (usize, usize)) -> Option<String> {
         let anchor = self.select_anchor?;
         let (start, end) = if anchor <= head {
             (anchor, head)
         } else {
             (head, anchor)
         };
-        if self.last_visible_lines.is_empty() {
+        if self.cached_visible_line_texts.is_empty() {
             return None;
         }
         let mut out = String::new();
         for line_idx in start.0..=end.0 {
             let line = self
-                .last_visible_lines
+                .cached_visible_line_texts
                 .get(line_idx)
-                .map(|l| l.text.as_str())
+                .map(|s| s.as_str())
                 .unwrap_or("");
             let is_user = self
-                .last_visible_user_line_flags
+                .cached_user_line_flags
                 .get(line_idx)
                 .copied()
                 .unwrap_or(false);
-            // Strip "> " prefix from user lines for selection copy.
-            // Skip decorative bubble bars (all-space user lines).
             if is_user && line.chars().all(|c| c == ' ') {
                 continue;
             }
@@ -928,10 +1073,6 @@ impl Chat {
 impl Chat {
     fn clamp_scroll_to_bounds(&mut self, max_scroll: usize) {
         self.scroll_top = self.scroll_top.min(max_scroll);
-        if self.scroll_top >= max_scroll {
-            self.auto_follow_tail = true;
-            self.scroll_top = max_scroll;
-        }
     }
 }
 

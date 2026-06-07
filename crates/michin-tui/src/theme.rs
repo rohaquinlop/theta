@@ -56,6 +56,10 @@ pub struct Theme {
     pub md_table_header: Color,
     /// Markdown task marker color.
     pub md_task_marker: Color,
+    /// Scroll bar track color (background of scroll bar column).
+    pub scrollbar_track: Color,
+    /// Scroll bar thumb color (the draggable indicator).
+    pub scrollbar_thumb: Color,
 }
 
 /// Serialized representation of a TOML theme file.
@@ -108,6 +112,10 @@ struct ThemeToml {
     md_table_header: Option<String>,
     #[serde(default)]
     md_task_marker: Option<String>,
+    #[serde(default)]
+    scrollbar_track: Option<String>,
+    #[serde(default)]
+    scrollbar_thumb: Option<String>,
 }
 
 impl Default for Theme {
@@ -135,6 +143,8 @@ impl Default for Theme {
             md_rule_border: Color::Rgb(60, 60, 60),
             md_table_header: Color::Cyan,
             md_task_marker: Color::Cyan,
+            scrollbar_track: Color::Rgb(50, 50, 50),
+            scrollbar_thumb: Color::Rgb(120, 120, 120),
         }
     }
 }
@@ -197,6 +207,8 @@ impl Theme {
             md_rule_border: Color::Rgb(58, 58, 48),
             md_table_header: Color::Rgb(249, 38, 114),
             md_task_marker: Color::Rgb(166, 226, 46),
+            scrollbar_track: Color::Rgb(58, 58, 48),
+            scrollbar_thumb: Color::Rgb(117, 113, 94),
         }
     }
 }
@@ -326,6 +338,12 @@ fn load_theme_file(path: &Path) -> Result<Theme, String> {
     }
     if let Some(v) = toml.md_task_marker.as_deref() {
         theme.md_task_marker = parse_color(v)?;
+    }
+    if let Some(v) = toml.scrollbar_track.as_deref() {
+        theme.scrollbar_track = parse_color(v)?;
+    }
+    if let Some(v) = toml.scrollbar_thumb.as_deref() {
+        theme.scrollbar_thumb = parse_color(v)?;
     }
 
     Ok(theme)
