@@ -35,7 +35,7 @@ pub struct StatusBar {
     pub plan_mode: bool,
     /// Caveman mode level. None = off, Some("full") = active.
     pub caveman_mode: Option<String>,
-    /// Extension status rows: rows[0] is primary bottom row.
+    /// Extension status rows: `rows[0]` is primary bottom row.
     pub extension_rows: Vec<StatusRow>,
     /// Number of rows that need their own visual row (from tui.row() callbacks),
     /// excluding status lines merged into primary row.

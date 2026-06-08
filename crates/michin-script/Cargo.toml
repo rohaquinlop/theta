@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rhai-powered scriptable hooks for MichiN"
+exclude = ["AGENTS.md"]
 
 [dependencies]
 rhai = { workspace = true }

@@ -351,7 +351,7 @@ impl AuthConfig {
     /// then OAuth tokens, then environment variables.
     ///
     /// For OAuth tokens, returns the access token even if expired —
-    /// callers should use [`get_api_key`] for auto-refresh.
+    /// callers should use [`AuthConfig::get_token`] for auto-refresh.
     pub fn get_token(&self, provider: &str) -> Option<String> {
         // Check stored API key tokens.
         for entry in &self.tokens {

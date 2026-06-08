@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Minimal terminal coding agent harness in Rust"
+exclude = ["AGENTS.md"]
 
 [[bin]]
 name = "michin"
@@ -41,4 +42,4 @@ base64 = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }
 open = { workspace = true }
-rhai = { version = "1.24.0", features = ["sync", "serde"] }
+rhai = { workspace = true }

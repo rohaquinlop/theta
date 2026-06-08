@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Built-in model catalog for MichiN"
+exclude = ["AGENTS.md"]
 
 [dependencies]
 michin-ai = { workspace = true }

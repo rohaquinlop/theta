@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Network-backed LLM provider implementations for MichiN"
+exclude = ["AGENTS.md"]
 
 [features]
 default = []

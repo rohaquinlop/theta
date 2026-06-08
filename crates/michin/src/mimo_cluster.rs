@@ -14,7 +14,7 @@ use tokio::time::timeout;
 pub struct MimoCluster {
     /// Human-readable label (e.g. "China (cn)").
     pub label: String,
-    /// Full base URL (e.g. "https://token-plan-cn.xiaomimimo.com").
+    /// Full base URL (e.g. "<https://token-plan-cn.xiaomimimo.com>").
     pub url: String,
     /// Measured latency in milliseconds, or None if unreachable.
     pub latency_ms: Option<u64>,

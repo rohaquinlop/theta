@@ -94,7 +94,7 @@ pub struct MichiNSettings {
 
     /// Plan mode model: provider + model pair (parallels last_session).
     /// Set implicitly when the user switches model while plan mode is active,
-    /// or via /plan-model <provider> <model>.
+    /// or via `/plan-model <provider> <model>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_session: Option<LastSession>,
 

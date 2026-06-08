@@ -1,10 +1,10 @@
 //! OpenCode Zen model definitions.
 //!
 //! Models are fetched dynamically from the OpenCode Zen API
-//! (https://opencode.ai/zen/v1/models) at catalog construction time.
+//! (<https://opencode.ai/zen/v1/models>) at catalog construction time.
 //!
 //! The Zen API is an OpenAI-compatible endpoint at:
-//!   https://opencode.ai/zen/v1/chat/completions
+//!   <https://opencode.ai/zen/v1/chat/completions>
 //!
 //! All models from the API are included, including free tier models.
 

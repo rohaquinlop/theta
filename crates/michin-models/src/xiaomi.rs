@@ -1,10 +1,10 @@
 //! Xiaomi MiMo model definitions.
 //!
 //! Models are fetched dynamically from the MiMo API
-//! (https://api.xiaomimimo.com/v1/models) at runtime.
+//! (<https://api.xiaomimimo.com/v1/models>) at runtime.
 //!
 //! The MiMo API is an OpenAI-compatible endpoint at:
-//!   https://api.xiaomimimo.com/v1/chat/completions
+//!   <https://api.xiaomimimo.com/v1/chat/completions>
 //!
 //! Two plan types with different endpoints:
 //!   - Pay-as-you-go: api.xiaomimimo.com (keys start with sk-)

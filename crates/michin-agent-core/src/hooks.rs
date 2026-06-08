@@ -40,7 +40,7 @@ pub trait Hooks: Send + Sync {
     }
 
     /// Return TUI status bar rows from extensions (Rhai scripts).
-    /// Rows[0] maps to the primary status bar, rows[1..] to extra rows above.
+    /// `Rows[0]` maps to the primary status bar, `Rows[1..]` to extra rows above.
     /// Each row has left/center/right text slots.
     fn tui_status_rows(&self) -> Vec<ExtensionStatusRow> {
         vec![]

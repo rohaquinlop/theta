@@ -15,6 +15,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/rohaquinlop/michin"
+authors = ["Robin Quintero <rohaquinlop301@gmail.com>"]
+homepage = "https://github.com/rohaquinlop/michin"
+documentation = "https://docs.rs/michin"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["agent", "llm", "terminal", "tui", "coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 # Async runtime

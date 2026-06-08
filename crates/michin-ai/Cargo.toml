@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Unified multi-provider LLM API for MichiN"
+exclude = ["AGENTS.md"]
 
 [features]
 default = []
