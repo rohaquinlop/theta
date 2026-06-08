@@ -434,6 +434,14 @@ pub async fn run_tui(
             name: "cancel".into(),
             description: "Cancel current agent execution".into(),
         },
+        CommandEntry {
+            name: "auto-escalate".into(),
+            description: "Toggle auto-escalation between models".into(),
+        },
+        CommandEntry {
+            name: "escalation-model".into(),
+            description: "Set or pick the target escalation model".into(),
+        },
     ];
 
     // Skills as /skill:<name> commands.
