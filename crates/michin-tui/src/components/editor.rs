@@ -647,12 +647,13 @@ impl Component for Editor {
                     }
                     return None;
                 }
-                // Alt+Backspace in autocomplete: delete word, then update items.
+                // Alt+Backspace in autocomplete: delete word (skip whitespace first).
                 crossterm::event::KeyEvent {
                     code: KeyCode::Backspace,
                     modifiers: KeyModifiers::ALT,
                     ..
                 } => {
+                    skip_trailing_whitespace_backward(&mut self.textarea);
                     self.textarea.delete_word();
                     self.update_autocomplete_items();
                     return None;
@@ -662,6 +663,7 @@ impl Component for Editor {
                     modifiers: KeyModifiers::ALT,
                     ..
                 } => {
+                    skip_leading_whitespace_forward(&mut self.textarea);
                     self.textarea.delete_next_word();
                     self.update_autocomplete_items();
                     return None;
@@ -809,12 +811,13 @@ impl Component for Editor {
                 self.textarea.move_cursor(CursorMove::WordForward);
                 return None;
             }
-            // ── Option+Backspace / Option+Delete → delete word ──
+            // ── Option+Backspace / Option+Delete → delete word (skip whitespace first) ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Backspace,
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
+                skip_trailing_whitespace_backward(&mut self.textarea);
                 self.textarea.delete_word();
                 return None;
             }
@@ -823,6 +826,7 @@ impl Component for Editor {
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
+                skip_leading_whitespace_forward(&mut self.textarea);
                 self.textarea.delete_next_word();
                 return None;
             }
@@ -974,6 +978,37 @@ fn is_text_mutation_key(key: &crossterm::event::KeyEvent) -> bool {
         key.code,
         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab | KeyCode::Enter
     )
+}
+
+/// Move cursor backward past trailing whitespace.
+fn skip_trailing_whitespace_backward(textarea: &mut TextArea) {
+    loop {
+        let (row, col) = textarea.cursor();
+        if col == 0 {
+            break;
+        }
+        let line = &textarea.lines()[row];
+        let prev = line[..col].chars().last();
+        if prev.is_some_and(|c| c.is_whitespace()) {
+            textarea.move_cursor(CursorMove::Back);
+        } else {
+            break;
+        }
+    }
+}
+
+/// Move cursor forward past leading whitespace.
+fn skip_leading_whitespace_forward(textarea: &mut TextArea) {
+    loop {
+        let (row, col) = textarea.cursor();
+        let line = &textarea.lines()[row];
+        let next = line[col..].chars().next();
+        if next.is_some_and(|c| c.is_whitespace()) {
+            textarea.move_cursor(CursorMove::Forward);
+        } else {
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
