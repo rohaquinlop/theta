@@ -69,6 +69,8 @@ sha2 = "0.10"
 rand = "0.8"
 url = "2"
 
+nucleo-matcher = "0.3"
+
 # Internal crates
 michin-ai = { path = "crates/michin-ai", version = "0.1.0" }
 michin-ai-net = { path = "crates/michin-ai-net", version = "0.1.0" }

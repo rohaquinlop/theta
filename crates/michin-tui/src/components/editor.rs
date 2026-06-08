@@ -31,33 +31,62 @@ struct AutocompleteState {
 }
 
 /// Lazy file index cache. Populated once on first `@` trigger,
-/// then filtered in-memory per keystroke. Invalidated on working dir change.
+/// then filtered in-memory per keystroke. Rebuilds when project
+/// files changed — detected via `.git/index` mtime (git repos)
+/// or root dir mtime (non-git fallback).
 struct FileIndex {
     entries: Vec<String>,
-    built: bool,
+    /// `SystemTime` of git index (or repo root) when entries were built.
+    cache_key: Option<FileIndexKey>,
+}
+
+/// Tracks the on-disk state used to decide if the index is stale.
+struct FileIndexKey {
+    /// Mtime of `.git/index` or working dir root (non-git fallback).
+    stamp: std::time::SystemTime,
 }
 
 impl FileIndex {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
-            built: false,
+            cache_key: None,
         }
     }
 
     fn ensure_built(&mut self, base_dir: &Path) {
-        if self.built {
+        let current = index_stamp(base_dir);
+        let fresh = self
+            .cache_key
+            .as_ref()
+            .is_some_and(|key| key.stamp == current);
+        if fresh && !self.entries.is_empty() {
             return;
         }
         self.entries = build_file_index(base_dir);
-        self.built = true;
+        self.cache_key = Some(FileIndexKey { stamp: current });
     }
 
     #[allow(dead_code)]
     fn invalidate(&mut self) {
-        self.built = false;
+        self.cache_key = None;
         self.entries.clear();
     }
+}
+
+/// Return a SystemTime that changes when the project's file listing changes.
+fn index_stamp(base_dir: &Path) -> std::time::SystemTime {
+    // Git repos: `.git/index` mtime updates on any index change.
+    let git_index = base_dir.join(".git").join("index");
+    if git_index.exists() {
+        return std::fs::metadata(&git_index)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    }
+    // Non-git fallback: root dir mtime (platform-dependent).
+    std::fs::metadata(base_dir)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 /// Build file list from `git ls-files` or recursive `read_dir` fallback.
