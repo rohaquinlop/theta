@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Minimal terminal coding agent harness in Rust"
+description = "Extensible terminal coding agent harness"
 exclude = ["AGENTS.md"]
 
 [[bin]]

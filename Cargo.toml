@@ -20,7 +20,7 @@ homepage = "https://github.com/rohaquinlop/michin"
 documentation = "https://docs.rs/michin"
 readme = "README.md"
 rust-version = "1.85"
-keywords = ["agent", "llm", "terminal", "tui", "coding"]
+keywords = ["agent", "llm", "terminal", "tui", "coding", "extensible"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]

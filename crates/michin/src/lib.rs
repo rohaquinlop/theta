@@ -1,4 +1,4 @@
-//! MichiN: minimal terminal coding agent harness.
+//! MichiN: extensible terminal coding agent harness.
 
 /// Build the terminal window title: cat emoji + working directory name.
 pub fn window_title(working_dir: &std::path::Path) -> String {
