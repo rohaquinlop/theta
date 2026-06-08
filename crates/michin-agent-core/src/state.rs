@@ -40,6 +40,15 @@ pub struct AgentState {
     /// Caveman communication mode: None = off, Some("full") = active.
     /// Persisted in settings.json.
     pub caveman_mode: Option<String>,
+    /// Model to switch to when assistant requests escalation.
+    /// None = escalation disabled.
+    pub escalation_model: Option<Model>,
+    /// Set true when escalation fires in the current turn. Cleared each turn.
+    /// Separates loop-initiated escalation from user-initiated model switches.
+    pub escalation_fired: bool,
+    /// Content blocks appended to the system context at request time.
+    /// EXCLUDED from cache-shape hash.
+    pub volatile_overlays: Vec<ContentBlock>,
 }
 
 /// Circuit breaker per model key.
@@ -90,6 +99,9 @@ impl AgentState {
             prev_cache_shape: None,
             plan_mode: false,
             caveman_mode: None,
+            escalation_model: None,
+            escalation_fired: false,
+            volatile_overlays: Vec::new(),
         }
     }
 

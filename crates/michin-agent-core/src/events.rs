@@ -130,6 +130,13 @@ pub enum AgentEvent {
     CavemanModeToggled {
         level: Option<String>,
     },
+    /// Model self-escalated within a turn (flash→pro) without rebuilding system prompt.
+    /// is_escalation: true = escalated up, false = restored back.
+    ModelEscalated {
+        from: String,
+        to: String,
+        is_escalation: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

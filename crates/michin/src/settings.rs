@@ -101,6 +101,14 @@ pub struct MichiNSettings {
     /// Caveman communication mode. None = off, Some("full") = active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caveman_mode: Option<String>,
+
+    /// Auto-escalation: allow the model to self-escalate flash→pro.
+    #[serde(default)]
+    pub auto_escalate: bool,
+
+    /// Escalation target model ID (defaults to "deepseek-v4-pro" if unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_model: Option<String>,
 }
 
 fn default_steering_mode() -> String {
@@ -250,6 +258,8 @@ impl Default for MichiNSettings {
             mimo_cluster_url: None,
             plan_session: None,
             caveman_mode: None,
+            auto_escalate: false,
+            escalation_model: None,
         }
     }
 }

@@ -14,6 +14,7 @@ use crate::theme::Theme;
 
 pub struct StatusBar {
     pub model: String,
+    pub model_provider: String,
     pub session_id: String,
     pub thinking: String,
     pub agent_state: String,
@@ -58,6 +59,7 @@ impl StatusBar {
     pub fn new(theme: Theme) -> Self {
         Self {
             model: String::new(),
+            model_provider: String::new(),
             session_id: String::new(),
             thinking: String::new(),
             agent_state: String::new(),

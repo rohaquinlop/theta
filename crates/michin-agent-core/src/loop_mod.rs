@@ -22,7 +22,7 @@ use michin_ai::EventStream;
 use michin_ai::event::EventAccumulator;
 use michin_ai::{
     AssistantMessageEvent, ContentBlock, Context, ErrorClass, LlmProvider, Message, Model,
-    StopReason, StreamOptions, ThinkingLevel,
+    Provider as ProviderKind, StopReason, StreamOptions, ThinkingLevel,
 };
 
 use crate::cache_shape;
@@ -164,6 +164,9 @@ async fn run_outer_loop(
     loop {
         check_abort!(abort_token, steering_has_items);
 
+        // Store original model ID before turn for escalation restore.
+        let original_model_id = state.model.id.clone();
+
         run_single_turn(
             state,
             provider,
@@ -177,6 +180,26 @@ async fn run_outer_loop(
             &steering_has_items,
         )
         .await?;
+
+        // Restore model if escalation fired this turn.
+        if state.escalation_fired {
+            let from_id = state.model.id.clone();
+            if let Some(orig) = state
+                .available_models
+                .iter()
+                .find(|m| m.id == original_model_id)
+                .cloned()
+            {
+                let to_id = orig.id.clone();
+                let _ = event_tx.send(AgentEvent::ModelEscalated {
+                    from: from_id.clone(),
+                    to: to_id.clone(),
+                    is_escalation: false,
+                });
+                state.model = orig;
+                tracing::info!(from = %from_id, to = %to_id, "restored model after escalation turn");
+            }
+        }
 
         let _ = event_tx.send(AgentEvent::TurnEnd { turn_index });
 
@@ -225,6 +248,7 @@ async fn run_single_turn(
     let turn_id = format!("turn-{}-{turn_index}", now_ms());
     state.current_turn_id = Some(turn_id.clone());
     state.executed_tool_call_ids_in_turn.clear();
+    state.escalation_fired = false;
     state.push_run_event(
         "turn_start",
         [
@@ -378,6 +402,32 @@ async fn run_single_turn(
                 // context build, spamming the TUI with "replay sanitized" messages.
                 let is_error_response =
                     matches!(stop_reason, Some(StopReason::Error | StopReason::Aborted));
+
+                // Model self-escalation: flash → pro within a turn.
+                // DeepSeek-only — other providers can't cache-switch within a turn.
+                if !is_error_response && state.model.provider == ProviderKind::DeepSeek {
+                    let esc_text = assistant_text(&assistant_msg);
+                    if esc_text.contains("<<<NEEDS_PRO>>>")
+                        && let Some(ref esc_model) = state.escalation_model
+                        && state.model.id != esc_model.id
+                    {
+                        let from_id = state.model.id.clone();
+                        let to_id = esc_model.id.clone();
+                        state.model = esc_model.clone();
+                        state.escalation_fired = true;
+                        let _ = event_tx.send(AgentEvent::ModelEscalated {
+                            from: from_id.clone(),
+                            to: to_id.clone(),
+                            is_escalation: true,
+                        });
+                        let _ = event_tx.send(AgentEvent::MessageEnd {
+                            message: assistant_msg,
+                        });
+                        tool_round += 1;
+                        continue;
+                    }
+                }
+
                 if !is_error_response {
                     state.add_assistant_message(assistant_msg.clone());
                 }
@@ -1047,6 +1097,10 @@ async fn build_context(
     {
         let blocks = system.get_or_insert_with(Vec::new);
         blocks.extend(res_ctx.iter().cloned());
+    }
+    if !state.volatile_overlays.is_empty() {
+        let blocks = system.get_or_insert_with(Vec::new);
+        blocks.extend(state.volatile_overlays.iter().cloned());
     }
 
     let sys_tokens: u32 = state.system_prompt_tokens;

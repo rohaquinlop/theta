@@ -15,7 +15,9 @@ use tokio::sync::broadcast;
 
 use crate::config::MichiNConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::{SystemPromptConfig, build_resource_context, build_system_prompt};
+use crate::system_prompt::{
+    SystemPromptConfig, build_active_overlays, build_resource_context, build_system_prompt,
+};
 use crate::tools::{ToolContext, builtin_tools};
 
 #[derive(Debug, Deserialize)]
@@ -123,15 +125,12 @@ async fn prompt(
     for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf())) {
         agent.add_tool(tool).await;
     }
-    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
         &SystemPromptConfig {
             model_id,
             thinking_level: Some(thinking),
             max_context_window: Some(250_000),
-            plan_mode: false,
-            caveman_mode: settings.caveman_mode.as_deref(),
         },
     )
     .await;
@@ -140,6 +139,9 @@ async fn prompt(
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
     }
+    agent
+        .set_volatile_overlays(build_active_overlays(false, None))
+        .await;
 
     let agent = Arc::new(agent);
     let mut events = agent.subscribe();

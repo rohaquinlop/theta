@@ -38,12 +38,11 @@ pub struct SystemPromptConfig<'a> {
     pub model_id: &'a str,
     pub thinking_level: Option<&'a str>,
     pub max_context_window: Option<u32>,
-    pub plan_mode: bool,
-    pub caveman_mode: Option<&'a str>,
 }
 
-/// Build the core system prompt: project context + tools + runtime + response contract.
-/// Does NOT include skills or extensions.
+/// Build the core system prompt: project context + tools + runtime context.
+/// Does NOT include skills, extensions, RESPONSE_CONTRACT, plan mode, or caveman mode.
+/// Those all live in volatile_overlays to keep the system prompt byte-stable.
 pub async fn build_system_prompt(
     working_dir: &Path,
     config: &SystemPromptConfig<'_>,
@@ -66,29 +65,9 @@ pub async fn build_system_prompt(
         config.thinking_level,
         config.max_context_window,
     ));
-    if let Some(level) = config.caveman_mode {
-        parts.push(
-            "Project Context \"Conversational Style\" directives \
-             (\"short, concise answers\", \"technical prose only\") \
-             are inactive. They are replaced by:"
-                .to_string(),
-        );
-        parts.push(format!(
-            "{CAVEMAN_CONTRACT}\n\nCurrent caveman level: {level}."
-        ));
-        parts.push(
-            "ACTIVE EVERY RESPONSE. No revert. No filler drift. \
-             ALL output — explanations, summaries, test results, \
-             diff analysis, structured lists — follows these rules."
-                .to_string(),
-        );
-    }
 
-    if config.plan_mode {
-        parts.push(PLAN_MODE_CONTRACT.to_string());
-    }
-
-    parts.push(RESPONSE_CONTRACT.to_string());
+    // NO mode contracts here — RESPONSE_CONTRACT, plan, caveman all live in
+    // volatile_overlays set via agent.set_volatile_overlays().
 
     let text = parts.join("\n\n");
 
@@ -354,6 +333,14 @@ fn build_runtime_context(
         None => String::new(),
     };
 
+    // Byte-stable model ID for DeepSeek — prevents cache bust on flash↔pro switch.
+    // Non-DeepSeek models show their actual ID.
+    let model_display = if model_id.starts_with("deepseek-") {
+        "deepseek-reasoning"
+    } else {
+        model_id
+    };
+
     format!(
         "# Runtime Context
 
@@ -361,7 +348,7 @@ fn build_runtime_context(
          Working directory: {cwd_display}
          Shell: {shell}
          OS: {os}
-         Model: {model_id}
+         Model: {model_display}
          Thinking level: {}{ctx_cap}",
         thinking_level.unwrap_or("default")
     )
@@ -467,7 +454,7 @@ Temporarily drop caveman when:
 
 Resume caveman after the clear part is done."#;
 
-/// Injected after RESPONSE_CONTRACT when plan mode is active.
+/// Plan mode contract — injected as a volatile overlay at request time.
 /// Overrides Turn Completion to guide the model toward plan-only exploration.
 pub const PLAN_MODE_CONTRACT: &str = r#"# Plan Mode
 
@@ -497,6 +484,39 @@ step-by-step implementation plan.
 
 When asked to implement or change code while in plan mode, explain what you
 would do in the plan instead — do not try to modify source files."#;
+
+/// Build the plan mode volatile overlay.
+pub fn build_plan_mode_overlay() -> Vec<ContentBlock> {
+    vec![ContentBlock::text(PLAN_MODE_CONTRACT)]
+}
+
+/// Build the caveman mode volatile overlay.
+/// Overrides RESPONSE_CONTRACT (also in overlays) — both positioned
+/// together so the model sees them as a single cohesive block.
+pub fn build_caveman_mode_overlay(level: &str) -> Vec<ContentBlock> {
+    let mut p = String::new();
+    p.push_str("# Caveman Mode\n\n");
+    p.push_str(&format!("Caveman mode ACTIVE at level: {level}.\n\n"));
+    p.push_str(
+        "Override: ignore any earlier output-style instructions (\"be concise\", \
+         \"use technical prose\"). The following rules are the ONLY formatting authority.\n\n",
+    );
+    p.push_str(CAVEMAN_CONTRACT);
+    vec![ContentBlock::text(p)]
+}
+
+/// Build all active volatile overlays from current mode state.
+/// RESPONSE_CONTRACT is always included as the base behavioral contract.
+pub fn build_active_overlays(plan_mode: bool, caveman_level: Option<&str>) -> Vec<ContentBlock> {
+    let mut overlays = vec![ContentBlock::text(RESPONSE_CONTRACT)];
+    if plan_mode {
+        overlays.extend(build_plan_mode_overlay());
+    }
+    if let Some(level) = caveman_level {
+        overlays.extend(build_caveman_mode_overlay(level));
+    }
+    overlays
+}
 
 // ── System prompt overrides ────────────────────────────────────────
 

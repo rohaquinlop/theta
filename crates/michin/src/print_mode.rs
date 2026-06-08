@@ -12,7 +12,9 @@ use tokio::sync::broadcast;
 
 use crate::config::MichiNConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::{SystemPromptConfig, build_resource_context, build_system_prompt};
+use crate::system_prompt::{
+    SystemPromptConfig, build_active_overlays, build_resource_context, build_system_prompt,
+};
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -50,15 +52,12 @@ pub async fn run_prompt_print_mode(
     }
 
     // Build and set the system prompt for prompt mode.
-    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
         &SystemPromptConfig {
             model_id,
             thinking_level: Some("medium"),
             max_context_window: Some(250_000),
-            plan_mode: false,
-            caveman_mode: settings.caveman_mode.as_deref(),
         },
     )
     .await;
@@ -67,6 +66,9 @@ pub async fn run_prompt_print_mode(
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
     }
+    agent
+        .set_volatile_overlays(build_active_overlays(false, None))
+        .await;
 
     let agent = Arc::new(agent);
 
@@ -254,15 +256,12 @@ pub async fn run_continue_print_mode(
     }
 
     // Build and set system prompt.
-    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
         &SystemPromptConfig {
             model_id: &effective_model,
             thinking_level: Some("medium"),
             max_context_window: Some(250_000),
-            plan_mode: false,
-            caveman_mode: settings.caveman_mode.as_deref(),
         },
     )
     .await;
@@ -271,6 +270,9 @@ pub async fn run_continue_print_mode(
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
     }
+    agent
+        .set_volatile_overlays(build_active_overlays(false, None))
+        .await;
 
     // Load past messages into agent state.
     agent.load_messages(session.messages.clone()).await;
@@ -408,15 +410,12 @@ pub async fn run_resume_print_mode(
         agent.add_tool(tool).await;
     }
 
-    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
         &SystemPromptConfig {
             model_id: &effective_model,
             thinking_level: Some("medium"),
             max_context_window: Some(250_000),
-            plan_mode: false,
-            caveman_mode: settings.caveman_mode.as_deref(),
         },
     )
     .await;
@@ -425,6 +424,9 @@ pub async fn run_resume_print_mode(
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
     }
+    agent
+        .set_volatile_overlays(build_active_overlays(false, None))
+        .await;
 
     agent.load_messages(session.messages.clone()).await;
 

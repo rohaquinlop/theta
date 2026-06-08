@@ -23,7 +23,8 @@ use crate::session::SessionManager;
 use crate::settings::LastSession;
 use crate::skills;
 use crate::system_prompt::{
-    SystemPromptConfig, build_system_prompt_with_skills, discover_nested_agents, find_context_file,
+    SystemPromptConfig, build_active_overlays, build_system_prompt_with_skills,
+    discover_nested_agents, find_context_file,
 };
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
@@ -152,11 +153,6 @@ pub async fn run_tui(
         .await?;
         let agent = Arc::new(agent);
 
-        // Apply caveman mode if starting with it active.
-        if let Some(ref level) = caveman_mode {
-            agent.set_caveman_mode(Some(level.clone())).await;
-        }
-
         *agent_cell.write().await = Some(agent.clone());
         let persisted = crate::settings::load_settings().await;
         spawn_event_bridge(
@@ -164,6 +160,15 @@ pub async fn run_tui(
             event_tx_raw.clone(),
             persisted.tool_progress_hz.max(1),
         );
+
+        // Apply caveman mode if starting with it active.
+        // Do this AFTER spawn_event_bridge so the event reaches the TUI.
+        if let Some(ref level) = caveman_mode {
+            agent.set_caveman_mode(Some(level.clone())).await;
+            let _ = event_tx_raw.send(TuiEvent::CavemanModeToggled {
+                level: Some(level.clone()),
+            });
+        }
 
         // Send initial valid thinking levels for the model.
         let levels = compute_valid_thinking_levels(&model);
@@ -456,6 +461,7 @@ pub async fn run_tui(
             tool_progress_hz: persisted.tool_progress_hz,
             enter_behavior: persisted.enter_behavior,
             max_context_window: persisted.max_context_window,
+            auto_escalate: persisted.auto_escalate,
         },
         model_entries,
         persisted.favorite_models.clone(),
@@ -543,14 +549,31 @@ async fn create_agent(ctx: &AgentCreateCtx<'_>) -> anyhow::Result<Agent> {
             model_id: ctx.model_id,
             thinking_level: Some(ctx.thinking),
             max_context_window: settings.max_context_window,
-            plan_mode: false, // plan mode starts off
-            caveman_mode: ctx.caveman_mode,
         },
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
+    }
+
+    // Set initial volatile overlays: RESPONSE_CONTRACT always active.
+    let overlays = build_active_overlays(false, ctx.caveman_mode);
+    agent.set_volatile_overlays(overlays).await;
+
+    // Wire auto-escalation if enabled in settings and current model is DeepSeek.
+    if settings.auto_escalate && ctx.model.provider == michin_ai::Provider::DeepSeek {
+        let esc_id = settings
+            .escalation_model
+            .as_deref()
+            .unwrap_or("deepseek-v4-pro");
+        let available_models: Vec<michin_ai::Model> =
+            BuiltInCatalog::new().list().into_iter().cloned().collect();
+        if let Some(esc_model) = available_models.iter().find(|m| m.id == esc_id)
+            && esc_model.provider == michin_ai::Provider::DeepSeek
+        {
+            agent.set_escalation_model(Some(esc_model.clone())).await;
+        }
     }
 
     // Load script hooks from ~/.michin/extensions/*.rhai and ./.michin/extensions/*.rhai.
@@ -865,6 +888,17 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 }
                 Ok(AgentEvent::CavemanModeToggled { level }) => {
                     let _ = event_tx.send(TuiEvent::CavemanModeToggled { level });
+                }
+                Ok(AgentEvent::ModelEscalated {
+                    from: _,
+                    to,
+                    is_escalation,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::ModelEscalated {
+                        from: String::new(),
+                        to,
+                        is_escalation,
+                    });
                 }
                 Ok(AgentEvent::ContextCompacted {
                     trimmed_count,
@@ -1243,7 +1277,6 @@ async fn handle_tui_action(
                         .await;
                 }
                 let max_ctx = agent.config().max_context_window;
-                let plan_mode = agent.plan_mode().await;
                 let settings = crate::settings::load_settings().await;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
@@ -1251,8 +1284,6 @@ async fn handle_tui_action(
                         model_id: &model_id,
                         thinking_level: Some(&current_thinking),
                         max_context_window: max_ctx,
-                        plan_mode,
-                        caveman_mode: settings.caveman_mode.as_deref(),
                     },
                 )
                 .await;
@@ -1260,11 +1291,15 @@ async fn handle_tui_action(
                 if !resource_blocks.is_empty() {
                     agent.set_resource_context(resource_blocks).await;
                 }
+                let plan_mode = agent.plan_mode().await;
+                let overlays = build_active_overlays(plan_mode, settings.caveman_mode.as_deref());
+                agent.set_volatile_overlays(overlays).await;
                 let _ = event_tx.send(TuiEvent::Info(format!(
                     "Switched to {model_id} ({provider})"
                 )));
                 let _ = event_tx.send(TuiEvent::ModelSwitched {
                     model: model_id.to_string(),
+                    provider: provider.clone(),
                 });
                 let _ = event_tx.send(TuiEvent::ThinkingLevels {
                     levels,
@@ -1427,7 +1462,6 @@ async fn handle_tui_action(
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
                     let max_ctx = agent.config().max_context_window;
-                    let plan_mode = agent.plan_mode().await;
                     let settings = crate::settings::load_settings().await;
                     let (blocks, resource_blocks) = build_system_prompt_with_skills(
                         working_dir,
@@ -1435,8 +1469,6 @@ async fn handle_tui_action(
                             model_id: &mid,
                             thinking_level: Some(&current_thinking),
                             max_context_window: max_ctx,
-                            plan_mode,
-                            caveman_mode: settings.caveman_mode.as_deref(),
                         },
                     )
                     .await;
@@ -1444,6 +1476,10 @@ async fn handle_tui_action(
                     if !resource_blocks.is_empty() {
                         agent.set_resource_context(resource_blocks).await;
                     }
+                    let plan_mode = agent.plan_mode().await;
+                    let overlays =
+                        build_active_overlays(plan_mode, settings.caveman_mode.as_deref());
+                    agent.set_volatile_overlays(overlays).await;
                     *session_id_cell.write().await = Some(id.clone());
                     let _ = event_tx.send(TuiEvent::SessionCreated {
                         id: id.clone(),
@@ -1496,7 +1532,6 @@ async fn handle_tui_action(
             let current_thinking = thinking_level_to_string(state.thinking_level);
             drop(state);
             let max_ctx = agent.config().max_context_window;
-            let plan_mode = agent.plan_mode().await;
             let settings = crate::settings::load_settings().await;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
@@ -1504,8 +1539,6 @@ async fn handle_tui_action(
                     model_id: &current_model_id,
                     thinking_level: Some(&current_thinking),
                     max_context_window: max_ctx,
-                    plan_mode,
-                    caveman_mode: settings.caveman_mode.as_deref(),
                 },
             )
             .await;
@@ -1513,6 +1546,9 @@ async fn handle_tui_action(
             if !resource_blocks.is_empty() {
                 agent.set_resource_context(resource_blocks).await;
             }
+            let plan_mode = agent.plan_mode().await;
+            let overlays = build_active_overlays(plan_mode, settings.caveman_mode.as_deref());
+            agent.set_volatile_overlays(overlays).await;
 
             // Clear the chat display.
             let _ = event_tx.send(TuiEvent::ClearChat);
@@ -1751,6 +1787,7 @@ async fn handle_tui_action(
             tool_progress_hz,
             enter_behavior,
             max_context_window,
+            auto_escalate,
         } => {
             let mut settings = crate::settings::load_settings().await;
             settings.steering_mode = steering_mode.clone();
@@ -1761,6 +1798,7 @@ async fn handle_tui_action(
             settings.tool_progress_hz = tool_progress_hz;
             settings.enter_behavior = enter_behavior;
             settings.max_context_window = max_context_window;
+            settings.auto_escalate = auto_escalate;
             if let Err(e) = crate::settings::save_settings(&settings).await {
                 let _ = event_tx.send(TuiEvent::Error(format!("Failed to save settings: {e}")));
                 return;
@@ -1835,15 +1873,12 @@ async fn handle_tui_action(
                                     .await;
                             }
                             let max_ctx = agent.config().max_context_window;
-                            let is_plan = true;
                             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                                 working_dir,
                                 &SystemPromptConfig {
                                     model_id: &sess.model,
                                     thinking_level: Some(current_thinking),
                                     max_context_window: max_ctx,
-                                    plan_mode: is_plan,
-                                    caveman_mode: settings.caveman_mode.as_deref(),
                                 },
                             )
                             .await;
@@ -1851,8 +1886,12 @@ async fn handle_tui_action(
                             if !resource_blocks.is_empty() {
                                 agent.set_resource_context(resource_blocks).await;
                             }
+                            let overlays =
+                                build_active_overlays(true, settings.caveman_mode.as_deref());
+                            agent.set_volatile_overlays(overlays).await;
                             let _ = event_tx.send(TuiEvent::ModelSwitched {
                                 model: sess.model.clone(),
+                                provider: sess.provider.clone(),
                             });
                             let _ = event_tx.send(TuiEvent::ThinkingLevels {
                                 levels,
@@ -1905,15 +1944,12 @@ async fn handle_tui_action(
                                     .await;
                             }
                             let max_ctx = agent.config().max_context_window;
-                            let is_plan = false;
                             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                                 working_dir,
                                 &SystemPromptConfig {
                                     model_id: &sess.model,
                                     thinking_level: Some(current_thinking),
                                     max_context_window: max_ctx,
-                                    plan_mode: is_plan,
-                                    caveman_mode: settings.caveman_mode.as_deref(),
                                 },
                             )
                             .await;
@@ -1921,8 +1957,12 @@ async fn handle_tui_action(
                             if !resource_blocks.is_empty() {
                                 agent.set_resource_context(resource_blocks).await;
                             }
+                            let overlays =
+                                build_active_overlays(false, settings.caveman_mode.as_deref());
+                            agent.set_volatile_overlays(overlays).await;
                             let _ = event_tx.send(TuiEvent::ModelSwitched {
                                 model: sess.model.clone(),
+                                provider: sess.provider.clone(),
                             });
                             let _ = event_tx.send(TuiEvent::ThinkingLevels {
                                 levels,
@@ -1938,22 +1978,20 @@ async fn handle_tui_action(
             crate::settings::save_settings(&settings).await.ok();
 
             // For first-time toggle (no model switch happened), still rebuild
-            // system prompt to add/remove plan mode contract.
+            // system prompt and swap overlays.
             let state = agent.state().await;
             let model_id = state.model.id.clone();
             let thinking = thinking_level_to_string(state.thinking_level);
             let provider_str = provider_to_string(state.model.provider);
             drop(state);
             let max_ctx = agent.config().max_context_window;
-            let plan_mode = agent.plan_mode().await;
+            let settings = crate::settings::load_settings().await;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
                 &SystemPromptConfig {
                     model_id: &model_id,
                     thinking_level: Some(&thinking),
                     max_context_window: max_ctx,
-                    plan_mode,
-                    caveman_mode: settings.caveman_mode.as_deref(),
                 },
             )
             .await;
@@ -1961,6 +1999,9 @@ async fn handle_tui_action(
             if !resource_blocks.is_empty() {
                 agent.set_resource_context(resource_blocks).await;
             }
+            let plan_mode = agent.plan_mode().await;
+            let overlays = build_active_overlays(plan_mode, settings.caveman_mode.as_deref());
+            agent.set_volatile_overlays(overlays).await;
 
             let _ = event_tx.send(TuiEvent::Info(format!(
                 "Plan mode {} (model: {model_id}, provider: {provider_str})",
@@ -1981,28 +2022,10 @@ async fn handle_tui_action(
             settings.caveman_mode = normalized.clone();
             crate::settings::save_settings(&settings).await.ok();
 
-            // Rebuild system prompt
-            let state = agent.state().await;
-            let model_id = state.model.id.clone();
-            let thinking = thinking_level_to_string(state.thinking_level);
-            drop(state);
-            let max_ctx = agent.config().max_context_window;
+            // Swap volatile overlays instead of rebuilding system prompt.
             let plan_mode = agent.plan_mode().await;
-            let (blocks, resource_blocks) = build_system_prompt_with_skills(
-                working_dir,
-                &SystemPromptConfig {
-                    model_id: &model_id,
-                    thinking_level: Some(&thinking),
-                    max_context_window: max_ctx,
-                    plan_mode,
-                    caveman_mode: normalized.as_deref(),
-                },
-            )
-            .await;
-            agent.set_system_prompt(blocks).await;
-            if !resource_blocks.is_empty() {
-                agent.set_resource_context(resource_blocks).await;
-            }
+            let overlays = build_active_overlays(plan_mode, normalized.as_deref());
+            agent.set_volatile_overlays(overlays).await;
 
             let msg = match normalized {
                 Some(ref l) => format!("Caveman mode on ({l})"),
@@ -2010,6 +2033,105 @@ async fn handle_tui_action(
             };
             let _ = event_tx.send(TuiEvent::Info(msg));
             let _ = event_tx.send(TuiEvent::CavemanModeToggled { level: normalized });
+        }
+        TuiAction::ToggleAutoEscalate => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+
+            {
+                let state = agent.state().await;
+                if state.model.provider != Provider::DeepSeek {
+                    let _ = event_tx.send(TuiEvent::Info(
+                        "Auto-escalation only supported for DeepSeek models.".into(),
+                    ));
+                    return;
+                }
+            }
+
+            let mut settings = crate::settings::load_settings().await;
+            let new_state = !settings.auto_escalate;
+            settings.auto_escalate = new_state;
+
+            if new_state {
+                let esc_id = settings
+                    .escalation_model
+                    .as_deref()
+                    .unwrap_or("deepseek-v4-pro");
+                let runtime_models = runtime_models_cell.read().await.clone();
+                if let Some(esc_model) = runtime_models.iter().find(|m| m.id == esc_id) {
+                    agent.set_escalation_model(Some(esc_model.clone())).await;
+                } else if settings.escalation_model.is_none() {
+                    settings.auto_escalate = false;
+                    crate::settings::save_settings(&settings).await.ok();
+                    let provider = {
+                        let state = agent.state().await;
+                        provider_to_string(state.model.provider)
+                    };
+                    let _ = event_tx.send(TuiEvent::ShowEscalationSelector { provider });
+                    return;
+                } else {
+                    let _ = event_tx.send(TuiEvent::Error(format!(
+                        "Escalation model '{esc_id}' not found."
+                    )));
+                    settings.auto_escalate = false;
+                }
+            } else {
+                agent.set_escalation_model(None).await;
+            }
+
+            crate::settings::save_settings(&settings).await.ok();
+            let _ = event_tx.send(TuiEvent::Info(if new_state {
+                "Auto-escalation on.".into()
+            } else {
+                "Auto-escalation off.".into()
+            }));
+        }
+        TuiAction::SetEscalationModel { model_id } => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+
+            let runtime_models = runtime_models_cell.read().await.clone();
+            if let Some(esc_model) = runtime_models.iter().find(|m| m.id == model_id) {
+                if esc_model.provider != Provider::DeepSeek {
+                    let _ = event_tx.send(TuiEvent::Error(format!(
+                        "Escalation only supported for DeepSeek models (got {}).",
+                        provider_to_string(esc_model.provider)
+                    )));
+                    return;
+                }
+
+                let mut settings = crate::settings::load_settings().await;
+                let was_off = !settings.auto_escalate;
+                settings.escalation_model = Some(model_id.clone());
+                if was_off {
+                    settings.auto_escalate = true;
+                }
+                crate::settings::save_settings(&settings).await.ok();
+
+                agent.set_escalation_model(Some(esc_model.clone())).await;
+                let msg = if was_off {
+                    format!("Escalation model set to {model_id}. Auto-escalation enabled.")
+                } else {
+                    format!("Escalation model set to {model_id}.")
+                };
+                let _ = event_tx.send(TuiEvent::Info(msg));
+            } else {
+                let _ = event_tx.send(TuiEvent::Error(format!("Model '{model_id}' not found.")));
+            }
+        }
+        TuiAction::ShowEscalationSelector => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                return;
+            };
+            let provider = {
+                let state = agent.state().await;
+                provider_to_string(state.model.provider)
+            };
+            let _ = event_tx.send(TuiEvent::ShowEscalationSelector { provider });
         }
     }
 }

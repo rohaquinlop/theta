@@ -19,6 +19,7 @@ pub struct SettingsView {
     pub tool_progress_hz: u64,
     pub enter_behavior: String,
     pub max_context_window: Option<u32>,
+    pub auto_escalate: bool,
 }
 
 pub struct SettingsSelector {
@@ -49,7 +50,7 @@ impl SettingsSelector {
         self.visible = false;
     }
 
-    const ITEM_COUNT: usize = 8;
+    const ITEM_COUNT: usize = 9;
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame) {
         if !self.visible {
@@ -106,6 +107,13 @@ impl SettingsSelector {
                     }
                 )),
                 Line::from("  Max context token cap (off=model limit)"),
+            ]),
+            ListItem::new(vec![
+                Line::from(format!(
+                    "autoEscalate: {}",
+                    if self.view.auto_escalate { "on" } else { "off" }
+                )),
+                Line::from("  Allow flash model to self-escalate to pro within turn"),
             ]),
         ];
         let list = List::new(list_items)
@@ -196,6 +204,9 @@ impl SettingsSelector {
                     Some(300_000) => None,
                     Some(_) => Some(250_000),
                 }
+            }
+            8 => {
+                self.view.auto_escalate = !self.view.auto_escalate;
             }
             _ => {}
         }

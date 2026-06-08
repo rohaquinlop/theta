@@ -175,6 +175,22 @@ impl Agent {
         self.state.read().await.caveman_mode.clone()
     }
 
+    /// Set the model to escalate to when the assistant requests it.
+    pub async fn set_escalation_model(&self, model: Option<Model>) {
+        let mut state = self.state.write().await;
+        state.escalation_model = model;
+    }
+
+    pub async fn escalation_model(&self) -> Option<Model> {
+        self.state.read().await.escalation_model.clone()
+    }
+
+    /// Set volatile overlays — content blocks appended to system context at request time.
+    pub async fn set_volatile_overlays(&self, overlays: Vec<ContentBlock>) {
+        let mut state = self.state.write().await;
+        state.volatile_overlays = overlays;
+    }
+
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
         let (sanitized, stats) = michin_ai::sanitize_messages_for_replay(&messages, &state.model);

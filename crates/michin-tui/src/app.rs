@@ -95,6 +95,7 @@ pub enum TuiAction {
         tool_progress_hz: u64,
         enter_behavior: String,
         max_context_window: Option<u32>,
+        auto_escalate: bool,
     },
     /// Toggle plan mode on or off.
     TogglePlanMode,
@@ -102,6 +103,14 @@ pub enum TuiAction {
     ToggleCavemanMode {
         level: Option<String>,
     },
+    /// Toggle automatic escalation flash→pro.
+    ToggleAutoEscalate,
+    /// Set escalation target model.
+    SetEscalationModel {
+        model_id: String,
+    },
+    /// Open filtered model picker for escalation model selection.
+    ShowEscalationSelector,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -195,6 +204,18 @@ pub enum TuiEvent {
     /// Active model was switched successfully.
     ModelSwitched {
         model: String,
+        provider: String,
+    },
+    /// Open filtered model picker for escalation model selection.
+    /// Provider context is sent to filter to same provider.
+    ShowEscalationSelector {
+        provider: String,
+    },
+    /// Model self-escalated within a turn or restored.
+    ModelEscalated {
+        from: String,
+        to: String,
+        is_escalation: bool,
     },
     /// A config action (model/thinking) has been applied or rejected.
     ActionAck {
@@ -284,6 +305,7 @@ pub struct SettingsPayload {
     pub tool_progress_hz: u64,
     pub enter_behavior: String,
     pub max_context_window: Option<u32>,
+    pub auto_escalate: bool,
 }
 
 /// Which view is currently active.
@@ -379,6 +401,8 @@ pub struct App {
     next_config_request_id: u64,
     /// Plan mode — controlled by `/plan` and tracked for status badge.
     plan_mode: bool,
+    /// True when escalation model picker is active.
+    escalation_picker_active: bool,
     queued_pending_messages: VecDeque<String>,
     /// Set to true when user presses Cancel while idle — second Cancel quits.
     quit_confirmation: bool,
@@ -543,6 +567,7 @@ impl App {
                     tool_progress_hz: settings.tool_progress_hz,
                     enter_behavior: settings.enter_behavior.clone(),
                     max_context_window: settings.max_context_window,
+                    auto_escalate: settings.auto_escalate,
                 },
             ),
             commands,
@@ -580,6 +605,7 @@ impl App {
             pending_config_actions: HashSet::new(),
             next_config_request_id: 1,
             plan_mode: false,
+            escalation_picker_active: false,
             queued_pending_messages: VecDeque::new(),
             quit_confirmation: false,
             quit_confirm_at: None,
@@ -885,9 +911,32 @@ impl App {
             if let crossterm::event::Event::Key(key) = event {
                 match key.code {
                     crossterm::event::KeyCode::Esc => {
+                        if self.escalation_picker_active {
+                            self.model_selector.restore_all_models();
+                            self.escalation_picker_active = false;
+                        }
                         self.model_selector.hide();
                     }
                     crossterm::event::KeyCode::Enter => {
+                        if self.escalation_picker_active {
+                            if let Some(entry) = self.model_selector.selected_model() {
+                                let model_id = entry.id.clone();
+                                let _ = self.action_tx.send(TuiAction::SetEscalationModel {
+                                    model_id: model_id.clone(),
+                                });
+                                self.chat.add_message(ChatMessage {
+                                    role: ChatRole::System,
+                                    text: format!("Escalation model set to {model_id}"),
+                                    tool_call_id: None,
+                                    is_streaming: false,
+                                    is_error: false,
+                                });
+                            }
+                            self.model_selector.restore_all_models();
+                            self.model_selector.hide();
+                            self.escalation_picker_active = false;
+                            return;
+                        }
                         let is_xiaomi_and_cluster_needed;
                         if let Some(entry) = self.model_selector.selected_model() {
                             let model_id = entry.id.clone();
@@ -1102,6 +1151,7 @@ impl App {
                             tool_progress_hz: view.tool_progress_hz,
                             enter_behavior: view.enter_behavior,
                             max_context_window: view.max_context_window,
+                            auto_escalate: view.auto_escalate,
                         });
                         self.settings_selector.hide();
                     }
@@ -1939,6 +1989,18 @@ impl App {
                     });
                 }
             }
+            "auto-escalate" => {
+                let _ = self.action_tx.send(TuiAction::ToggleAutoEscalate);
+            }
+            "escalation-model" => {
+                if arg.is_empty() {
+                    let _ = self.action_tx.send(TuiAction::ShowEscalationSelector);
+                } else {
+                    let _ = self.action_tx.send(TuiAction::SetEscalationModel {
+                        model_id: arg.to_string(),
+                    });
+                }
+            }
             _ if command.starts_with("skill:") => {
                 let Some(skill_name) = command.strip_prefix("skill:") else {
                     return;
@@ -2326,8 +2388,9 @@ impl App {
             TuiEvent::UpdateModels(models) => {
                 self.model_selector.set_models(models);
             }
-            TuiEvent::ModelSwitched { model } => {
+            TuiEvent::ModelSwitched { model, provider } => {
                 self.status.model = model;
+                self.status.model_provider = provider;
             }
             TuiEvent::ActionAck { request_id } => {
                 self.pending_config_actions.remove(&request_id);
@@ -2453,6 +2516,30 @@ impl App {
                 self.show_thinking = show_thinking;
                 self.show_tool_diffs = show_tool_diffs;
                 self.tool_progress_hz = tool_progress_hz;
+            }
+            TuiEvent::ShowEscalationSelector { provider } => {
+                self.model_selector.show_filtered_for_provider(&provider);
+                self.escalation_picker_active = true;
+            }
+            TuiEvent::ModelEscalated {
+                from: _,
+                to,
+                is_escalation,
+            } => {
+                self.status.model = to.clone();
+                self.status.model_provider = "deepseek".into();
+                let msg = if is_escalation {
+                    format!("Escalated to {to}")
+                } else {
+                    format!("Restored to {to}")
+                };
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: msg,
+                    tool_call_id: None,
+                    is_streaming: false,
+                    is_error: false,
+                });
             }
         }
     }

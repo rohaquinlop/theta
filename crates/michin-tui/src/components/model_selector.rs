@@ -26,6 +26,8 @@ pub struct ModelEntry {
 pub struct ModelSelector {
     /// All available models.
     all_models: Vec<ModelEntry>,
+    /// Full unfiltered model list — preserved for restore after filter.
+    saved_models: Vec<ModelEntry>,
     /// Indices of favorites into `all_models`.
     favorite_indices: Vec<usize>,
     /// Indices of non-favorite models into `all_models`.
@@ -63,7 +65,8 @@ impl ModelSelector {
             list_state.select(Some(0));
         }
         Self {
-            all_models: models,
+            all_models: models.clone(),
+            saved_models: models,
             favorite_indices,
             other_indices,
             display_order,
@@ -96,7 +99,8 @@ impl ModelSelector {
     }
 
     pub fn set_models(&mut self, models: Vec<ModelEntry>) {
-        self.all_models = models;
+        self.all_models = models.clone();
+        self.saved_models = models;
         // Re-resolve favorites against the new model list — indices from the
         // old list may be out of bounds if the new list is shorter.
         let favorites: Vec<String> = self
@@ -118,6 +122,25 @@ impl ModelSelector {
             .filter(|i| !self.favorite_indices.contains(i))
             .collect();
         self.rebuild_display();
+    }
+
+    /// Filter the picker to only show models from a specific provider.
+    /// Preserves the full model list in saved_models for restore.
+    pub fn show_filtered_for_provider(&mut self, provider: &str) {
+        let filtered: Vec<ModelEntry> = self
+            .saved_models
+            .iter()
+            .filter(|m| m.provider == provider)
+            .cloned()
+            .collect();
+        self.all_models = filtered;
+        self.rebuild_display();
+        self.show();
+    }
+
+    /// Restore the full model list after filtering.
+    pub fn restore_all_models(&mut self) {
+        self.set_models(self.saved_models.clone());
     }
 
     /// Get the selected model entry, if any.

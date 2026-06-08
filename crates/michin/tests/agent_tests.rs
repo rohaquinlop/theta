@@ -418,8 +418,6 @@ mod execution_continuity {
                 model_id: "test-model",
                 thinking_level: Some("medium"),
                 max_context_window: Some(250_000),
-                plan_mode: false,
-                caveman_mode: None,
             },
         )
         .await;
