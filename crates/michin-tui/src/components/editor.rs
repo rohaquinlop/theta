@@ -516,6 +516,7 @@ impl Component for Editor {
         }
 
         // Render textarea inside the block.
+        frame.render_widget(block, area);
         frame.render_widget(&self.textarea, inner);
 
         // Position terminal cursor.
