@@ -647,6 +647,25 @@ impl Component for Editor {
                     }
                     return None;
                 }
+                // Alt+Backspace in autocomplete: delete word, then update items.
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Backspace,
+                    modifiers: KeyModifiers::ALT,
+                    ..
+                } => {
+                    self.textarea.delete_word();
+                    self.update_autocomplete_items();
+                    return None;
+                }
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Delete,
+                    modifiers: KeyModifiers::ALT,
+                    ..
+                } => {
+                    self.textarea.delete_next_word();
+                    self.update_autocomplete_items();
+                    return None;
+                }
                 crossterm::event::KeyEvent {
                     code: KeyCode::Backspace,
                     ..
@@ -788,6 +807,23 @@ impl Component for Editor {
                 ..
             } => {
                 self.textarea.move_cursor(CursorMove::WordForward);
+                return None;
+            }
+            // ── Option+Backspace / Option+Delete → delete word ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::Backspace,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.textarea.delete_word();
+                return None;
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Delete,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.textarea.delete_next_word();
                 return None;
             }
             crossterm::event::KeyEvent {
