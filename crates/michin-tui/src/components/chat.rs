@@ -1064,11 +1064,8 @@ impl Chat {
             if line.chars().all(|c| c == ' ') {
                 continue;
             }
-            // Paragraph break: emit \n when the current line starts a
-            // new paragraph (not a continuation) and the next non-blank
-            // line is also a new paragraph (not a continuation of this
-            // one). This handles blank separator lines between paragraphs
-            // — they produce no visible output but we still need one \n.
+            // Paragraph break: emit \n before any non-continuation
+            // line (i.e. at paragraph boundaries).
             if wrote_any && !self.is_line_continuation(line_idx) {
                 out.push('\n');
             }
@@ -1313,38 +1310,7 @@ fn wrap_styled_lines_with_continuation(
 }
 
 fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for line in lines {
-        if line.spans.is_empty() {
-            out.push(Line::raw(""));
-            continue;
-        }
-        let mut current_spans: Vec<Span<'static>> = Vec::new();
-        let mut current_width = 0usize;
-        for span in &line.spans {
-            let mut buf = String::new();
-            for ch in span.content.chars() {
-                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
-                if current_width + ch_w > width && (current_width > 0 || !buf.is_empty()) {
-                    if !buf.is_empty() {
-                        current_spans.push(Span::styled(std::mem::take(&mut buf), span.style));
-                    }
-                    out.push(Line::from(std::mem::take(&mut current_spans)));
-                    current_width = 0;
-                }
-                buf.push(ch);
-                current_width += ch_w;
-            }
-            if !buf.is_empty() {
-                current_spans.push(Span::styled(buf, span.style));
-            }
-        }
-        out.push(Line::from(current_spans));
-    }
-    out
+    wrap_styled_lines_with_continuation(lines, width).0
 }
 
 fn line_text(line: &Line<'static>) -> String {
@@ -2365,5 +2331,105 @@ mod tests {
             "expected 1 paragraph break, got {}. Output:\n{}",
             newline_count, text
         );
+    }
+
+    /// Helper: build a Chat with cached lines from markdown text at given width.
+    fn chat_with_text(text: &str, width: usize) -> Chat {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let lines = format_markdown(text, base_style, &theme, "", width);
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, width);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(width);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![false; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+        chat
+    }
+
+    fn select_all(chat: &mut Chat) -> String {
+        chat.select_anchor = Some((0, 0));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        chat.selection_text_from_abs((last, last_len)).unwrap()
+    }
+
+    #[test]
+    fn copy_single_paragraph_produces_no_newlines() {
+        let mut chat = chat_with_text(
+            "This is a single paragraph that is long enough to wrap across multiple rows in a narrow terminal.",
+            30,
+        );
+        assert!(chat.cached_wrapped_lines.len() > 1, "should wrap");
+        let text = select_all(&mut chat);
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            0,
+            "single paragraph should have no newlines. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_three_paragraphs_produces_two_newlines() {
+        let mut chat = chat_with_text(
+            "First paragraph that is long enough to wrap across rows.\n\nSecond paragraph also long enough to wrap here.\n\nThird paragraph wrapping across rows as well.",
+            30,
+        );
+        let text = select_all(&mut chat);
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            2,
+            "three paragraphs should have 2 newlines. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_partial_selection_across_continuation_boundary() {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let text = "First paragraph that is long enough to wrap across multiple terminal rows. Second sentence.\n\nSecond paragraph.";
+        let lines = format_markdown(text, base_style, &theme, "", 30);
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, 30);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(30);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![false; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+
+        // Select from mid first-paragraph-line to mid last line.
+        chat.select_anchor = Some((0, 5));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        let text = chat.selection_text_from_abs((last, last_len / 2)).unwrap();
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            1,
+            "partial selection across paragraphs should have 1 newline. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_user_message_strips_prefix() {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let lines = vec![Line::from(vec![Span::styled("> hello world", base_style)])];
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, 80);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(80);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![true; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+
+        chat.select_anchor = Some((0, 0));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        let text = chat.selection_text_from_abs((last, last_len)).unwrap();
+        assert_eq!(text, "hello world", ">  prefix should be stripped");
     }
 }
