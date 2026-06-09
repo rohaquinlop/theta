@@ -1,6 +1,5 @@
 //! Input editor — multiline text input backed by `tui-textarea` with
-//! inline fuzzy autocomplete for @ files and / commands, paste handling,
-//! and proper terminal cursor positioning via `frame.set_cursor()`.
+//! inline fuzzy autocomplete for @ files and / commands, paste handling.
 
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use fff_search::shared::SharedFilePicker;
@@ -8,11 +7,11 @@ use fff_search::{FileSearchConfig, FuzzySearchOptions, PaginationArgs, QueryPars
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     widgets::{Block, Borders},
 };
+use ratatui_textarea::{CursorMove, Input, Key, Scrolling, TextArea, WrapMode};
 use std::path::{Path, PathBuf};
-use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
 
 use crate::components::fuzzy::fuzzy_filter;
 use crate::components::{Action, Component};
@@ -142,7 +141,11 @@ impl Editor {
         let mut textarea = TextArea::default();
         textarea.set_tab_length(2);
         textarea.set_max_histories(100);
-        // Style will be applied in set_theme() and render().
+        // tui-textarea's built-in visual cursor (REVERSED block) is
+        // the only cursor — no terminal cursor set via frame.
+        // Remove the default underline on cursor line.
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
             textarea,
@@ -171,6 +174,7 @@ impl Editor {
         self.textarea = TextArea::new(lines);
         self.textarea.set_tab_length(2);
         self.textarea.set_max_histories(100);
+        self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         self.apply_theme_styles();
         // Place cursor at end.
         self.textarea.move_cursor(CursorMove::Bottom);
@@ -181,10 +185,37 @@ impl Editor {
         self.textarea.lines().join("\n")
     }
 
-    pub fn desired_height(&self, _width: usize, max_height: u16) -> u16 {
-        let lines = self.textarea.lines().len() as u16;
+    pub fn desired_height(&self, width: usize, max_height: u16) -> u16 {
+        let available = width.max(1);
+        let display_lines: usize = self
+            .textarea
+            .lines()
+            .iter()
+            .map(|line| {
+                let line_width: usize = line.chars().map(unicode_width).sum();
+                if line_width == 0 {
+                    1
+                } else {
+                    // Ceiling division for word-wrapped lines.
+                    line_width.div_ceil(available)
+                }
+            })
+            .sum();
         // Borders add 2 lines, minimum 3 rows.
-        lines.saturating_add(2).clamp(3, max_height.max(3))
+        (display_lines as u16)
+            .saturating_add(2)
+            .clamp(3, max_height.max(3))
+    }
+
+    /// Return cursor position as (row, col). For tests.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        let c = self.textarea.cursor();
+        (c.0, c.1)
+    }
+
+    /// Return number of lines. For tests.
+    pub fn line_count(&self) -> usize {
+        self.textarea.lines().len()
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -194,11 +225,12 @@ impl Editor {
 
     fn apply_theme_styles(&mut self) {
         let text_style = Style::default().fg(self.theme.fg);
+        // Reverse-video block cursor using theme accent.
         let cursor_style = Style::default().fg(self.theme.bg).bg(self.theme.accent);
         self.textarea.set_style(text_style);
         self.textarea.set_cursor_style(cursor_style);
-        self.textarea
-            .set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
+        // No underline on cursor line.
+        self.textarea.set_cursor_line_style(Style::default());
     }
 
     /// Insert at cursor. Used by path picker.
@@ -224,6 +256,7 @@ impl Editor {
         self.textarea = TextArea::default();
         self.textarea.set_tab_length(2);
         self.textarea.set_max_histories(100);
+        self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         self.apply_theme_styles();
         self.autocomplete = None;
         if text.is_empty() {
@@ -283,7 +316,8 @@ impl Editor {
 
     /// Get the cursor position as (row, col) from textarea.
     fn cursor_pos(&self) -> (usize, usize) {
-        self.textarea.cursor()
+        let c = self.textarea.cursor();
+        (c.0, c.1)
     }
 
     /// Full text from textarea.
@@ -529,17 +563,35 @@ impl Component for Editor {
             return;
         }
 
-        // Render textarea inside the block.
+        // When the editor area changes (lines added/removed, resize),
+        // ratatui-textarea's viewport retains a stale top_row that can
+        // exceed the new screen line count — leaving blank space below
+        // the content. Fix: pre-render to update the screen map, then
+        // reset the viewport to top so the widget recalculates scroll
+        // from a clean state. The cursor is moved to (0,0) before the
+        // scroll so InViewport is a no-op, then restored via Jump.
+        if Some(inner) != self.last_inner_area {
+            // Pass 1: update screen map for new dimensions.
+            frame.render_widget(&self.textarea, inner);
+            let saved = self.textarea.cursor();
+            // Move cursor to (0,0) so InViewport inside scroll() is a
+            // no-op — prevents the scroll from clamping the cursor to
+            // the old viewport bounds.
+            self.textarea.move_cursor(CursorMove::Top);
+            self.textarea.move_cursor(CursorMove::Head);
+            // Reset viewport to top. Widget recalculates from
+            // prev_top_row=0 using the actual cursor position.
+            self.textarea.scroll(Scrolling::Delta {
+                rows: -i16::MAX,
+                cols: 0,
+            });
+            // Restore cursor to its pre-reset position.
+            self.textarea
+                .move_cursor(CursorMove::Jump(saved.0 as u16, saved.1 as u16));
+        }
+
         frame.render_widget(block, area);
         frame.render_widget(&self.textarea, inner);
-
-        // Position terminal cursor.
-        if self.focused {
-            let (row, col) = self.textarea.cursor();
-            let x = inner.x.saturating_add(col as u16);
-            let y = inner.y.saturating_add(row as u16);
-            frame.set_cursor_position((x, y));
-        }
 
         self.last_inner_area = Some(inner);
     }
@@ -551,14 +603,20 @@ impl Component for Editor {
 
         // ── Paste ──
         if let Event::Paste(pasted) = event {
-            for line in pasted.lines() {
+            let lines: Vec<&str> = pasted.lines().collect();
+            let len = lines.len();
+            for (i, line) in lines.iter().enumerate() {
                 if !line.is_empty() {
                     let trimmed = line.trim_end_matches('\r');
                     for c in trimmed.chars() {
                         self.textarea.insert_char(c);
                     }
                 }
-                self.textarea.insert_newline();
+                // Insert newline between lines, but not after the last one
+                // to avoid a trailing empty line.
+                if i + 1 < len {
+                    self.textarea.insert_newline();
+                }
             }
             self.refresh_slash_autocomplete();
             return None;
@@ -748,10 +806,7 @@ impl Component for Editor {
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.textarea.move_cursor(CursorMove::Head);
-                self.textarea.delete_line_by_end();
-                // If not at end, delete the newline too.
-                self.textarea.delete_next_char();
+                delete_current_line(&mut self.textarea);
                 return None;
             }
             // ── macOS: Cmd+Backspace → kill from start to cursor ──
@@ -760,9 +815,7 @@ impl Component for Editor {
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.textarea.move_cursor(CursorMove::Head);
-                self.textarea.delete_line_by_end();
-                self.textarea.delete_next_char();
+                delete_current_line(&mut self.textarea);
                 return None;
             }
 
@@ -857,12 +910,14 @@ impl Component for Editor {
                 return None;
             }
 
-            // ── Bare Up/Down: move cursor; at boundary → history ──
+            // ── Bare Up/Down: move cursor; at boundary → history (unless selecting) ──
             crossterm::event::KeyEvent {
-                code: KeyCode::Up, ..
+                code: KeyCode::Up,
+                modifiers,
+                ..
             } => {
                 let (row, _col) = self.cursor_pos();
-                if row == 0 {
+                if row == 0 && !modifiers.contains(KeyModifiers::SHIFT) {
                     self.history_up();
                 } else {
                     let input = key_to_tui_input(key);
@@ -873,11 +928,12 @@ impl Component for Editor {
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
+                modifiers,
                 ..
             } => {
                 let line_count = self.textarea.lines().len();
                 let (row, _col) = self.cursor_pos();
-                if row >= line_count.saturating_sub(1) {
+                if row >= line_count.saturating_sub(1) && !modifiers.contains(KeyModifiers::SHIFT) {
                     self.history_down();
                 } else {
                     let input = key_to_tui_input(key);
@@ -950,6 +1006,10 @@ impl Component for Editor {
 // crossterm KeyEvent → tui_textarea::Input conversion
 // ---------------------------------------------------------------------------
 
+fn unicode_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
 fn key_to_tui_input(key: &crossterm::event::KeyEvent) -> Input {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -990,10 +1050,36 @@ fn is_text_mutation_key(key: &crossterm::event::KeyEvent) -> bool {
     )
 }
 
+/// Delete entire current line (Cmd+Delete/Cmd+Backspace).
+/// Uses selection-based deletion that handles all cursor positions
+/// and empty lines correctly.
+fn delete_current_line(textarea: &mut TextArea) {
+    // Single line can't be removed, just clear it.
+    if textarea.lines().len() == 1 {
+        textarea.select_all();
+        textarea.cut();
+        return;
+    }
+    let is_last = textarea.cursor().0 + 1 >= textarea.lines().len();
+    // Select current line content and cut.
+    textarea.move_cursor(CursorMove::Head);
+    textarea.start_selection();
+    textarea.move_cursor(CursorMove::End);
+    textarea.cut();
+    if is_last {
+        textarea.delete_newline();
+    } else {
+        // Cursor on now-empty line. delete_next_char jumps to next line
+        // and deletes the newline, collapsing the empty line.
+        textarea.delete_next_char();
+    }
+}
+
 /// Delete consecutive whitespace left of cursor.
 fn delete_whitespace_backward(textarea: &mut TextArea) {
     loop {
-        let (row, col) = textarea.cursor();
+        let c = textarea.cursor();
+        let (row, col) = (c.0, c.1);
         if col == 0 {
             break;
         }
@@ -1011,7 +1097,8 @@ fn delete_whitespace_backward(textarea: &mut TextArea) {
 /// Delete consecutive whitespace right of cursor.
 fn delete_whitespace_forward(textarea: &mut TextArea) {
     loop {
-        let (row, col) = textarea.cursor();
+        let c = textarea.cursor();
+        let (row, col) = (c.0, c.1);
         let line = &textarea.lines()[row];
         let next = line[col..].chars().next();
         if next.is_some_and(|c| c.is_whitespace()) {
@@ -1022,7 +1109,6 @@ fn delete_whitespace_forward(textarea: &mut TextArea) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fuzzy file matching
 // ---------------------------------------------------------------------------
 

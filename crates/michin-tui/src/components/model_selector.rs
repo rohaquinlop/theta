@@ -413,7 +413,7 @@ impl ModelSelector {
             .highlight_style(Style::default().fg(self.theme.accent).bg(Color::DarkGray))
             .highlight_symbol("> ");
 
-        let mut list_state = self.list_state.clone();
+        let mut list_state = self.list_state;
         list_state.select(mapped_selected);
         frame.render_stateful_widget(list, chunks[1], &mut list_state);
 

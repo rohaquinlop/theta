@@ -159,7 +159,7 @@ impl MimoClusterSelector {
             .highlight_style(Style::default().fg(theme.bg).bg(theme.highlight));
 
         // Clone the list state to work around ratatui's mutable borrow.
-        let mut state = self.list_state.clone();
+        let mut state = self.list_state;
         frame.render_stateful_widget(list, popup_area, &mut state);
         // Sync back the selected index (ratatui may have updated it).
         if let Some(i) = state.selected() {
