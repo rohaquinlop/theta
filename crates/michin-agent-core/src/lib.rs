@@ -19,7 +19,7 @@ pub use agent::Agent;
 pub use error::AgentError;
 pub use events::AgentEvent;
 pub use hooks::{Hooks, NoopHooks};
-pub use state::AgentState;
+pub use state::{AgentState, CacheStats};
 pub use types::{
     AgentIntent, AgentLoopConfig, AgentTool, CircuitBreakerConfig, CompactionConfig,
     CompactionStrategy, ExtensionStatusRow, RetryConfig, RunReport, RunReportEvent, RuntimeProfile,

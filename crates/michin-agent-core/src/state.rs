@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use michin_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
+use michin_ai::{ContentBlock, Message, Model, Provider, ThinkingLevel, Tool};
 
 use crate::cache_shape::CacheShape;
 use crate::types::AgentTool;
@@ -37,6 +37,8 @@ pub struct AgentState {
     pub(crate) prev_cache_shape: Option<CacheShape>,
     /// Whether plan mode is active (read-only exploration, no code mutation).
     pub plan_mode: bool,
+    /// Cumulative API cache metrics, keyed by provider.
+    pub cache_stats: HashMap<Provider, CacheStats>,
     /// Caveman communication mode: None = off, Some("full") = active.
     /// Persisted in settings.json.
     pub caveman_mode: Option<String>,
@@ -49,6 +51,25 @@ pub struct AgentState {
     /// Content blocks appended to the system context at request time.
     /// EXCLUDED from cache-shape hash.
     pub volatile_overlays: Vec<ContentBlock>,
+}
+
+/// Cumulative API cache metrics per provider.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CacheStats {
+    pub total_cache_read_tokens: u64,
+    pub total_cache_write_tokens: u64,
+    pub total_input_tokens: u64,
+}
+
+impl CacheStats {
+    pub fn hit_ratio(&self) -> f64 {
+        let total = self.total_cache_read_tokens + self.total_cache_write_tokens;
+        if total == 0 {
+            0.0
+        } else {
+            self.total_cache_read_tokens as f64 / total as f64
+        }
+    }
 }
 
 /// Circuit breaker per model key.
@@ -98,6 +119,7 @@ impl AgentState {
             compaction_paused: false,
             prev_cache_shape: None,
             plan_mode: false,
+            cache_stats: HashMap::new(),
             caveman_mode: None,
             escalation_model: None,
             escalation_fired: false,
@@ -187,6 +209,17 @@ impl AgentState {
         self.michin_ai_tools = tools;
     }
 
+    /// Update cumulative cache stats from API usage.
+    pub fn update_cache_stats(&mut self, provider: Provider, usage: &michin_ai::Usage) {
+        if usage.cache_read_tokens == 0 && usage.cache_write_tokens == 0 {
+            return;
+        }
+        let entry = self.cache_stats.entry(provider).or_default();
+        entry.total_cache_read_tokens += usage.cache_read_tokens as u64;
+        entry.total_cache_write_tokens += usage.cache_write_tokens as u64;
+        entry.total_input_tokens += usage.input_tokens as u64;
+    }
+
     pub fn load_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
     }
@@ -262,5 +295,108 @@ fn redact_field(key: &str, value: &str) -> String {
         "[REDACTED]".to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use michin_ai::{Api, Modality, ModelCompat, Provider};
+
+    fn test_model() -> Model {
+        Model {
+            id: "test-model".into(),
+            name: "Test Model".into(),
+            api: Api::OpenAiCompletions,
+            provider: Provider::OpenAI,
+            base_url: "https://test.api".into(),
+            reasoning: false,
+            thinking_level_map: std::collections::HashMap::new(),
+            input: vec![Modality::Text],
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: ModelCompat::for_openai(),
+        }
+    }
+
+    #[test]
+    fn cache_stats_hit_ratio() {
+        let mut stats = CacheStats::default();
+        assert_eq!(stats.hit_ratio(), 0.0);
+
+        stats.total_cache_read_tokens = 900;
+        stats.total_cache_write_tokens = 100;
+        assert!((stats.hit_ratio() - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_cache_stats_skips_zero_usage() {
+        let model = test_model();
+        let mut state = AgentState::new(model.clone(), vec![model]);
+        let usage = michin_ai::Usage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        state.update_cache_stats(Provider::XiaomiMiMo, &usage);
+        assert!(state.cache_stats.is_empty());
+    }
+
+    #[test]
+    fn update_cache_stats_accumulates() {
+        let model = test_model();
+        let mut state = AgentState::new(model.clone(), vec![model]);
+
+        let usage1 = michin_ai::Usage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cache_read_tokens: 800,
+            cache_write_tokens: 200,
+        };
+        state.update_cache_stats(Provider::DeepSeek, &usage1);
+
+        let usage2 = michin_ai::Usage {
+            input_tokens: 1200,
+            output_tokens: 150,
+            cache_read_tokens: 1000,
+            cache_write_tokens: 200,
+        };
+        state.update_cache_stats(Provider::DeepSeek, &usage2);
+
+        let stats = state.cache_stats.get(&Provider::DeepSeek).unwrap();
+        assert_eq!(stats.total_cache_read_tokens, 1800);
+        assert_eq!(stats.total_cache_write_tokens, 400);
+        assert_eq!(stats.total_input_tokens, 2200);
+    }
+
+    #[test]
+    fn update_cache_stats_per_provider_isolation() {
+        let model = test_model();
+        let mut state = AgentState::new(model.clone(), vec![model]);
+
+        state.update_cache_stats(
+            Provider::DeepSeek,
+            &michin_ai::Usage {
+                input_tokens: 1000,
+                output_tokens: 100,
+                cache_read_tokens: 900,
+                cache_write_tokens: 100,
+            },
+        );
+        state.update_cache_stats(
+            Provider::XiaomiMiMo,
+            &michin_ai::Usage {
+                input_tokens: 500,
+                output_tokens: 50,
+                cache_read_tokens: 400,
+                cache_write_tokens: 100,
+            },
+        );
+
+        let ds = state.cache_stats.get(&Provider::DeepSeek).unwrap();
+        let mimo = state.cache_stats.get(&Provider::XiaomiMiMo).unwrap();
+        assert_eq!(ds.total_cache_read_tokens, 900);
+        assert_eq!(mimo.total_cache_read_tokens, 400);
     }
 }

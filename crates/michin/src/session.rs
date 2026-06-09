@@ -66,6 +66,9 @@ pub struct SessionMeta {
     pub active_run_id: Option<String>,
     #[serde(default)]
     pub active_turn_id: Option<String>,
+    /// Cumulative API cache metrics per provider. Persists across sessions.
+    #[serde(default)]
+    pub cache_stats: std::collections::HashMap<String, michin_agent_core::CacheStats>,
 }
 
 /// Index of all sessions in a project.
@@ -197,6 +200,7 @@ impl SessionManager {
             in_progress: false,
             active_run_id: None,
             active_turn_id: None,
+            cache_stats: std::collections::HashMap::new(),
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -321,6 +325,7 @@ impl SessionManager {
             in_progress: false,
             active_run_id: None,
             active_turn_id: None,
+            cache_stats: std::collections::HashMap::new(),
         };
         index.sessions.push(meta.clone());
         self.save_index(&index).await?;
@@ -443,6 +448,27 @@ impl SessionManager {
                 .collect()
         };
         Ok(sessions)
+    }
+
+    /// Update cumulative cache stats in the session index.
+    pub async fn update_cache_stats(
+        &self,
+        session_id: &str,
+        cache_stats: &std::collections::HashMap<michin_ai::Provider, michin_agent_core::CacheStats>,
+    ) -> SessionResult<()> {
+        if cache_stats.is_empty() {
+            return Ok(());
+        }
+        let mut index = self.load_index().await?;
+        if let Some(meta) = index.sessions.iter_mut().find(|m| m.id == session_id) {
+            for (provider, stats) in cache_stats {
+                let key = format!("{provider:?}");
+                meta.cache_stats.insert(key, stats.clone());
+            }
+            meta.last_active_at = now_ms();
+            self.save_index(&index).await?;
+        }
+        Ok(())
     }
 
     /// Mark a session run as in-progress.
