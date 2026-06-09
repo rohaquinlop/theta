@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use michin_tui::Action;
-use michin_tui::components::editor::{Editor, file_mention_matches};
+use michin_tui::components::editor::{Editor, fff_dir_fallback, file_mention_matches};
 use michin_tui::{Component, Theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1572,4 +1572,103 @@ fn viewport_shows_content_near_cursor_not_top() {
         found_near_cursor,
         "viewport should show content near cursor (line 10), not jump to top"
     );
+}
+
+// ── fff_dir_fallback ──
+
+#[test]
+fn fff_dir_fallback_lists_gitignored_directory_contents() {
+    let root = temp_root("fff-gidir");
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/guide.md"), "").unwrap();
+    std::fs::write(root.join("docs/api.md"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), "docs/\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("init")
+        .output();
+
+    let matches = fff_dir_fallback(&root, "docs/");
+    assert!(
+        matches.contains(&"docs/guide.md".to_string()),
+        "should list gitignored dir contents: {matches:?}"
+    );
+    assert!(
+        matches.contains(&"docs/api.md".to_string()),
+        "should list gitignored dir contents: {matches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fff_dir_fallback_partial_path_in_gitignored_dir() {
+    let root = temp_root("fff-partial");
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/guide.md"), "").unwrap();
+    std::fs::write(root.join("docs/api.md"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), "docs/\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("init")
+        .output();
+
+    let matches = fff_dir_fallback(&root, "docs/gu");
+    assert!(
+        matches.contains(&"docs/guide.md".to_string()),
+        "partial path should fuzzy-match: {matches:?}"
+    );
+    // "api" doesn't match "gu" prefix/pattern
+    assert!(
+        !matches.contains(&"docs/api.md".to_string()),
+        "non-matching entry should be filtered out: {matches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fff_dir_fallback_resolves_dir_without_trailing_slash() {
+    let root = temp_root("fff-noslash");
+    std::fs::create_dir_all(root.join("vendor/lib")).unwrap();
+    std::fs::write(root.join("vendor/lib/a.js"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("init")
+        .output();
+
+    let matches = fff_dir_fallback(&root, "vendor");
+    assert!(
+        matches.contains(&"vendor/lib/a.js".to_string()),
+        "query without slash should resolve dir: {matches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fff_dir_fallback_returns_empty_for_nonexistent_path() {
+    let root = temp_root("fff-noexist");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "").unwrap();
+
+    let matches = fff_dir_fallback(&root, "nope/");
+    assert!(
+        matches.is_empty(),
+        "nonexistent dir should return empty: {matches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fff_dir_fallback_returns_empty_for_empty_query() {
+    let root = temp_root("fff-empty");
+    let matches = fff_dir_fallback(&root, "");
+    assert!(matches.is_empty());
+    let _ = std::fs::remove_dir_all(root);
 }

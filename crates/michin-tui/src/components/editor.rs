@@ -371,7 +371,12 @@ impl Editor {
         let items = match trigger {
             '@' => {
                 if let Some(ref picker) = self.fff_picker {
-                    fff_file_matches(picker, &ac.query)
+                    let results = fff_file_matches(picker, &ac.query);
+                    if results.is_empty() {
+                        fff_dir_fallback(&self.working_dir, &ac.query)
+                    } else {
+                        results
+                    }
                 } else {
                     self.file_index.ensure_built(&self.working_dir);
                     file_mention_matches_from_cache(
@@ -1324,4 +1329,58 @@ fn fff_file_matches(picker: &SharedFilePicker, query: &str) -> Vec<String> {
             path.replace('\\', "/")
         })
         .collect()
+}
+
+/// Filesystem fallback for gitignored directories when FFF index has no matches.
+/// Equivalent to the fallback path in `file_mention_matches_from_cache`.
+pub fn fff_dir_fallback(working_dir: &Path, query: &str) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Mechanism 1: query has slash, directory prefix exists on disk.
+    // Supplement with filesystem listing so partial paths like `docs/risk` match.
+    if let Some(slash_pos) = trimmed.rfind('/') {
+        let dir_prefix = &trimmed[..slash_pos + 1];
+        let abs_dir = working_dir.join(dir_prefix.trim_end_matches('/'));
+        if abs_dir.is_dir() {
+            let include_hidden = trimmed.starts_with('.');
+            let mut dir_entries = Vec::new();
+            collect_file_paths(working_dir, &abs_dir, include_hidden, &mut dir_entries);
+            dir_entries.sort();
+            dir_entries.dedup();
+            let filtered = fuzzy_filter(&dir_entries, trimmed, |s| s)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            if !filtered.is_empty() {
+                return filtered.into_iter().take(50).collect();
+            }
+            // Fuzzy empty → substring fallback, then raw listing.
+            let substring: Vec<_> = dir_entries
+                .iter()
+                .filter(|p| p.contains(trimmed))
+                .cloned()
+                .collect();
+            if !substring.is_empty() {
+                return substring.into_iter().take(50).collect();
+            }
+            return dir_entries.into_iter().take(50).collect();
+        }
+    }
+
+    // Mechanism 2: query resolves to a real directory (no trailing slash).
+    let dir_candidate = trimmed.trim_end_matches('/');
+    let abs_dir = working_dir.join(dir_candidate);
+    if abs_dir.is_dir() {
+        let include_hidden = trimmed.starts_with('.');
+        let mut dir_entries = Vec::new();
+        collect_file_paths(working_dir, &abs_dir, include_hidden, &mut dir_entries);
+        dir_entries.sort();
+        dir_entries.dedup();
+        return dir_entries.into_iter().take(50).collect();
+    }
+
+    Vec::new()
 }
