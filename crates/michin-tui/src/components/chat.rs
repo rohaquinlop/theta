@@ -71,6 +71,7 @@ pub struct Chat {
     cached_wrapped_lines: Vec<Line<'static>>,
     cached_visible_line_texts: Vec<String>,
     cached_user_line_flags: Vec<bool>,
+    cached_line_is_continuation: Vec<bool>,
     pub cached_msg_ranges: Vec<(usize, usize)>,
     pub cached_message_count: usize,
     pub cache_dirty: bool,
@@ -108,6 +109,7 @@ impl Chat {
         self.active_tool_message_idx.clear();
         self.cached_msg_ranges.clear();
         self.cached_user_line_flags.clear();
+        self.cached_line_is_continuation.clear();
         self.cached_message_count = 0;
         self.cache_dirty = true;
         self.select_anchor = None;
@@ -140,6 +142,7 @@ impl Chat {
             cached_wrapped_lines: Vec::new(),
             cached_visible_line_texts: Vec::new(),
             cached_user_line_flags: Vec::new(),
+            cached_line_is_continuation: Vec::new(),
             cached_msg_ranges: Vec::new(),
             cached_message_count: 0,
             cache_dirty: true,
@@ -779,14 +782,17 @@ impl Chat {
             {
                 self.cached_visible_line_texts.push(String::new());
                 self.cached_user_line_flags.push(false);
+                self.cached_line_is_continuation.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
             let start_line = self.cached_wrapped_lines.len();
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
-            for line in wrap_styled_lines(&lines, inner_width) {
+            let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
+            for (line, is_cont) in wrapped.into_iter().zip(cont) {
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_user_line_flags.push(is_user);
+                self.cached_line_is_continuation.push(is_cont);
                 self.cached_wrapped_lines.push(line);
             }
             let end_line = self.cached_wrapped_lines.len();
@@ -804,6 +810,7 @@ impl Chat {
         self.cached_wrapped_lines.clear();
         self.cached_visible_line_texts.clear();
         self.cached_user_line_flags.clear();
+        self.cached_line_is_continuation.clear();
         self.cached_msg_ranges.clear();
         if inner_width == 0 {
             self.cache_dirty = false;
@@ -818,14 +825,17 @@ impl Chat {
                 let _line_idx = self.cached_wrapped_lines.len();
                 self.cached_visible_line_texts.push(String::new());
                 self.cached_user_line_flags.push(false);
+                self.cached_line_is_continuation.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
             }
             let start_line = self.cached_wrapped_lines.len();
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
-            for line in wrap_styled_lines(&lines, inner_width) {
+            let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
+            for (line, is_cont) in wrapped.into_iter().zip(cont) {
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_user_line_flags.push(is_user);
+                self.cached_line_is_continuation.push(is_cont);
                 self.cached_wrapped_lines.push(line);
             }
             let end_line = self.cached_wrapped_lines.len();
@@ -865,11 +875,13 @@ impl Chat {
                 .drain(start..end.min(self.cached_visible_line_texts.len()));
             self.cached_user_line_flags
                 .drain(start..end.min(self.cached_user_line_flags.len()));
+            self.cached_line_is_continuation
+                .drain(start..end.min(self.cached_line_is_continuation.len()));
         }
         let msg = &self.messages[msg_idx];
         let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
-        let new_lines: Vec<Line<'static>> = wrap_styled_lines(&lines, inner_width);
+        let (new_lines, new_cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
         let new_texts: Vec<String> = new_lines.iter().map(line_text).collect();
         let new_count = new_lines.len();
         // Splice new lines at the same position
@@ -898,6 +910,14 @@ impl Chat {
                 self.cached_user_line_flags.push(is_user);
             }
         }
+        for (i, is_cont) in new_cont.into_iter().enumerate() {
+            let pos = insert_pos + i;
+            if pos < self.cached_line_is_continuation.len() {
+                self.cached_line_is_continuation[pos] = is_cont;
+            } else {
+                self.cached_line_is_continuation.push(is_cont);
+            }
+        }
         // If the new message is shorter (fewer lines), remove stale
         // lines left over from the old message that the overwrite
         // loop didn't consume.
@@ -907,10 +927,13 @@ impl Chat {
             let drain_end = (drain_start + overflow)
                 .min(self.cached_wrapped_lines.len())
                 .min(self.cached_visible_line_texts.len())
-                .min(self.cached_user_line_flags.len());
+                .min(self.cached_user_line_flags.len())
+                .min(self.cached_line_is_continuation.len());
             self.cached_wrapped_lines.drain(drain_start..drain_end);
             self.cached_visible_line_texts.drain(drain_start..drain_end);
             self.cached_user_line_flags.drain(drain_start..drain_end);
+            self.cached_line_is_continuation
+                .drain(drain_start..drain_end);
         }
         // Update the range for this message
         self.cached_msg_ranges[msg_idx] = (insert_pos, insert_pos + new_count);
@@ -948,14 +971,17 @@ impl Chat {
         if insert_gap {
             self.cached_visible_line_texts.push(String::new());
             self.cached_user_line_flags.push(false);
+            self.cached_line_is_continuation.push(false);
             self.cached_wrapped_lines.push(Line::raw(""));
         }
         let start_line = self.cached_wrapped_lines.len();
         let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
-        for line in wrap_styled_lines(&lines, inner_width) {
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
+        for (line, is_cont) in wrapped.into_iter().zip(cont) {
             self.cached_visible_line_texts.push(line_text(&line));
             self.cached_user_line_flags.push(is_user);
+            self.cached_line_is_continuation.push(is_cont);
             self.cached_wrapped_lines.push(line);
         }
         let end_line = self.cached_wrapped_lines.len();
@@ -1003,6 +1029,15 @@ impl Chat {
         Some((line, col))
     }
 
+    /// Returns true if `line_idx` is a wrapped continuation of the
+    /// previous non-blank line. Used to determine paragraph boundaries.
+    fn is_line_continuation(&self, line_idx: usize) -> bool {
+        self.cached_line_is_continuation
+            .get(line_idx)
+            .copied()
+            .unwrap_or(false)
+    }
+
     fn selection_text_from_abs(&self, head: (usize, usize)) -> Option<String> {
         let anchor = self.select_anchor?;
         let (start, end) = if anchor <= head {
@@ -1014,6 +1049,7 @@ impl Chat {
             return None;
         }
         let mut out = String::new();
+        let mut wrote_any = false;
         for line_idx in start.0..=end.0 {
             let line = self
                 .cached_visible_line_texts
@@ -1025,8 +1061,13 @@ impl Chat {
                 .get(line_idx)
                 .copied()
                 .unwrap_or(false);
-            if is_user && line.chars().all(|c| c == ' ') {
+            if line.chars().all(|c| c == ' ') {
                 continue;
+            }
+            // Paragraph break: emit \n before any non-continuation
+            // line (i.e. at paragraph boundaries).
+            if wrote_any && !self.is_line_continuation(line_idx) {
+                out.push('\n');
             }
             let prefix_skip = if is_user && line.starts_with("> ") {
                 2usize
@@ -1046,9 +1087,7 @@ impl Chat {
             };
             if from < to {
                 out.push_str(&chars[from..to].iter().collect::<String>());
-            }
-            if line_idx != end.0 {
-                out.push('\n');
+                wrote_any = true;
             }
         }
         if out.is_empty() { None } else { Some(out) }
@@ -1223,18 +1262,27 @@ fn compact_blank_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     out
 }
 
-fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+/// Like `wrap_styled_lines` but also returns a parallel `Vec<bool>`
+/// where `true` means the line is a wrapped continuation of the
+/// previous line (same logical paragraph).
+fn wrap_styled_lines_with_continuation(
+    lines: &[Line<'static>],
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<bool>) {
     if width == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut out = Vec::new();
+    let mut cont = Vec::new();
     for line in lines {
         if line.spans.is_empty() {
             out.push(Line::raw(""));
+            cont.push(false);
             continue;
         }
         let mut current_spans: Vec<Span<'static>> = Vec::new();
         let mut current_width = 0usize;
+        let mut is_first = true;
         for span in &line.spans {
             let mut buf = String::new();
             for ch in span.content.chars() {
@@ -1244,6 +1292,8 @@ fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>
                         current_spans.push(Span::styled(std::mem::take(&mut buf), span.style));
                     }
                     out.push(Line::from(std::mem::take(&mut current_spans)));
+                    cont.push(!is_first);
+                    is_first = false;
                     current_width = 0;
                 }
                 buf.push(ch);
@@ -1254,8 +1304,13 @@ fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>
             }
         }
         out.push(Line::from(current_spans));
+        cont.push(!is_first);
     }
-    out
+    (out, cont)
+}
+
+fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+    wrap_styled_lines_with_continuation(lines, width).0
 }
 
 fn line_text(line: &Line<'static>) -> String {
@@ -2237,5 +2292,144 @@ mod tests {
             "blank line expected between table and paragraph: {:?}",
             texts
         );
+    }
+
+    #[test]
+    fn copy_selection_preserves_paragraph_boundaries() {
+        // Simulate a message with two paragraphs that wrap at narrow width.
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let text = "First paragraph that is long enough to wrap across multiple terminal rows. Second sentence.\n\nSecond paragraph also long enough to wrap across rows here.";
+        let lines = format_markdown(text, base_style, &theme, "", 30);
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, 30);
+        assert!(
+            wrapped.len() > 2,
+            "need multiple wrapped lines, got {}",
+            wrapped.len()
+        );
+
+        // Build a Chat with these cached lines.
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(30);
+        chat.cached_wrapped_lines = wrapped;
+        chat.cached_visible_line_texts = chat.cached_wrapped_lines.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![false; chat.cached_wrapped_lines.len()];
+        chat.select_anchor = Some((0, 0));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+
+        // Select all text.
+        let result = chat.selection_text_from_abs((last, last_len));
+        let text = result.expect("selection should produce text");
+
+        // There should be exactly one \n between the two paragraphs,
+        // not one per wrapped line.
+        let newline_count = text.chars().filter(|c| *c == '\n').count();
+        assert_eq!(
+            newline_count, 1,
+            "expected 1 paragraph break, got {}. Output:\n{}",
+            newline_count, text
+        );
+    }
+
+    /// Helper: build a Chat with cached lines from markdown text at given width.
+    fn chat_with_text(text: &str, width: usize) -> Chat {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let lines = format_markdown(text, base_style, &theme, "", width);
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, width);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(width);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![false; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+        chat
+    }
+
+    fn select_all(chat: &mut Chat) -> String {
+        chat.select_anchor = Some((0, 0));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        chat.selection_text_from_abs((last, last_len)).unwrap()
+    }
+
+    #[test]
+    fn copy_single_paragraph_produces_no_newlines() {
+        let mut chat = chat_with_text(
+            "This is a single paragraph that is long enough to wrap across multiple rows in a narrow terminal.",
+            30,
+        );
+        assert!(chat.cached_wrapped_lines.len() > 1, "should wrap");
+        let text = select_all(&mut chat);
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            0,
+            "single paragraph should have no newlines. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_three_paragraphs_produces_two_newlines() {
+        let mut chat = chat_with_text(
+            "First paragraph that is long enough to wrap across rows.\n\nSecond paragraph also long enough to wrap here.\n\nThird paragraph wrapping across rows as well.",
+            30,
+        );
+        let text = select_all(&mut chat);
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            2,
+            "three paragraphs should have 2 newlines. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_partial_selection_across_continuation_boundary() {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let text = "First paragraph that is long enough to wrap across multiple terminal rows. Second sentence.\n\nSecond paragraph.";
+        let lines = format_markdown(text, base_style, &theme, "", 30);
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, 30);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(30);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![false; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+
+        // Select from mid first-paragraph-line to mid last line.
+        chat.select_anchor = Some((0, 5));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        let text = chat.selection_text_from_abs((last, last_len / 2)).unwrap();
+        assert_eq!(
+            text.chars().filter(|c| *c == '\n').count(),
+            1,
+            "partial selection across paragraphs should have 1 newline. Output:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn copy_user_message_strips_prefix() {
+        let theme = Theme::default();
+        let base_style = Style::default();
+        let lines = vec![Line::from(vec![Span::styled("> hello world", base_style)])];
+        let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, 80);
+        let mut chat = Chat::new(theme);
+        chat.cached_inner_width = Some(80);
+        chat.cached_visible_line_texts = wrapped.iter().map(line_text).collect();
+        chat.cached_line_is_continuation = cont;
+        chat.cached_user_line_flags = vec![true; wrapped.len()];
+        chat.cached_wrapped_lines = wrapped;
+
+        chat.select_anchor = Some((0, 0));
+        let last = chat.cached_wrapped_lines.len() - 1;
+        let last_len = chat.cached_visible_line_texts[last].chars().count();
+        let text = chat.selection_text_from_abs((last, last_len)).unwrap();
+        assert_eq!(text, "hello world", ">  prefix should be stripped");
     }
 }
