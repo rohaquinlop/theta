@@ -30,11 +30,15 @@ impl AgentTool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. The working directory is already set — do NOT prefix \
-         commands with `cd`. Returns stdout and stderr. Output is truncated to last 2000 \
-         lines or 50KB (whichever is hit first). If truncated, full output is saved to a \
-         temp file. Do NOT use this for reading, writing, or editing files — use the \
-         `read`, `write`, and `edit` tools for all file operations."
+        "Execute a bash command. Use ONLY for: running tests (cargo test, npm test), \
+         building (cargo build, npm run build), git operations (status, diff, log, \
+         commit), package manager commands (cargo add, npm install), and other shell \
+         commands that have no dedicated tool. The working directory is already set — \
+         do NOT prefix commands with `cd`. Returns stdout and stderr. Output is \
+         truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, \
+         full output is saved to a temp file. Never use for file reading, writing, \
+         editing, or searching — use the `read`, `write`, `edit`, `find`, and `grep` \
+         tools instead."
     }
 
     fn label(&self) -> &str {

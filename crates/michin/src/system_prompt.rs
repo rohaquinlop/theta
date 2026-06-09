@@ -286,37 +286,62 @@ pub fn build_tools_prompt(working_dir: &Path) -> String {
     p.push_str(
         "You have access to these tools via native function-calling. Invoke tools directly, not by writing XML or pseudo-calls in text.\n\n",
     );
+
+    // Tool selection guide — positive framing, before tool details.
+    p.push_str("## Tool Selection\n\n");
     p.push_str(
-        "**CRITICAL — Tool Discipline:** Use `read`, `write`, and `edit` for ALL file operations \
-         (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands \
-         that these tools cannot handle: running tests, building, git operations, package managers, etc. \
-         Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or \
-         manipulate files when the `read`, `write`, or `edit` tools can do the job.\\n \
-         Use `find` to locate files by name/path. Use `grep` to search file contents. \
-         NEVER use bash for `rg`, `grep`, `find`, `fd`, or `ripgrep` — the dedicated tools are faster \
-         (in-process indexed search) and respect .gitignore.\\n\\n",
+        "- **File operations:** `read` (view), `write` (create/overwrite), `edit` (targeted replacement).\n",
+    );
+    p.push_str(
+        "- **Code search:** `find` (by filename/path), `grep` (by content). Both use an in-process\n  indexed search that is faster than shell tools and respects .gitignore. Always prefer\n  these over bash equivalents.\n",
+    );
+    p.push_str(
+        "- **Shell:** `bash` for commands that have no dedicated tool: running tests, building,\n  git operations, package managers, project setup. Do NOT use bash to search files —\n  `find` and `grep` cover that domain.\n\n",
     );
 
+    // Present tools grouped by category, not alphabetically.
+    p.push_str("## File Operations\n\n");
     for tool in &tools {
-        p.push_str(&format!(
-            "## {}
-",
-            tool.name()
-        ));
-        p.push_str(&format!(
-            "{}
-",
-            tool.description()
-        ));
-        p.push_str(&format!(
-            "Parameters: {}
+        if is_file_tool(tool.name()) {
+            push_tool_section(&mut p, tool);
+        }
+    }
 
-",
-            serde_json::to_string_pretty(&tool.parameters()).unwrap_or_default()
-        ));
+    p.push_str("## Code Search\n\n");
+    for tool in &tools {
+        if is_search_tool(tool.name()) {
+            push_tool_section(&mut p, tool);
+        }
+    }
+
+    p.push_str("## Shell\n\n");
+    for tool in &tools {
+        if tool.name() == "bash" {
+            push_tool_section(&mut p, tool);
+        }
     }
 
     p
+}
+
+fn is_file_tool(name: &str) -> bool {
+    matches!(name, "read" | "write" | "edit")
+}
+
+fn is_search_tool(name: &str) -> bool {
+    matches!(name, "find" | "grep")
+}
+
+fn push_tool_section(
+    p: &mut String,
+    tool: &std::sync::Arc<dyn michin_agent_core::types::AgentTool>,
+) {
+    p.push_str(&format!("### {}\n", tool.name()));
+    p.push_str(&format!("{}\n", tool.description()));
+    p.push_str(&format!(
+        "Parameters: {}\n\n",
+        serde_json::to_string_pretty(&tool.parameters()).unwrap_or_default()
+    ));
 }
 
 // ── Runtime context ────────────────────────────────────────────────
@@ -416,10 +441,12 @@ Do not stop at a plan or promise.
 When the user asks a question or requests analysis, do not implement changes.
 Summarize findings and ask before modifying code.
 
-## Tool Discipline
+## Tool Selection
 
-- **CRITICAL:** Use `read`/`write`/`edit` for ALL file operations. Use `find` to locate files by name/path. Use `grep` to search file contents. NEVER use `bash` for rg/grep/find/fd/ripgrep — the dedicated tools use an in-process indexed search and are faster.
-- **Grep is plain text by default.** Write code exactly as it appears: `parse_expr(` finds literal `parse_expr(`. No escaping needed. Set `regex: true` only for actual regex patterns like `fn\s+\w+`. Path parameter scopes results — `path: "compiler/rustc_parse/"` searches only files in that directory, `path: "*.rs"` restricts to Rust files.
+- **File operations:** `read`, `write`, `edit` for viewing, creating, and modifying files.
+- **Code search:** `find` and `grep` for locating files and searching content. These use an in-process indexed search that is faster than shell tools and respects .gitignore. Always prefer these over bash equivalents.
+- **Shell:** `bash` for commands with no dedicated tool: running tests, building, git operations, package managers. Do NOT use bash for `rg`, `grep`, `find`, `fd`, or `ripgrep` — `find` and `grep` are purpose-built for those tasks.
+- **Grep is plain text by default.** Write code tokens exactly as they appear: `parse_expr(` finds literal `parse_expr(`. Set `regex: true` only for actual regex patterns like `fn\s+\w+`. Path parameter scopes results — `path: "compiler/rustc_parse/"` searches only files in that directory.
 - If grep returns 0 results, try broadening: use `path: "."` (all files), shorten the query, or remove path constraint. Do NOT fall back to bash rg/grep.
 - Read files before editing them.
 - When a tool call fails, attempt to fix the issue and retry once before reporting an error.
