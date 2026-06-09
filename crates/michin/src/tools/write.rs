@@ -94,6 +94,8 @@ impl AgentTool for WriteTool {
                 message: format_path_io_error("write file", &file_path, &e),
             })?;
 
+        super::touch_fff_frecency(&self.ctx, &file_path);
+
         Ok(ToolResult {
             tool_call_id: tool_call_id.into(),
             tool_name: "write".into(),

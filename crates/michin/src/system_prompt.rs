@@ -273,7 +273,7 @@ pub async fn find_context_file(start: &Path, filename: &str) -> Option<PathBuf> 
 
 pub fn build_tools_prompt(working_dir: &Path) -> String {
     let ctx = ToolContext::new(working_dir.to_path_buf());
-    let tools = builtin_tools(ctx);
+    let tools = builtin_tools(ctx, None);
     if tools.is_empty() {
         return String::new();
     }
@@ -287,7 +287,14 @@ pub fn build_tools_prompt(working_dir: &Path) -> String {
         "You have access to these tools via native function-calling. Invoke tools directly, not by writing XML or pseudo-calls in text.\n\n",
     );
     p.push_str(
-        "**CRITICAL — Tool Discipline:** Use `read`, `write`, and `edit` for ALL file operations (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands that these tools cannot handle: running tests, building, git operations, package managers, etc. Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or manipulate files when the `read`, `write`, or `edit` tools can do the job.\n\n",
+        "**CRITICAL — Tool Discipline:** Use `read`, `write`, and `edit` for ALL file operations \
+         (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands \
+         that these tools cannot handle: running tests, building, git operations, package managers, etc. \
+         Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or \
+         manipulate files when the `read`, `write`, or `edit` tools can do the job.\\n \
+         Use `find` to locate files by name/path. Use `grep` to search file contents. \
+         NEVER use bash for `rg`, `grep`, `find`, `fd`, or `ripgrep` — the dedicated tools are faster \
+         (in-process indexed search) and respect .gitignore.\\n\\n",
     );
 
     for tool in &tools {
@@ -411,7 +418,9 @@ Summarize findings and ask before modifying code.
 
 ## Tool Discipline
 
-- **CRITICAL:** Use `read`, `write`, and `edit` for ALL file operations (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands these tools cannot handle: running tests, builds, git, package managers, etc. Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or manipulate files when the dedicated file tools can do the job.
+- **CRITICAL:** Use `read`/`write`/`edit` for ALL file operations. Use `find` to locate files by name/path. Use `grep` to search file contents. NEVER use `bash` for rg/grep/find/fd/ripgrep — the dedicated tools use an in-process indexed search and are faster.
+- **Grep is plain text by default.** Write code exactly as it appears: `parse_expr(` finds literal `parse_expr(`. No escaping needed. Set `regex: true` only for actual regex patterns like `fn\s+\w+`. Path parameter scopes results — `path: "compiler/rustc_parse/"` searches only files in that directory, `path: "*.rs"` restricts to Rust files.
+- If grep returns 0 results, try broadening: use `path: "."` (all files), shorten the query, or remove path constraint. Do NOT fall back to bash rg/grep.
 - Read files before editing them.
 - When a tool call fails, attempt to fix the issue and retry once before reporting an error.
 - Do not repeat identical tool calls in a loop.

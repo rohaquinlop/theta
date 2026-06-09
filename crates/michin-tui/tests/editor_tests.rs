@@ -20,7 +20,7 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 
 fn make_editor(text: &str) -> Editor {
     let root = temp_root("nav");
-    let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     ed.focus(true);
     ed.set_text(text);
     ed
@@ -161,7 +161,7 @@ fn word_navigation_with_alt() {
 #[test]
 fn submit_message_via_enter() {
     let root = temp_root("submit-enter");
-    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
+    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into(), None);
     ed.focus(true);
     ed.set_text("hello world");
     let action = ed.handle_event(&Event::Key(KeyEvent::new(
@@ -175,7 +175,7 @@ fn submit_message_via_enter() {
 #[test]
 fn enter_behavior_newline_inserts_newline() {
     let root = temp_root("enter-behavior-newline");
-    let mut ed = Editor::new(Theme::default(), root, vec![], "newline".into());
+    let mut ed = Editor::new(Theme::default(), root, vec![], "newline".into(), None);
     ed.focus(true);
     ed.set_text("hello");
 
@@ -212,7 +212,7 @@ fn insert_newline_via_shift_enter() {
 #[test]
 fn submit_via_ctrl_enter() {
     let root = temp_root("submit-ctrl-enter");
-    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
+    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into(), None);
     ed.focus(true);
     ed.set_text("follow up text");
     let action = ed.handle_event(&Event::Key(KeyEvent::new(
@@ -336,7 +336,7 @@ fn up_at_first_line_triggers_history() {
 #[test]
 fn alt_up_down_history() {
     let root = temp_root("alt-history");
-    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into());
+    let mut ed = Editor::new(Theme::default(), root, vec![], "send".into(), None);
     ed.focus(true);
     ed.set_text("first message");
     ed.handle_event(&Event::Key(KeyEvent::new(
@@ -427,7 +427,7 @@ fn file_mentions_skips_hidden_paths_by_default() {
 #[test]
 fn editor_handles_paste_event() {
     let root = temp_root("paste");
-    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     editor.focus(true);
 
     editor.handle_event(&Event::Paste("hello\nworld".to_string()));
@@ -442,7 +442,7 @@ fn editor_handles_paste_event() {
 #[test]
 fn editor_moves_to_start_with_super_up() {
     let root = temp_root("super-up");
-    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     editor.focus(true);
     editor.set_text("abcdef");
 
@@ -459,7 +459,7 @@ fn editor_moves_to_start_with_super_up() {
 #[test]
 fn editor_moves_word_left_with_alt_left() {
     let root = temp_root("alt-left");
-    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     editor.focus(true);
     editor.set_text("alpha beta");
 
@@ -476,7 +476,7 @@ fn editor_moves_word_left_with_alt_left() {
 #[test]
 fn editor_moves_word_right_with_alt_right() {
     let root = temp_root("alt-right");
-    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut editor = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     editor.focus(true);
     editor.set_text("alpha beta");
 
@@ -504,6 +504,7 @@ fn slash_autocomplete_dismisses_after_space() {
         root,
         vec!["help".into(), "model".into()],
         "send".into(),
+        None,
     );
     ed.focus(true);
 
@@ -532,6 +533,7 @@ fn autocomplete_selection_wraps() {
         root,
         vec!["help".into(), "hello".into(), "model".into()],
         "send".into(),
+        None,
     );
     ed.focus(true);
     ed.handle_event(&Event::Key(KeyEvent::new(
@@ -559,7 +561,7 @@ fn autocomplete_selection_wraps() {
 #[test]
 fn editor_handles_mouse_click() {
     let root = temp_root("mouse-click");
-    let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into());
+    let mut ed = Editor::new(Theme::default(), root.clone(), vec![], "send".into(), None);
     ed.focus(true);
     ed.set_text("hello world");
     // Set last_inner_area so mouse coordinates resolve.

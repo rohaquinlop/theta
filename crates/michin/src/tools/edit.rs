@@ -185,6 +185,8 @@ impl AgentTool for EditTool {
 
         let diff_preview = make_diff_preview(path, &original, &modified);
 
+        super::touch_fff_frecency(&self.ctx, &file_path);
+
         Ok(ToolResult {
             tool_call_id: tool_call_id.into(),
             tool_name: "edit".into(),

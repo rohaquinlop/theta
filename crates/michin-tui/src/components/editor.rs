@@ -3,6 +3,8 @@
 //! and proper terminal cursor positioning via `frame.set_cursor()`.
 
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use fff_search::shared::SharedFilePicker;
+use fff_search::{FileSearchConfig, FuzzySearchOptions, PaginationArgs, QueryParser};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -35,9 +37,11 @@ struct AutocompleteState {
 /// then filtered in-memory per keystroke. Rebuilds when project
 /// files changed — detected via `.git/index` mtime (git repos)
 /// or root dir mtime (non-git fallback).
+///
+/// When `fff_picker` is set, this cache is unused — FFF handles
+/// file discovery.
 struct FileIndex {
     entries: Vec<String>,
-    /// `SystemTime` of git index (or repo root) when entries were built.
     cache_key: Option<FileIndexKey>,
 }
 
@@ -116,6 +120,10 @@ pub struct Editor {
     saved_text: String,
     autocomplete: Option<AutocompleteState>,
     file_index: FileIndex,
+    /// Optional FFF shared picker for frecency-aware autocomplete.
+    /// When set, @-mention uses FFF fuzzy_search instead of
+    /// git ls-files + nucleo fuzzy filter.
+    fff_picker: Option<SharedFilePicker>,
     working_dir: PathBuf,
     slash_commands: Vec<String>,
     enter_behavior: EnterBehavior,
@@ -129,6 +137,7 @@ impl Editor {
         working_dir: PathBuf,
         slash_commands: Vec<String>,
         enter_behavior: String,
+        fff_picker: Option<SharedFilePicker>,
     ) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_tab_length(2);
@@ -144,6 +153,7 @@ impl Editor {
             saved_text: String::new(),
             autocomplete: None,
             file_index: FileIndex::new(),
+            fff_picker,
             working_dir,
             slash_commands,
             enter_behavior: EnterBehavior::parse(&enter_behavior),
@@ -326,12 +336,16 @@ impl Editor {
 
         let items = match trigger {
             '@' => {
-                self.file_index.ensure_built(&self.working_dir);
-                file_mention_matches_from_cache(
-                    &self.file_index.entries,
-                    &self.working_dir,
-                    &ac.query,
-                )
+                if let Some(ref picker) = self.fff_picker {
+                    fff_file_matches(picker, &ac.query)
+                } else {
+                    self.file_index.ensure_built(&self.working_dir);
+                    file_mention_matches_from_cache(
+                        &self.file_index.entries,
+                        &self.working_dir,
+                        &ac.query,
+                    )
+                }
             }
             '/' => fuzzy_command_matches(&self.slash_commands, &ac.query),
             _ => Vec::new(),
@@ -1185,4 +1199,43 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
     }
 
     out
+}
+
+/// FFF-powered file matching for @-mention autocomplete.
+/// Uses frecency-ranked fuzzy search from the FFF index.
+fn fff_file_matches(picker: &SharedFilePicker, query: &str) -> Vec<String> {
+    let guard = match picker.read() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    let picker = match guard.as_ref() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let parser = QueryParser::new(FileSearchConfig);
+    let fff_query = parser.parse(query);
+
+    let results = picker.fuzzy_search(
+        &fff_query,
+        None,
+        FuzzySearchOptions {
+            max_threads: 0,
+            current_file: None,
+            pagination: PaginationArgs {
+                offset: 0,
+                limit: 50,
+            },
+            ..Default::default()
+        },
+    );
+
+    results
+        .items
+        .iter()
+        .map(|item| {
+            let path = item.relative_path(picker);
+            path.replace('\\', "/")
+        })
+        .collect()
 }

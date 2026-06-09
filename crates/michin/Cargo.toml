@@ -43,3 +43,4 @@ toml = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }
 open = { workspace = true }
 rhai = { workspace = true }
+fff-search = { workspace = true }

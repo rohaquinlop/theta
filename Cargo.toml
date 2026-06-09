@@ -78,6 +78,7 @@ url = "2"
 
 nucleo-matcher = "0.3"
 tui-textarea = "0.7"
+fff-search = "0.9"
 
 # Internal crates
 michin-ai = { path = "crates/michin-ai", version = "0.1.0" }

@@ -122,7 +122,7 @@ async fn prompt(
 
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
-    for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf())) {
+    for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf()), None) {
         agent.add_tool(tool).await;
     }
     let system_blocks = build_system_prompt(

@@ -153,6 +153,9 @@ impl AgentTool for ReadTool {
 
         truncate_output(&mut result, &TruncationLimits::default());
 
+        // Touch frecency so future FFF searches rank this file higher.
+        super::touch_fff_frecency(&self.ctx, &file_path);
+
         Ok(result)
     }
 }

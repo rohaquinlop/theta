@@ -27,12 +27,13 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 | `src/mentions.rs`                     | @-mention file content resolution                           |
 | `src/mimo_cluster.rs`                 | MiMo token-plan cluster selection                           |
 | `src/tools/mod.rs`                    | Tool registry, `ToolContext`, truncation                    |
-| `src/tools/{bash,edit,read,write}.rs` | Built-in tool implementations                               |
+| `src/tools/{bash,edit,read,write,fff_find,fff_grep}.rs` | Built-in tool implementations                               |
+| `src/fff.rs`                      | FFF in-process file search index wrapper                    |
 | `src/extensions/mod.rs`               | TUI extension row rendering                                 |
 
 ## Tool System
 
-Four built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
+Six built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`, `find`, `grep`.
 
 - All implement `michin_agent_core::AgentTool`.
 - `ToolContext` holds working directory — relative paths resolve against it.

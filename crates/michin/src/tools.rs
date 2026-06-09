@@ -1,10 +1,13 @@
 //! Built-in tools for the michin agent.
 //!
-//! Four core tools: read, edit, write, bash. The agent uses bash for grep,
-//! find, ls, sed, and other operations via shell commands (rg, find, ls, sed, etc.).
+//! Six core tools: read, edit, write, bash, fff_find, fff_grep.
+//! Fff_find and fff_grep use the FFF in-process search index for
+//! frecency-ranked file and content search.
 
 pub mod bash;
 pub mod edit;
+pub mod fff_find;
+pub mod fff_grep;
 pub mod read;
 pub mod write;
 
@@ -12,6 +15,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub use bash::BashTool;
 pub use edit::EditTool;
+pub use fff_find::FffFindTool;
+pub use fff_grep::FffGrepTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -22,11 +27,23 @@ use michin_agent_core::types::ToolResult;
 pub struct ToolContext {
     /// The project's working directory. All relative paths are resolved against this.
     pub working_dir: PathBuf,
+    /// Optional FFF handle for frecency updates on file ops.
+    pub fff_handle: Option<crate::fff::FffHandleRef>,
 }
 
 impl ToolContext {
     pub fn new(working_dir: PathBuf) -> Self {
-        Self { working_dir }
+        Self {
+            working_dir,
+            fff_handle: None,
+        }
+    }
+
+    pub fn with_fff(working_dir: PathBuf, fff_handle: crate::fff::FffHandleRef) -> Self {
+        Self {
+            working_dir,
+            fff_handle: Some(fff_handle),
+        }
     }
 }
 
@@ -236,14 +253,33 @@ fn format_path_io_error(action: &str, path: &Path, err: &std::io::Error) -> Stri
     )
 }
 
-/// Create all seven built-in tools.
+/// Touch a file's frecency score in the FFF index after a file operation.
+pub(crate) fn touch_fff_frecency(ctx: &ToolContext, resolved_path: &Path) {
+    if let Some(ref handle_opt) = ctx.fff_handle
+        && let Ok(guard) = handle_opt.lock()
+        && let Some(ref handle) = *guard
+        && let Ok(relative) = resolved_path.strip_prefix(&ctx.working_dir)
+    {
+        crate::fff::touch_frecency(handle, relative);
+    }
+}
+
+/// Create all built-in tools.
 pub fn builtin_tools(
     ctx: ToolContext,
+    fff_handle: Option<crate::fff::FffHandleRef>,
 ) -> Vec<std::sync::Arc<dyn michin_agent_core::types::AgentTool>> {
-    vec![
+    let mut tools: Vec<std::sync::Arc<dyn michin_agent_core::types::AgentTool>> = vec![
         std::sync::Arc::new(ReadTool::new(ctx.clone())),
         std::sync::Arc::new(EditTool::new(ctx.clone())),
         std::sync::Arc::new(WriteTool::new(ctx.clone())),
         std::sync::Arc::new(BashTool::new(ctx.clone())),
-    ]
+    ];
+
+    if let Some(handle) = fff_handle {
+        tools.push(std::sync::Arc::new(FffFindTool::new(handle.clone())));
+        tools.push(std::sync::Arc::new(FffGrepTool::new(handle)));
+    }
+
+    tools
 }

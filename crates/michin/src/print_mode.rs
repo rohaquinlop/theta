@@ -42,7 +42,7 @@ pub async fn run_prompt_print_mode(
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
-    for tool in builtin_tools(tool_ctx) {
+    for tool in builtin_tools(tool_ctx, None) {
         agent.add_tool(tool).await;
     }
 
@@ -248,7 +248,7 @@ pub async fn run_continue_print_mode(
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
-    for tool in builtin_tools(tool_ctx) {
+    for tool in builtin_tools(tool_ctx, None) {
         agent.add_tool(tool).await;
     }
     for tool in crate::scripts::load_custom_tools(working_dir).await {
@@ -403,7 +403,7 @@ pub async fn run_resume_print_mode(
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
-    for tool in builtin_tools(tool_ctx) {
+    for tool in builtin_tools(tool_ctx, None) {
         agent.add_tool(tool).await;
     }
     for tool in crate::scripts::load_custom_tools(working_dir).await {

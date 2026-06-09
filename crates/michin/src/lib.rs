@@ -11,6 +11,7 @@ pub fn window_title(working_dir: &std::path::Path) -> String {
 
 pub mod cli;
 pub mod config;
+pub mod fff;
 pub mod interactive;
 pub mod login;
 pub mod mentions;

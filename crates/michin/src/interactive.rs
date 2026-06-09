@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use fff_search::shared::SharedFilePicker;
 use michin_agent_core::agent::Agent;
 use michin_agent_core::events::AgentEvent;
 use michin_ai::{Model, ModelCatalog, Provider};
@@ -19,6 +20,7 @@ use michin_tui::theme::Theme;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::config::MichiNConfig;
+use crate::fff;
 use crate::session::SessionManager;
 use crate::settings::LastSession;
 use crate::skills;
@@ -106,6 +108,23 @@ pub async fn run_tui(
     // ScriptHooks notify after each tool execution to wake up the TUI poller.
     let status_notify = Arc::new(tokio::sync::Notify::new());
 
+    // ── Init FFF (in-process file search) ──
+    // Must be initialized BEFORE the action handler so `fff_handle` is
+    // available for agent recreation (model switch, login).
+    let fff_handle: fff::FffHandleRef = Arc::new(Mutex::new(None));
+    let fff_picker_for_app: Option<SharedFilePicker> = {
+        let working_dir_buf = working_dir.to_path_buf();
+        let handle_ref = fff_handle.clone();
+        match tokio::task::spawn_blocking(move || fff::init(&working_dir_buf)).await {
+            Ok(Some(handle)) => {
+                let picker = handle.picker.clone();
+                *handle_ref.lock().unwrap() = Some(handle);
+                Some(picker)
+            }
+            _ => None,
+        }
+    };
+
     // ── Action handler (login + agent init) ──
     let action_agent_cell = agent_cell.clone();
     let action_event_tx = event_tx_raw.clone();
@@ -118,6 +137,7 @@ pub async fn run_tui(
     let action_runtime_models_cell = runtime_models_cell.clone();
     let action_config = config.clone();
     let action_status_notify = status_notify.clone();
+    let action_fff_handle = fff_handle.clone();
     tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
             handle_tui_action(
@@ -133,6 +153,7 @@ pub async fn run_tui(
                 &action_runtime_models_cell,
                 &action_config,
                 &action_status_notify,
+                &action_fff_handle,
             )
             .await;
         }
@@ -149,6 +170,7 @@ pub async fn run_tui(
             thinking,
             status_notify: &status_notify,
             caveman_mode: caveman_mode.as_deref(),
+            fff_handle: Some(fff_handle.clone()),
         })
         .await?;
         let agent = Arc::new(agent);
@@ -479,6 +501,7 @@ pub async fn run_tui(
         message_tx,
         action_tx,
         Some(crate::window_title(working_dir)),
+        fff_picker_for_app,
     );
 
     // If auth is missing, start the login flow immediately.
@@ -524,6 +547,7 @@ struct AgentCreateCtx<'a> {
     thinking: &'a str,
     status_notify: &'a Arc<tokio::sync::Notify>,
     caveman_mode: Option<&'a str>,
+    fff_handle: Option<fff::FffHandleRef>,
 }
 
 async fn create_agent(ctx: &AgentCreateCtx<'_>) -> anyhow::Result<Agent> {
@@ -532,7 +556,11 @@ async fn create_agent(ctx: &AgentCreateCtx<'_>) -> anyhow::Result<Agent> {
     let registry = default_registry();
     registry.set_api_key(ctx.model.provider, ctx.api_key);
 
-    let tool_ctx = ToolContext::new(ctx.working_dir.to_path_buf());
+    let tool_ctx = if let Some(ref handle) = ctx.fff_handle {
+        ToolContext::with_fff(ctx.working_dir.to_path_buf(), handle.clone())
+    } else {
+        ToolContext::new(ctx.working_dir.to_path_buf())
+    };
     let mut agent = Agent::new(ctx.model.clone(), Arc::new(registry), available_models);
     let mut loop_config = crate::config::to_agent_config(ctx.config);
     let settings = crate::settings::load_settings().await;
@@ -547,7 +575,8 @@ async fn create_agent(ctx: &AgentCreateCtx<'_>) -> anyhow::Result<Agent> {
         agent.set_mimo_base_url(cluster_url);
     }
 
-    for tool in builtin_tools(tool_ctx) {
+    let fff_handle = ctx.fff_handle.clone();
+    for tool in builtin_tools(tool_ctx, fff_handle) {
         agent.add_tool(tool).await;
     }
 
@@ -1021,6 +1050,7 @@ async fn handle_tui_action(
     runtime_models_cell: &Arc<RwLock<Vec<Model>>>,
     config: &MichiNConfig,
     status_notify: &Arc<tokio::sync::Notify>,
+    fff_handle: &fff::FffHandleRef,
 ) {
     match action {
         TuiAction::StartCodexOAuth => {
@@ -1069,6 +1099,7 @@ async fn handle_tui_action(
                                     thinking,
                                     status_notify,
                                     caveman_mode: None, // caveman starts off on fresh login
+                                    fff_handle: Some(fff_handle.clone()),
                                 })
                                 .await
                                 {
@@ -1156,6 +1187,7 @@ async fn handle_tui_action(
                             thinking,
                             status_notify,
                             caveman_mode: None, // caveman starts off on fresh login
+                            fff_handle: Some(fff_handle.clone()),
                         })
                         .await
                         {
@@ -2404,6 +2436,29 @@ pub fn format_tool_summary(
                 "write".to_string()
             }
         }
+        "find" => {
+            if let Some(d) = details {
+                let query = d.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                let count = d.get("results_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("find \"{query}\" → {count} files")
+            } else {
+                "find".to_string()
+            }
+        }
+        "grep" => {
+            if let Some(d) = details {
+                let query = d.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                let count = d.get("results_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let path = d.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() {
+                    format!("grep \"{query}\" → {count} matches")
+                } else {
+                    format!("grep \"{query}\" in {path} → {count} matches")
+                }
+            } else {
+                "grep".to_string()
+            }
+        }
         _ => summarize_custom_tool(result, max_chars),
     };
     truncate_chars(&summary, max_chars)
@@ -2722,6 +2777,39 @@ fn message_to_history_entries(msg: &michin_ai::Message) -> Vec<HistoryEntry> {
                     } else {
                         format!("write{status}")
                     }
+                }
+                "find" => {
+                    let query = match details.as_ref().and_then(|d| d.get("query")) {
+                        Some(v) => v.as_str().unwrap_or("?"),
+                        None => "?",
+                    };
+                    let count = details
+                        .as_ref()
+                        .and_then(|d| d.get("results_count"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    format!("find \"{query}\" → {count} files{status}")
+                }
+                "grep" => {
+                    let query = match details.as_ref().and_then(|d| d.get("query")) {
+                        Some(v) => v.as_str().unwrap_or("?"),
+                        None => "?",
+                    };
+                    let path = match details.as_ref().and_then(|d| d.get("path")) {
+                        Some(v) => v.as_str().unwrap_or(""),
+                        None => "",
+                    };
+                    let count = details
+                        .as_ref()
+                        .and_then(|d| d.get("results_count"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let scope = if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" in {path}")
+                    };
+                    format!("grep \"{query}\"{scope} → {count} matches{status}")
                 }
                 _ => format!("{tool_name}{status}"),
             };

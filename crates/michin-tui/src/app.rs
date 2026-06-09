@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossterm::event::EventStream;
+use fff_search::shared::SharedFilePicker;
 use futures::StreamExt;
 use ratatui::{
     Frame,
@@ -516,6 +517,7 @@ impl App {
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
         window_title: Option<String>,
+        fff_picker: Option<SharedFilePicker>,
     ) -> Self {
         let mut status = StatusBar::new(theme.clone());
         status.model = model.to_string();
@@ -529,6 +531,7 @@ impl App {
             working_dir.clone(),
             commands.iter().map(|c| c.name.clone()).collect(),
             enter_behavior,
+            fff_picker,
         );
         let skill_commands = commands
             .iter()

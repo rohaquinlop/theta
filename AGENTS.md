@@ -155,7 +155,7 @@ After code changes (not docs): run `cargo fmt && cargo clippy -- -D warnings && 
 
 ## Tool System
 
-Four built-in tools: `read`, `write`, `edit`, `bash`. Each implements `michin_agent_core::AgentTool`.
+Six built-in tools: `read`, `write`, `edit`, `bash`, `find`, `grep`. Each implements `michin_agent_core::AgentTool`.
 
 - Absolute paths honored directly (not clamped to working dir).
 - Output truncation at 2000 lines / 50KB.
