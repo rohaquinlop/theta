@@ -62,12 +62,25 @@ pub struct CacheStats {
 }
 
 impl CacheStats {
+    /// Cache read ratio within cached tokens only: `read / (read + write)`.
+    /// Does NOT include non-cached input tokens in the denominator.
+    /// Use `effective_hit_ratio()` for the ratio against total input.
     pub fn hit_ratio(&self) -> f64 {
         let total = self.total_cache_read_tokens + self.total_cache_write_tokens;
         if total == 0 {
             0.0
         } else {
             self.total_cache_read_tokens as f64 / total as f64
+        }
+    }
+
+    /// Effective cache hit ratio against total input: `read / total_input`.
+    /// Returns 0.0 when no input tokens were sent.
+    pub fn effective_hit_ratio(&self) -> f64 {
+        if self.total_input_tokens == 0 {
+            0.0
+        } else {
+            self.total_cache_read_tokens as f64 / self.total_input_tokens as f64
         }
     }
 }
@@ -323,10 +336,21 @@ mod tests {
     fn cache_stats_hit_ratio() {
         let mut stats = CacheStats::default();
         assert_eq!(stats.hit_ratio(), 0.0);
+        assert_eq!(stats.effective_hit_ratio(), 0.0);
 
         stats.total_cache_read_tokens = 900;
         stats.total_cache_write_tokens = 100;
+        stats.total_input_tokens = 1000;
         assert!((stats.hit_ratio() - 0.9).abs() < f64::EPSILON);
+        assert!((stats.effective_hit_ratio() - 0.9).abs() < f64::EPSILON);
+
+        // hit_ratio and effective_hit_ratio diverge when non-cached tokens exist.
+        let mut stats2 = CacheStats::default();
+        stats2.total_cache_read_tokens = 500;
+        stats2.total_cache_write_tokens = 0;
+        stats2.total_input_tokens = 2000;
+        assert!((stats2.hit_ratio() - 1.0).abs() < f64::EPSILON);
+        assert!((stats2.effective_hit_ratio() - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]

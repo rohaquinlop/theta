@@ -219,9 +219,13 @@ impl Agent {
         }
         let mut state = self.state.write().await;
         for (key, val) in stats {
-            if let Ok(provider) = serde_json::from_str::<michin_ai::Provider>(&format!("\"{key}\""))
-            {
-                state.cache_stats.insert(provider, val);
+            match serde_json::from_str::<michin_ai::Provider>(&format!("\"{key}\"")) {
+                Ok(provider) => {
+                    state.cache_stats.insert(provider, val);
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "skipping unrecognized cache stats provider key");
+                }
             }
         }
     }

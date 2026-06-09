@@ -503,10 +503,16 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 })
                 .collect();
             // Sort by function name for byte-stable prefix cache.
+            // Secondary key: tool call id for deterministic ordering on ties.
             tool_calls.sort_by(|a, b| {
                 let a_name = a["function"]["name"].as_str().unwrap_or("");
                 let b_name = b["function"]["name"].as_str().unwrap_or("");
-                a_name.cmp(b_name)
+                a_name.cmp(b_name).then_with(|| {
+                    a["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["id"].as_str().unwrap_or(""))
+                })
             });
 
             if !tool_calls.is_empty() {

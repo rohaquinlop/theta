@@ -787,3 +787,38 @@ fn tool_calls_sorted_by_name_for_cache_stability() {
     assert_eq!(tool_calls[1]["function"]["name"], json!("read"));
     assert_eq!(tool_calls[2]["function"]["name"], json!("write"));
 }
+
+#[test]
+fn tool_calls_sort_deterministic_on_same_name() {
+    let model = mimo_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::ToolCall {
+                id: "call_b".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "ls"}),
+            },
+            ContentBlock::ToolCall {
+                id: "call_a".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "pwd"}),
+            },
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::XiaomiMiMo),
+        model: Some("mimo-v2.5-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+    let tool_calls = converted["tool_calls"]
+        .as_array()
+        .expect("tool_calls array");
+    assert_eq!(tool_calls.len(), 2);
+    // Same name — sorted by id: call_a < call_b
+    assert_eq!(tool_calls[0]["id"], json!("call_a"));
+    assert_eq!(tool_calls[1]["id"], json!("call_b"));
+}

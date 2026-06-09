@@ -333,24 +333,23 @@ pub async fn run_tui(
                         tracing::error!("failed to persist session entries: {e}");
                         let _ = msg_event_tx
                             .send(TuiEvent::Error(format!("Failed to persist session: {e}")));
+                    }
+                    // Persist cumulative cache stats regardless of append outcome.
+                    let _ = session_mgr
+                        .update_cache_stats(&sid, &state.cache_stats)
+                        .await;
+                    if let Some(reason) = end_reason {
+                        let _ = session_mgr.mark_run_completed(&sid, Some(reason)).await;
                     } else {
-                        // Persist cumulative cache stats.
                         let _ = session_mgr
-                            .update_cache_stats(&sid, &state.cache_stats)
+                            .mark_run_completed(
+                                &sid,
+                                state
+                                    .last_turn_end_reason
+                                    .map(|r| format!("{r:?}"))
+                                    .as_deref(),
+                            )
                             .await;
-                        if let Some(reason) = end_reason {
-                            let _ = session_mgr.mark_run_completed(&sid, Some(reason)).await;
-                        } else {
-                            let _ = session_mgr
-                                .mark_run_completed(
-                                    &sid,
-                                    state
-                                        .last_turn_end_reason
-                                        .map(|r| format!("{r:?}"))
-                                        .as_deref(),
-                                )
-                                .await;
-                        }
                     }
                 }
                 Err(e) => {
