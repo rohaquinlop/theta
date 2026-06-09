@@ -429,6 +429,35 @@ async fn run_single_turn(
                 }
 
                 if !is_error_response {
+                    // Extract cache metrics from API usage before storing.
+                    if let Message::Assistant {
+                        usage: Some(ref u),
+                        provider: Some(p),
+                        ..
+                    } = assistant_msg
+                    {
+                        state.update_cache_stats(p, u);
+                        if u.cache_read_tokens > 0 || u.cache_write_tokens > 0 {
+                            let stats = state.cache_stats.get(&p);
+                            let ratio = stats.map(|s| s.hit_ratio()).unwrap_or(0.0);
+                            let effective = stats.map(|s| s.effective_hit_ratio()).unwrap_or(0.0);
+                            tracing::debug!(
+                                provider = ?p,
+                                cache_read = u.cache_read_tokens,
+                                cache_write = u.cache_write_tokens,
+                                cumulative_hit_ratio = %format!("{ratio:.1}%"),
+                                effective_hit_ratio = %format!("{effective:.1}%"),
+                                "api cache metrics"
+                            );
+                            let _ = event_tx.send(AgentEvent::CacheStatsUpdated {
+                                provider: format!("{p:?}"),
+                                cache_read_tokens: u.cache_read_tokens,
+                                cache_write_tokens: u.cache_write_tokens,
+                                cumulative_hit_ratio: ratio,
+                                effective_hit_ratio: effective,
+                            });
+                        }
+                    }
                     state.add_assistant_message(assistant_msg.clone());
                 }
                 let _ = event_tx.send(AgentEvent::MessageEnd {

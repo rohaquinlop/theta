@@ -209,6 +209,27 @@ impl Agent {
         self.state.read().await.messages.len()
     }
 
+    /// Load persisted cache stats from a session index.
+    pub async fn load_cache_stats(
+        &self,
+        stats: std::collections::HashMap<String, crate::CacheStats>,
+    ) {
+        if stats.is_empty() {
+            return;
+        }
+        let mut state = self.state.write().await;
+        for (key, val) in stats {
+            match serde_json::from_str::<michin_ai::Provider>(&format!("\"{key}\"")) {
+                Ok(provider) => {
+                    state.cache_stats.insert(provider, val);
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "skipping unrecognized cache stats provider key");
+                }
+            }
+        }
+    }
+
     pub async fn context_stats(&self) -> (usize, u32, Option<u32>) {
         let state = self.state.read().await;
         let resource_tokens: u32 = state.resource_context_tokens();

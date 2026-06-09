@@ -333,7 +333,12 @@ pub async fn run_tui(
                         tracing::error!("failed to persist session entries: {e}");
                         let _ = msg_event_tx
                             .send(TuiEvent::Error(format!("Failed to persist session: {e}")));
-                    } else if let Some(reason) = end_reason {
+                    }
+                    // Persist cumulative cache stats regardless of append outcome.
+                    let _ = session_mgr
+                        .update_cache_stats(&sid, &state.cache_stats)
+                        .await;
+                    if let Some(reason) = end_reason {
                         let _ = session_mgr.mark_run_completed(&sid, Some(reason)).await;
                     } else {
                         let _ = session_mgr
@@ -1494,6 +1499,10 @@ async fn handle_tui_action(
                     let messages = session.messages.clone();
                     let recap = session_recap(&session);
                     agent.load_messages(messages.clone()).await;
+                    // Restore persisted cache stats.
+                    if let Some(ref meta) = session.meta {
+                        agent.load_cache_stats(meta.cache_stats.clone()).await;
+                    }
                     let state = agent.state().await;
                     let mid = state
                         .last_model_id()

@@ -484,7 +484,7 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
             }
 
             // Add tool calls
-            let tool_calls: Vec<Value> = content
+            let mut tool_calls: Vec<Value> = content
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::ToolCall {
@@ -502,6 +502,18 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                     _ => None,
                 })
                 .collect();
+            // Sort by function name for byte-stable prefix cache.
+            // Secondary key: tool call id for deterministic ordering on ties.
+            tool_calls.sort_by(|a, b| {
+                let a_name = a["function"]["name"].as_str().unwrap_or("");
+                let b_name = b["function"]["name"].as_str().unwrap_or("");
+                a_name.cmp(b_name).then_with(|| {
+                    a["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["id"].as_str().unwrap_or(""))
+                })
+            });
 
             if !tool_calls.is_empty() {
                 msg_json["tool_calls"] = json!(tool_calls);

@@ -137,6 +137,15 @@ pub enum AgentEvent {
         to: String,
         is_escalation: bool,
     },
+    /// Per-turn API cache hit/miss stats. Emitted after each LLM call
+    /// that reports cache metrics. Only emitted when cache fields are present.
+    CacheStatsUpdated {
+        provider: String,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
+        cumulative_hit_ratio: f64,
+        effective_hit_ratio: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
