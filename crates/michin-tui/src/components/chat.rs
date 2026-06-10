@@ -307,12 +307,8 @@ impl Chat {
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Thinking => ("[thinking] ", Style::default().fg(self.theme.dim)),
             ChatRole::Tool => {
-                let style = if msg.is_error {
-                    Style::default().fg(self.theme.error)
-                } else {
-                    Style::default().fg(self.theme.warning)
-                };
-                ("[tool] ", style)
+                // Prefix and body computed dynamically below.
+                ("", Style::default().fg(self.theme.warning))
             }
             ChatRole::System => ("", Style::default().fg(self.theme.dim)),
             ChatRole::Skill => (
@@ -323,44 +319,59 @@ impl Chat {
             ),
         };
 
-        // Tool messages already include the full display text
-        // (e.g. "bash: ls -la (done)"), so render body as-is.
         let text = if msg.role == ChatRole::Tool {
             truncate_output(&msg.text, 500)
         } else {
             msg.text.clone()
         };
 
-        // read tool: style range "{offset}-{end}" in dim, rest in warning.
-        if msg.role == ChatRole::Tool
-            && !msg.is_error
-            && let Some((label, range)) = split_read_tool_text(&text)
-        {
-            let label_style = Style::default().fg(self.theme.warning);
-            let range_style = Style::default().fg(self.theme.dim);
-            let tool_style = Style::default().fg(self.theme.warning);
-            return vec![Line::from(vec![
-                Span::styled(prefix, tool_style),
-                Span::styled(label.to_string(), label_style),
-                Span::styled(range.to_string(), range_style),
-            ])];
-        }
+        // Tool messages: format as [tool-name] args with styled body.
+        if msg.role == ChatRole::Tool {
+            let tool_style = if msg.is_error {
+                Style::default().fg(self.theme.error)
+            } else {
+                Style::default().fg(self.theme.warning)
+            };
+            let (tool_name, body) = split_tool_message(&text);
+            let prefix_fn = |tool_style: Style| -> Span<'static> {
+                Span::styled(format!("[{tool_name}] "), tool_style)
+            };
 
-        // edit tool: style [+N/-M] with green +N and red -M.
-        if msg.role == ChatRole::Tool
-            && !msg.is_error
-            && let Some(parts) = split_edit_tool_text(&text)
-        {
-            let tool_style = Style::default().fg(self.theme.warning);
-            let added_style = Style::default().fg(self.theme.success);
-            let removed_style = Style::default().fg(self.theme.error);
+            // read tool: style range "{offset}-{end}" in dim.
+            if !msg.is_error
+                && tool_name == "read"
+                && let Some((label, range)) = split_read_tool_text(body)
+            {
+                let label_style = tool_style;
+                let range_style = Style::default().fg(self.theme.dim);
+                return vec![Line::from(vec![
+                    prefix_fn(tool_style),
+                    Span::styled(label.to_string(), label_style),
+                    Span::styled(range.to_string(), range_style),
+                ])];
+            }
+
+            // edit tool: style [+N/-M] with green +N and red -M.
+            if !msg.is_error
+                && tool_name == "edit"
+                && let Some(parts) = split_edit_tool_text(body)
+            {
+                let added_style = Style::default().fg(self.theme.success);
+                let removed_style = Style::default().fg(self.theme.error);
+                return vec![Line::from(vec![
+                    prefix_fn(tool_style),
+                    Span::styled(parts.prefix.to_string(), tool_style),
+                    Span::styled(parts.added.to_string(), added_style),
+                    Span::styled(parts.slash_minus.to_string(), tool_style),
+                    Span::styled(parts.removed.to_string(), removed_style),
+                    Span::styled(parts.suffix.to_string(), tool_style),
+                ])];
+            }
+
+            // Default tool rendering: [tool-name] body.
             return vec![Line::from(vec![
-                Span::styled(prefix, tool_style),
-                Span::styled(parts.prefix.to_string(), tool_style),
-                Span::styled(parts.added.to_string(), added_style),
-                Span::styled(parts.slash_minus.to_string(), tool_style),
-                Span::styled(parts.removed.to_string(), removed_style),
-                Span::styled(parts.suffix.to_string(), tool_style),
+                prefix_fn(tool_style),
+                Span::styled(body.to_string(), tool_style),
             ])];
         }
 
@@ -1167,15 +1178,41 @@ fn truncate_output(text: &str, max_len: usize) -> String {
     }
 }
 
-/// Split a read tool summary like "read /tmp/a.rs:11-30" into ("read /tmp/a.rs:", "11-30").
+/// Extract tool name and body from a tool message display text.
+/// Returns (tool_name, body) where tool_name is the short name for `[tool_name]` prefix.
+fn split_tool_message(text: &str) -> (&str, &str) {
+    let known: &[&str] = &["bash", "read", "edit", "write", "find", "grep"];
+    // Known tools: text starts with tool_name followed by ':' or ' '
+    let first_colon = text.find(':');
+    let first_space = text.find(' ');
+    let cand = |end: usize| -> Option<(&str, &str)> {
+        let candidate = &text[..end];
+        if known.contains(&candidate) {
+            let rest = text[end + 1..].trim_start();
+            Some((candidate, rest))
+        } else {
+            None
+        }
+    };
+    if let Some(c) = first_colon
+        && let Some(result) = cand(c)
+    {
+        return result;
+    }
+    if let Some(s) = first_space
+        && let Some(result) = cand(s)
+    {
+        return result;
+    }
+    ("tool", text)
+}
+
+/// Split a read tool body like "/tmp/a.rs:11-30" into ("/tmp/a.rs:", "11-30").
+/// Accepts body text only (no "read " prefix).
 /// Returns None if the text doesn't match the expected read format.
 fn split_read_tool_text(text: &str) -> Option<(&str, &str)> {
-    if !text.starts_with("read ") {
-        return None;
-    }
-    let rest = text.strip_prefix("read ")?;
-    let last_colon = rest.rfind(':')?;
-    let range = &rest[last_colon + 1..];
+    let last_colon = text.rfind(':')?;
+    let range = &text[last_colon + 1..];
     // Validate range looks like "N-M"
     if range.contains('-') && range.chars().all(|c| c.is_ascii_digit() || c == '-') {
         let split = text.len() - range.len();
@@ -1185,20 +1222,17 @@ fn split_read_tool_text(text: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Parts of an edit tool summary with diff, e.g. "edit /tmp/a.rs  [+2/-1]".
+/// Parts of an edit tool summary with diff, e.g. "/tmp/a.rs  [+2/-1]".
 struct EditToolParts<'a> {
-    prefix: &'a str,      // "edit /tmp/a.rs  [+\"
-    added: &'a str,       // "2"
-    slash_minus: &'a str, // "/-"
-    removed: &'a str,     // "1"
-    suffix: &'a str,      // "]"
+    prefix: &'a str,
+    added: &'a str,
+    slash_minus: &'a str,
+    removed: &'a str,
+    suffix: &'a str,
 }
 
-/// Split an edit tool summary like "edit /tmp/a.rs  [+2/-1]" into styled parts.
+/// Split an edit tool body like "/tmp/a.rs  [+2/-1]" into styled parts.
 fn split_edit_tool_text(text: &str) -> Option<EditToolParts<'_>> {
-    if !text.starts_with("edit ") {
-        return None;
-    }
     // Look for the diff stats block.
     let bracket = text.find(" [+")?;
     let after_bracket = &text[bracket + 3..]; // "N/-M]"
