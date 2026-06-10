@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use michin_tui::Action;
-use michin_tui::components::editor::{Editor, file_mention_matches, shallow_dir_entries};
+use michin_tui::components::editor::{Editor, file_mention_matches};
 use michin_tui::{Component, Theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1572,92 +1572,4 @@ fn viewport_shows_content_near_cursor_not_top() {
         found_near_cursor,
         "viewport should show content near cursor (line 10), not jump to top"
     );
-}
-
-// ── shallow_dir_entries ──
-
-#[test]
-fn shallow_dir_entries_lists_gitignored_directory_contents() {
-    let root = temp_root("shallow-gidir");
-    std::fs::create_dir_all(root.join("docs")).unwrap();
-    std::fs::write(root.join("docs/guide.md"), "").unwrap();
-    std::fs::write(root.join("docs/api.md"), "").unwrap();
-    std::fs::write(root.join(".gitignore"), "docs/\n").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("init")
-        .output();
-
-    let mut entries = Vec::new();
-    shallow_dir_entries(&root, &root.join("docs"), false, &mut entries);
-    entries.sort();
-    assert!(
-        entries.contains(&"docs/guide.md".to_string()),
-        "should list gitignored dir contents: {entries:?}"
-    );
-    assert!(
-        entries.contains(&"docs/api.md".to_string()),
-        "should list gitignored dir contents: {entries:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn shallow_dir_entries_returns_immediate_children_with_trailing_slash() {
-    let root = temp_root("shallow-nested");
-    std::fs::create_dir_all(root.join("vendor/lib")).unwrap();
-    std::fs::write(root.join("vendor/a.js"), "").unwrap();
-    std::fs::write(root.join("vendor/lib/b.js"), "").unwrap();
-
-    let mut entries = Vec::new();
-    shallow_dir_entries(&root, &root.join("vendor"), false, &mut entries);
-    entries.sort();
-    // Should include immediate children only, not recursive.
-    assert!(
-        entries.contains(&"vendor/a.js".to_string()),
-        "should include files: {entries:?}"
-    );
-    assert!(
-        entries.contains(&"vendor/lib/".to_string()),
-        "should include dirs with trailing slash: {entries:?}"
-    );
-    // Should NOT include deeply nested files.
-    assert!(
-        !entries.contains(&"vendor/lib/b.js".to_string()),
-        "should not recurse: {entries:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn shallow_dir_entries_skips_hidden_by_default() {
-    let root = temp_root("shallow-hidden");
-    std::fs::create_dir_all(root.join("dir")).unwrap();
-    std::fs::write(root.join("dir/visible.rs"), "").unwrap();
-    std::fs::write(root.join("dir/.hidden"), "").unwrap();
-
-    let mut entries = Vec::new();
-    shallow_dir_entries(&root, &root.join("dir"), false, &mut entries);
-    assert!(entries.contains(&"dir/visible.rs".to_string()));
-    assert!(!entries.iter().any(|e| e.contains(".hidden")));
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn shallow_dir_entries_includes_hidden_when_requested() {
-    let root = temp_root("shallow-show-hidden");
-    std::fs::create_dir_all(root.join("dir")).unwrap();
-    std::fs::write(root.join("dir/visible.rs"), "").unwrap();
-    std::fs::write(root.join("dir/.hidden"), "").unwrap();
-
-    let mut entries = Vec::new();
-    shallow_dir_entries(&root, &root.join("dir"), true, &mut entries);
-    assert!(entries.contains(&"dir/visible.rs".to_string()));
-    assert!(entries.contains(&"dir/.hidden".to_string()));
-
-    let _ = std::fs::remove_dir_all(root);
 }

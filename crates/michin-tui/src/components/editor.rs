@@ -370,19 +370,7 @@ impl Editor {
 
         let items = match trigger {
             '@' => {
-                let trimmed = ac.query.trim();
-                let has_slash = trimmed.contains('/');
-                if has_slash {
-                    // Slash query: filesystem is the right tool for dir navigation.
-                    let dir_listing = fff_filesystem_fallback(&self.working_dir, &ac.query);
-                    if !dir_listing.is_empty() {
-                        dir_listing
-                    } else if let Some(ref picker) = self.fff_picker {
-                        fff_file_matches(picker, &ac.query)
-                    } else {
-                        Vec::new()
-                    }
-                } else if let Some(ref picker) = self.fff_picker {
+                if let Some(ref picker) = self.fff_picker {
                     fff_file_matches(picker, &ac.query)
                 } else {
                     self.file_index.ensure_built(&self.working_dir);
@@ -699,15 +687,35 @@ impl Component for Editor {
                     code: KeyCode::Enter,
                     ..
                 } => {
+                    // @: dismiss + fall through to normal submit
+                    // /: accept selection (commands benefit from completion)
                     if self
                         .autocomplete
                         .as_ref()
-                        .is_some_and(|ac| !ac.items.is_empty())
+                        .is_some_and(|ac| ac.trigger == '/' && !ac.items.is_empty())
                     {
                         self.accept_autocomplete();
                         return None;
                     }
                     self.dismiss_autocomplete();
+                }
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Char(' '),
+                    ..
+                } => {
+                    self.textarea.insert_char(' ');
+                    // Space dismisses @ autocomplete (files don't have spaces in names)
+                    // For /, refresh_slash_autocomplete handles dismissal when space in cmd
+                    if self
+                        .autocomplete
+                        .as_ref()
+                        .is_some_and(|ac| ac.trigger == '@')
+                    {
+                        self.dismiss_autocomplete();
+                    } else if self.autocomplete.is_some() {
+                        self.refresh_slash_autocomplete();
+                    }
+                    return None;
                 }
                 crossterm::event::KeyEvent {
                     code: KeyCode::Char(c),
@@ -1260,42 +1268,6 @@ fn collect_file_paths(
     }
 }
 
-/// List immediate children of a directory (one level deep, no recursion).
-/// Directories get a trailing `/` so the user can type further to navigate deeper.
-pub fn shallow_dir_entries(
-    base_dir: &std::path::Path,
-    dir: &std::path::Path,
-    include_hidden: bool,
-    out: &mut Vec<String>,
-) {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read_dir.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !include_hidden && name.starts_with('.') {
-            continue;
-        }
-        if matches!(
-            name.as_str(),
-            "target" | "node_modules" | ".git" | ".michin" | "dist" | "build"
-        ) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if let Ok(relative) = path.strip_prefix(base_dir) {
-            let mut s = relative.to_string_lossy().replace('\\', "/");
-            if file_type.is_dir() {
-                s.push('/');
-            }
-            out.push(s);
-        }
-    }
-}
-
 fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
     if let Some(skill_query) = query.strip_prefix("skill:") {
         let skill_commands: Vec<&String> = commands
@@ -1372,42 +1344,4 @@ fn fff_file_matches(picker: &SharedFilePicker, query: &str) -> Vec<String> {
             path.replace('\\', "/")
         })
         .collect()
-}
-
-/// Filesystem fallback when FFF returns no matches for a query containing `/`.
-/// Uses shallow listing for trailing-slash queries (browsing), recursive for partial paths.
-fn fff_filesystem_fallback(working_dir: &Path, query: &str) -> Vec<String> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    let Some(slash_pos) = trimmed.rfind('/') else {
-        return Vec::new();
-    };
-    let dir_prefix = &trimmed[..slash_pos + 1];
-    let abs_dir = working_dir.join(dir_prefix.trim_end_matches('/'));
-    if !abs_dir.is_dir() {
-        return Vec::new();
-    }
-    let include_hidden = trimmed.starts_with('.');
-    let mut dir_entries = Vec::new();
-    if trimmed.ends_with('/') {
-        // Browsing: shallow listing only.
-        shallow_dir_entries(working_dir, &abs_dir, include_hidden, &mut dir_entries);
-    } else {
-        collect_file_paths(working_dir, &abs_dir, include_hidden, &mut dir_entries);
-    }
-    dir_entries.sort();
-    dir_entries.dedup();
-    if trimmed.ends_with('/') {
-        return dir_entries.into_iter().take(50).collect();
-    }
-    let filtered = fuzzy_filter(&dir_entries, trimmed, |s| s)
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    if !filtered.is_empty() {
-        return filtered.into_iter().take(50).collect();
-    }
-    dir_entries.into_iter().take(50).collect()
 }
