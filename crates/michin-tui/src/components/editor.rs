@@ -687,8 +687,6 @@ impl Component for Editor {
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    // @: dismiss + fall through to normal submit
-                    // /: accept selection (commands benefit from completion)
                     if self
                         .autocomplete
                         .as_ref()
@@ -704,8 +702,6 @@ impl Component for Editor {
                     ..
                 } => {
                     self.textarea.insert_char(' ');
-                    // Space dismisses @ autocomplete (files don't have spaces in names)
-                    // For /, refresh_slash_autocomplete handles dismissal when space in cmd
                     if self
                         .autocomplete
                         .as_ref()
