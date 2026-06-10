@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use michin_ai::{ContentBlock, Message};
@@ -635,9 +636,13 @@ async fn parse_session_file(path: &Path) -> SessionResult<Vec<Message>> {
 }
 
 /// Generate a unique session ID based on timestamp + random suffix.
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn generate_session_id() -> String {
     let ts = now_ms();
-    let random: u32 = (ts as u32).wrapping_mul(2654435761); // Knuth's multiplicative hash
+    let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Mix timestamp and counter: same-ms calls get distinct suffixes.
+    let random: u32 = ((ts ^ seq) as u32).wrapping_mul(2654435761);
     format!("{ts:x}-{random:x}")
 }
 
