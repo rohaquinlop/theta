@@ -58,7 +58,11 @@ mod model {
     fn test_requires_reasoning_on_replay() {
         let mut m = test_model();
         assert!(!m.requires_reasoning_on_replay());
+        // DeepSeek does not require reasoning_content on replay.
         m.compat = ModelCompat::for_deepseek();
+        assert!(!m.requires_reasoning_on_replay());
+        // MiMo requires reasoning_content on replay.
+        m.compat = ModelCompat::for_xiaomi();
         assert!(m.requires_reasoning_on_replay());
     }
 

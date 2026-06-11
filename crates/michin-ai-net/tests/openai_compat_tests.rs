@@ -822,3 +822,155 @@ fn tool_calls_sort_deterministic_on_same_name() {
     assert_eq!(tool_calls[0]["id"], json!("call_a"));
     assert_eq!(tool_calls[1]["id"], json!("call_b"));
 }
+
+// ── DeepSeek reasoning_content: absent when no thinking blocks ──
+
+#[test]
+fn deepseek_no_reasoning_content_when_no_thinking_blocks() {
+    // DeepSeek message with text only (no Thinking blocks, no tool calls).
+    // Should NOT set reasoning_content at all — matches original API response shape.
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![ContentBlock::text("Plain answer without reasoning.")],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+    // reasoning_content must be absent when no thinking happened.
+    assert!(
+        converted.get("reasoning_content").is_none(),
+        "DeepSeek without thinking blocks must not set reasoning_content, got: {:?}",
+        converted.get("reasoning_content")
+    );
+    assert_eq!(
+        converted["content"],
+        json!("Plain answer without reasoning.")
+    );
+}
+
+#[test]
+fn deepseek_has_reasoning_content_when_thinking_blocks_present() {
+    // DeepSeek message with Thinking blocks. Should set reasoning_content: "".
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "Let me reason about this.".into(),
+                signature: None,
+            },
+            ContentBlock::text("Here is the result."),
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+    assert_eq!(
+        converted["reasoning_content"],
+        json!(""),
+        "DeepSeek with thinking blocks must set reasoning_content to empty string"
+    );
+    assert!(
+        converted["content"]
+            .as_str()
+            .unwrap()
+            .contains("Here is the result.")
+    );
+}
+
+#[test]
+fn deepseek_tool_only_message_has_no_reasoning_content() {
+    // DeepSeek message with tool calls only (no Thinking blocks, no text).
+    // Should not set reasoning_content. The tool_calls are the content.
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![ContentBlock::ToolCall {
+            id: "call_1".into(),
+            name: "read".into(),
+            arguments: json!({"path": "Cargo.toml"}),
+        }],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::ToolUse),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+    // reasoning_content should not be set when there are no thinking blocks.
+    assert!(
+        converted.get("reasoning_content").is_none(),
+        "DeepSeek tool-only message must not set reasoning_content"
+    );
+    assert!(converted["tool_calls"].as_array().is_some());
+    assert_eq!(converted["content"], json!(""));
+}
+
+#[test]
+fn deepseek_tool_only_message_with_thinking_sets_empty_reasoning() {
+    // DeepSeek message with Thinking blocks + tool calls but no text.
+    // Should set reasoning_content: "" and include tool_calls.
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "Planning which tools to call...".into(),
+                signature: None,
+            },
+            ContentBlock::ToolCall {
+                id: "call_1".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "ls"}),
+            },
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::ToolUse),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+    // Has thinking blocks → set reasoning_content: ""
+    assert_eq!(converted["reasoning_content"], json!(""));
+    // tool_calls must still be present.
+    assert!(converted["tool_calls"].as_array().is_some());
+}
+
+#[test]
+fn deepseek_empty_message_skipped() {
+    // DeepSeek empty assistant (no text, no tool calls, no thinking).
+    // With requires_reasoning_on_replay=false, this should be skipped.
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: None,
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg);
+    assert!(
+        converted.is_none(),
+        "DeepSeek empty assistant should be skipped (returns None)"
+    );
+}

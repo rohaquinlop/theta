@@ -80,6 +80,12 @@ pub struct CompactionSettings {
     /// Consecutive compactions before auto-pausing. Set high to disable.
     #[serde(default = "default_auto_pause_threshold")]
     pub auto_pause_threshold: u32,
+    /// Minimum token savings required before compaction fires.
+    #[serde(default = "default_min_economic_savings_tokens")]
+    pub min_economic_savings_tokens: u32,
+    /// Token budget for truncating oversized tool results at turn end.
+    #[serde(default = "default_tool_result_cap_tokens")]
+    pub tool_result_cap_tokens: u32,
 }
 
 fn default_auto_pause_threshold() -> u32 {
@@ -96,6 +102,8 @@ impl Default for CompactionSettings {
             summarize_with_llm: None,
             summary_max_tokens: 512,
             auto_pause_threshold: 2,
+            min_economic_savings_tokens: 2000,
+            tool_result_cap_tokens: 3000,
         }
     }
 }
@@ -219,6 +227,12 @@ fn default_keep_recent_tokens() -> u32 {
 }
 fn default_summary_max_tokens() -> u32 {
     512
+}
+fn default_min_economic_savings_tokens() -> u32 {
+    2000
+}
+fn default_tool_result_cap_tokens() -> u32 {
+    3000
 }
 fn default_max_retries() -> u32 {
     2
@@ -650,6 +664,8 @@ pub fn to_agent_config(tc: &MichiNConfig) -> michin_agent_core::AgentLoopConfig 
             strategy,
             summary_max_tokens: tc.compaction.summary_max_tokens,
             auto_pause_threshold: tc.compaction.auto_pause_threshold,
+            min_economic_savings_tokens: tc.compaction.min_economic_savings_tokens,
+            tool_result_cap_tokens: tc.compaction.tool_result_cap_tokens,
         },
         retry: michin_agent_core::RetryConfig {
             max_retries: base.max_retries,
