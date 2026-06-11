@@ -1,7 +1,7 @@
 //! Input editor — multiline text input backed by `tui-textarea` with
 //! inline fuzzy autocomplete for @ files and / commands, paste handling.
 
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use fff_search::shared::SharedFilePicker;
 use fff_search::{FileSearchConfig, FuzzySearchOptions, PaginationArgs, QueryParser};
 use ratatui::{
@@ -622,26 +622,8 @@ impl Component for Editor {
             return None;
         }
 
-        // ── Mouse ──
-        if let Event::Mouse(mouse) = event {
-            if let Some(ref area) = self.last_inner_area {
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let col = mouse.column.saturating_sub(area.x) as usize;
-                        let row = mouse.row.saturating_sub(area.y) as usize;
-                        self.textarea
-                            .move_cursor(CursorMove::Jump(row as u16, col as u16));
-                        self.textarea.move_cursor(CursorMove::InViewport);
-                    }
-                    MouseEventKind::ScrollUp => {
-                        self.textarea.scroll(Scrolling::PageUp);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.textarea.scroll(Scrolling::PageDown);
-                    }
-                    _ => {}
-                }
-            }
+        // Mouse events are handled exclusively by the chat component.
+        if matches!(event, Event::Mouse(_)) {
             return None;
         }
 
