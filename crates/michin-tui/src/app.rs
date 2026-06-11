@@ -1646,6 +1646,7 @@ impl App {
                     "  Ctrl+P         Open model picker",
                     "  Ctrl+T         Cycle theme (default / monokai / user themes)",
                     "  Ctrl+C         Cancel agent execution / quit confirm (press twice)",
+                    "  Ctrl+Click     Open URL under cursor in browser",
                     "  Esc            Same as Ctrl+C",
                     "  Ctrl+U         Focus queued messages (arrows, Enter, Del)",
                     "  Tab            Switch focus between editor and chat",
@@ -1677,9 +1678,6 @@ impl App {
                     "  Esc            Close",
                     "  Backspace      Pop query char (model picker)",
                     "  Ctrl+F         Toggle favorite (model picker)",
-                    "",
-                    "Chat:",
-                    "  Ctrl+Click     Open URL under cursor in browser",
                 ]
                 .join("\n");
                 self.chat.add_message(ChatMessage {
