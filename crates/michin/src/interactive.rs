@@ -2382,12 +2382,12 @@ pub fn format_tool_summary(
                     .unwrap_or("(unknown)");
                 let total_lines = d.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
                 if total_lines == 0 {
-                    format!("read {path}")
+                    format!("read: {path}")
                 } else {
                     let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
                     let lines_read = d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!(
-                        "read {path}:{offset}-{end}",
+                        "read: {path}:{offset}-{end}",
                         end = offset.saturating_add(lines_read.saturating_sub(1))
                     )
                 }
@@ -2404,10 +2404,10 @@ pub fn format_tool_summary(
                 let changes = d.get("changes").and_then(|v| v.as_u64()).unwrap_or(0);
                 let diff = d.get("diff").and_then(|v| v.as_str()).unwrap_or("");
                 if diff.is_empty() {
-                    format!("edit {path}  {changes} change(s)")
+                    format!("edit: {path}  {changes} change(s)")
                 } else {
                     let (added, removed) = count_diff_lines(diff);
-                    format!("edit {path}  [+{added}/-{removed}]")
+                    format!("edit: {path}  [+{added}/-{removed}]")
                 }
             } else {
                 "edit".to_string()
@@ -2440,7 +2440,7 @@ pub fn format_tool_summary(
                     .and_then(|v| v.as_str())
                     .unwrap_or("(unknown)");
                 let bytes = d.get("bytes_written").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!("write {path}\n{bytes} bytes")
+                format!("write: {path}\n{bytes} bytes")
             } else {
                 "write".to_string()
             }
@@ -2449,7 +2449,7 @@ pub fn format_tool_summary(
             if let Some(d) = details {
                 let query = d.get("query").and_then(|v| v.as_str()).unwrap_or("?");
                 let count = d.get("results_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!("find \"{query}\" → {count} files")
+                format!("find: \"{query}\" → {count} files")
             } else {
                 "find".to_string()
             }
@@ -2460,9 +2460,9 @@ pub fn format_tool_summary(
                 let count = d.get("results_count").and_then(|v| v.as_u64()).unwrap_or(0);
                 let path = d.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 if path.is_empty() {
-                    format!("grep \"{query}\" → {count} matches")
+                    format!("grep: \"{query}\" → {count} matches")
                 } else {
-                    format!("grep \"{query}\" in {path} → {count} matches")
+                    format!("grep: \"{query}\" in {path} → {count} matches")
                 }
             } else {
                 "grep".to_string()
