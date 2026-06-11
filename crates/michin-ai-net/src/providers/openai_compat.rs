@@ -521,10 +521,12 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
             }
 
             // Reasoning content on replay:
-            // - DeepSeek: always send empty string. Re-uploading reasoning is
+            // - DeepSeek: only set `reasoning_content: ""` when the turn
+            //   actually produced thinking blocks. Re-uploading reasoning is
             //   paid prompt input (~500 tokens/turn) and breaks byte-stable
-            //   prefix cache. Matches reasonix: "reasoning_content is
-            //   deliberately NOT sent back."
+            //   prefix cache. When no thinking happened, don't set the field
+            //   at all — matches original API response shape. Matches reasonix:
+            //   "reasoning_content is deliberately NOT sent back."
             // - MiMo: must send actual reasoning_content when thinking is
             //   enabled and tool calls are present in history, otherwise the
             //   API returns 400. MiMo's SWA-based prefix cache handles the
@@ -545,18 +547,24 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
 
             if is_deepseek {
                 // DeepSeek: empty reasoning_content for cache stability.
-                msg_json["reasoning_content"] = json!("");
+                // Only set when the turn actually produced reasoning — otherwise
+                // don't add the field at all, matching the original API response
+                // shape and avoiding spurious byte shifts on replay.
                 if !thinking_blocks.is_empty() {
+                    msg_json["reasoning_content"] = json!("");
                     has_content = true;
                 }
+                // No thinking blocks: don't set reasoning_content at all.
             } else if !thinking_blocks.is_empty() {
                 // MiMo / OpenAI / OpenCode: send actual thinking content.
                 msg_json["reasoning_content"] = json!(thinking_blocks.join("\n\n"));
                 has_content = true;
             }
 
-            // Skip empty assistant replay messages unless provider explicitly
-            // requires reasoning_content to be present.
+            // Skip empty assistant replay messages.
+            // For MiMo: requires_reasoning_on_replay() returns true, so even
+            // empty messages are sent (MiMo needs reasoning_content present).
+            // For DeepSeek: returns false, so truly empty messages are skipped.
             if !has_content
                 && msg_json.get("tool_calls").is_none()
                 && !model.requires_reasoning_on_replay()

@@ -170,6 +170,15 @@ pub struct CompactionConfig {
     /// condition and pauses until a turn fits naturally. Set to `u32::MAX`
     /// to never auto-pause.
     pub auto_pause_threshold: u32,
+    /// Minimum token savings required before compaction fires.
+    /// Prevents expensive compactions that save little — the summary
+    /// LLM call + cache bust can outweigh the savings for small trims.
+    /// Default: 2000.
+    pub min_economic_savings_tokens: u32,
+    /// Token budget for truncating oversized tool results at turn end.
+    /// Tool results exceeding this are trimmed to avoid dragging stale
+    /// output through every future turn. Default: 3000.
+    pub tool_result_cap_tokens: u32,
 }
 
 impl Default for CompactionConfig {
@@ -181,6 +190,8 @@ impl Default for CompactionConfig {
             strategy: CompactionStrategy::Llm,
             summary_max_tokens: 512,
             auto_pause_threshold: 2,
+            min_economic_savings_tokens: 2000,
+            tool_result_cap_tokens: 3000,
         }
     }
 }

@@ -22,22 +22,23 @@ fn assistant(text: &str) -> Message {
     }
 }
 
+fn default_config() -> CompactionConfig {
+    CompactionConfig {
+        enabled: true,
+        reserve_tokens: 0,
+        keep_recent_tokens: 20,
+        strategy: CompactionStrategy::Textual,
+        summary_max_tokens: 512,
+        auto_pause_threshold: 2,
+        min_economic_savings_tokens: 0,
+        tool_result_cap_tokens: 3000,
+    }
+}
+
 #[test]
 fn test_no_compaction_when_under_budget() {
     let msgs = vec![user("hello"), assistant("hi there")];
-    let result = compact_messages(
-        &msgs,
-        0,
-        100,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 0,
-            keep_recent_tokens: 20,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let result = compact_messages(&msgs, 0, 100, &default_config());
     assert_eq!(result.trimmed_count, 0);
     assert_eq!(result.messages.len(), 2);
 }
@@ -52,19 +53,7 @@ fn test_compaction_preserves_prefix_and_tail() {
         user("current question"),
         assistant("current answer"),
     ];
-    let result = compact_messages(
-        &msgs,
-        0,
-        30,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 0,
-            keep_recent_tokens: 20,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let result = compact_messages(&msgs, 0, 30, &default_config());
     assert!(result.trimmed_count > 0);
     assert!(result.messages.len() < msgs.len());
 
@@ -101,19 +90,7 @@ fn test_compaction_preserves_early_prefix_at_position_zero() {
         user("what is the current status of the project"),
         assistant("the project is in good shape. all tests pass and the new feature is complete."),
     ];
-    let result = compact_messages(
-        &msgs,
-        0,
-        100,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 0,
-            keep_recent_tokens: 20,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let result = compact_messages(&msgs, 0, 100, &default_config());
     assert!(
         result.trimmed_count > 0,
         "compaction should have trimmed messages"
@@ -150,19 +127,10 @@ fn test_disabled_compaction() {
         user("message 2"),
         assistant("reply 2"),
     ];
-    let result = compact_messages(
-        &msgs,
-        0,
-        2,
-        &CompactionConfig {
-            enabled: false,
-            reserve_tokens: 0,
-            keep_recent_tokens: 0,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let mut cfg = default_config();
+    cfg.enabled = false;
+    cfg.keep_recent_tokens = 0;
+    let result = compact_messages(&msgs, 0, 2, &cfg);
     assert_eq!(result.trimmed_count, 0);
     assert_eq!(result.messages.len(), 4);
 }
@@ -170,19 +138,9 @@ fn test_disabled_compaction() {
 #[test]
 fn test_reserve_tokens_reduces_available() {
     let msgs = vec![user("short"), assistant("ok")];
-    let result = compact_messages(
-        &msgs,
-        0,
-        100,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 95,
-            keep_recent_tokens: 20,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let mut cfg = default_config();
+    cfg.reserve_tokens = 95;
+    let result = compact_messages(&msgs, 0, 100, &cfg);
     assert_eq!(result.trimmed_count, 0);
 }
 
@@ -193,19 +151,9 @@ fn test_system_prompt_accounted() {
         assistant("brief reply"),
         user("latest question"),
     ];
-    let result = compact_messages(
-        &msgs,
-        10,
-        20,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 0,
-            keep_recent_tokens: 5,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let mut cfg = default_config();
+    cfg.keep_recent_tokens = 5;
+    let result = compact_messages(&msgs, 10, 20, &cfg);
     assert!(result.trimmed_count > 0);
 }
 
@@ -216,19 +164,9 @@ fn test_compaction_inserts_summary() {
         assistant("old answer about files"),
         user("latest question"),
     ];
-    let result = compact_messages(
-        &msgs,
-        0,
-        8,
-        &CompactionConfig {
-            enabled: true,
-            reserve_tokens: 0,
-            keep_recent_tokens: 5,
-            strategy: CompactionStrategy::Textual,
-            summary_max_tokens: 512,
-            auto_pause_threshold: 2,
-        },
-    );
+    let mut cfg = default_config();
+    cfg.keep_recent_tokens = 5;
+    let result = compact_messages(&msgs, 0, 8, &cfg);
     assert!(result.trimmed_count > 0);
     // Find the summary message (contains "Context compacted").
     let has_summary = result.messages.iter().any(|m| match m {
@@ -242,4 +180,26 @@ fn test_compaction_inserts_summary() {
         has_summary,
         "expected a summary message in compacted output"
     );
+}
+
+#[test]
+fn test_min_economic_savings_skips_small_trims() {
+    let msgs = vec![
+        user("a short message"),
+        assistant("a short reply"),
+        user("another"),
+        assistant("another reply"),
+        user("latest q"),
+        assistant("latest a"),
+    ];
+    let mut cfg = default_config();
+    cfg.min_economic_savings_tokens = 999_999; // unreachable threshold
+    // With an impossibly high economic threshold, compaction should be skipped
+    // even though the context would benefit from it.
+    let result = compact_messages(&msgs, 0, 10, &cfg);
+    assert_eq!(
+        result.trimmed_count, 0,
+        "compaction should be skipped when savings don't meet threshold"
+    );
+    assert_eq!(result.messages.len(), msgs.len());
 }

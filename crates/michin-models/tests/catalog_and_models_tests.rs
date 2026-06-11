@@ -82,8 +82,8 @@ mod deepseek_models {
             assert!(m.context_window > 0);
             assert!(m.max_tokens > 0);
             assert!(
-                m.requires_reasoning_on_replay(),
-                "DeepSeek models must strip reasoning content on replay"
+                !m.requires_reasoning_on_replay(),
+                "DeepSeek models must NOT require reasoning content on replay"
             );
         }
     }

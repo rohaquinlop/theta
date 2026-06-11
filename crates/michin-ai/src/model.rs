@@ -133,14 +133,16 @@ impl Model {
         self.thinking_level_map.get(&level).and_then(|v| v.clone())
     }
 
-    /// Whether this model needs empty reasoning_content on replayed
-    /// assistant messages. Derived from `thinking_format` — DeepSeek
-    /// and MiMo strip reasoning to preserve prefix cache stability.
-    /// OpenAI/OpenCode send actual thinking content on replay.
+    /// Whether this model needs reasoning content on replayed
+    /// assistant messages. Derived from `thinking_format` — MiMo
+    /// requires it (API returns 400 when thinking is enabled and
+    /// tool calls are present without it). DeepSeek does NOT require
+    /// it — Reasonix strips it entirely, and sending it prevents
+    /// empty assistant message skipping.
     pub fn requires_reasoning_on_replay(&self) -> bool {
         matches!(
             self.compat.thinking_format,
-            Some(ThinkingFormat::DeepSeek | ThinkingFormat::XiaomiMiMo)
+            Some(ThinkingFormat::XiaomiMiMo)
         )
     }
 

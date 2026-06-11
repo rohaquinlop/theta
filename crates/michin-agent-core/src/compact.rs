@@ -133,6 +133,19 @@ pub fn compact_messages(
     output.extend_from_slice(&messages[tail_start..]);
     let tokens_after = total_tokens(&output);
 
+    // Economic threshold: skip compaction if the token savings are too small
+    // to justify the summary LLM call + cache bust overhead.
+    let savings = tokens_before.saturating_sub(tokens_after);
+    if savings < config.min_economic_savings_tokens {
+        return CompactionResult {
+            messages: messages.to_vec(),
+            trimmed_count: 0,
+            tokens_before,
+            tokens_after: tokens_before,
+            trim_start: 0,
+        };
+    }
+
     CompactionResult {
         messages: output,
         trimmed_count,
